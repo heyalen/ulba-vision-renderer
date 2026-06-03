@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/render-vision.ts": {
+      "maxDuration": 300
+    }
+  }
+}
