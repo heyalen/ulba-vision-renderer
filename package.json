@@ -1,0 +1,10 @@
+{
+  "name": "ulba-vision-renderer",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "@vercel/node": "^3.2.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}
