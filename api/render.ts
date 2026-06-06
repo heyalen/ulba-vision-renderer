@@ -71,7 +71,7 @@ Always start with: "Keep exact shape and form unchanged. Change only color and f
     const imgBuffer = await imgRes.arrayBuffer();
     const base64 = Buffer.from(imgBuffer).toString('base64');
 
-    // 4. Airtable Record erstellen (ohne Bild zuerst)
+    // 4. Airtable Record erstellen
     const createRes = await fetch(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`,
       {
@@ -90,12 +90,13 @@ Always start with: "Keep exact shape and form unchanged. Change only color and f
         }),
       }
     );
-    const createData = await createRes.json() as { id: string };
+    const createData = await createRes.json() as { id: string; error?: string };
+    if (!createData.id) throw new Error(`Airtable Record Create fehlgeschlagen: ${JSON.stringify(createData)}`);
     const recordId = createData.id;
 
     // 5. Bild als base64 uploaden
     const fieldId = 'fldFd5qi64yELhKna';
-    await fetch(
+    const uploadRes = await fetch(
       `https://content.airtable.com/v0/${AIRTABLE_BASE}/${recordId}/${fieldId}/uploadAttachment`,
       {
         method: 'POST',
@@ -110,6 +111,10 @@ Always start with: "Keep exact shape and form unchanged. Change only color and f
         }),
       }
     );
+    if (!uploadRes.ok) {
+      const uploadErr = await uploadRes.text();
+      throw new Error(`Airtable Upload fehlgeschlagen: ${uploadErr}`);
+    }
 
     return res.status(200).json({
       renderingUrl,
