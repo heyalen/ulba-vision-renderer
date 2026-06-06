@@ -82,7 +82,7 @@ Always start with: "Keep exact shape and form unchanged. Change only color and f
         },
         body: JSON.stringify({
           fields: {
-            System: [{ id: systemId }],
+            System: [systemId],
             Query_Input: query,
             Rendering_Prompt: renderingPrompt,
             Created_At: new Date().toISOString(),
