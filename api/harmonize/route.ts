@@ -6,7 +6,7 @@ const AIRTABLE_PAT = process.env.AIRTABLE_PAT!;
 const BASE_ID = 'app0QFyInfhvk66MC';
 const TABLE_ID = 'tblB1kWay9TvX3rGv';
 
-const BG = { r: 168, g: 188, b: 197, alpha: 1 }; // #A8BCC5
+const BG = { r: 255, g: 255, b: 255, alpha: 1 }; // Weiss
 const CANVAS = 800;
 const PRODUCT_SCALE = 0.72;
 
@@ -55,22 +55,6 @@ async function buildSingle(png: Buffer, sharp: any): Promise<Buffer> {
     .toBuffer();
 }
 
-async function buildBaseCap(basePng: Buffer, capPng: Buffer, sharp: any): Promise<Buffer> {
-  const half = CANVAS / 2;
-  const maxH = Math.round(CANVAS * PRODUCT_SCALE);
-  const base = await toCanvas(basePng, sharp, half, CANVAS, Math.round(half * 0.65), maxH, 0);
-  const cap = await toCanvas(capPng, sharp, half, CANVAS, Math.round(half * 0.50), Math.round(maxH * 0.65), half);
-  return sharp({
-    create: { width: CANVAS, height: CANVAS, channels: 4, background: BG },
-  })
-    .composite([
-      { input: base.buf, left: base.left, top: base.top },
-      { input: cap.buf, left: cap.left, top: cap.top },
-    ])
-    .jpeg({ quality: 92 })
-    .toBuffer();
-}
-
 async function uploadAirtable(recordId: string, field: string, jpg: Buffer, filename: string): Promise<void> {
   const res = await fetch(
     `https://content.airtable.com/v0/${BASE_ID}/${recordId}/${field}/uploadAttachment`,
@@ -105,12 +89,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (req.headers['x-render-secret'] !== RENDER_SECRET) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { recordId, bildTyp, urlSystem, urlBase, urlCap } = req.body as {
+  const { recordId, bildTyp, urlSystem, urlBase } = req.body as {
     recordId: string;
     bildTyp: 'system' | 'base+cap_separat' | 'base_only';
     urlSystem?: string;
     urlBase?: string;
-    urlCap?: string;
   };
 
   if (!recordId || !bildTyp) return res.status(400).json({ error: 'Missing recordId or bildTyp' });
@@ -118,29 +101,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const sharp = (await import('sharp')).default;
 
   try {
-    if (bildTyp === 'system' && urlSystem) {
-      const png = await birefnet(urlSystem.trim());
-      const jpg = await buildSingle(png, sharp);
-      await uploadAirtable(recordId, 'Bild_Harmonisiert', jpg, `harm_${recordId}.jpg`);
+    // Alle 3 Pfade: immer nur 1 Bild harmonisieren
+    // base+cap_separat → nur Base (Caps werden im Frontend als Slider angezeigt)
+    const sourceUrl =
+      bildTyp === 'system' ? urlSystem :
+      bildTyp === 'base+cap_separat' ? urlBase :
+      bildTyp === 'base_only' ? urlBase : undefined;
 
-    } else if (bildTyp === 'base+cap_separat' && urlBase && urlCap) {
-      const [basePng, capPng] = await Promise.all([
-        birefnet(urlBase.trim()),
-        birefnet(urlCap.trim()),
-      ]);
-      const jpg = await buildBaseCap(basePng, capPng, sharp);
-      await uploadAirtable(recordId, 'Bild_Harmonisiert', jpg, `harm_${recordId}.jpg`);
+    if (!sourceUrl) return res.status(400).json({ error: 'Missing source URL' });
 
-    } else if (bildTyp === 'base_only' && urlBase) {
-      const png = await birefnet(urlBase.trim());
-      const jpg = await buildSingle(png, sharp);
-      await uploadAirtable(recordId, 'Bild_Harmonisiert', jpg, `harm_${recordId}.jpg`);
-
-    } else {
-      return res.status(400).json({ error: 'Missing required URL fields for bildTyp' });
-    }
-
+    const png = await birefnet(sourceUrl.trim());
+    const jpg = await buildSingle(png, sharp);
+    await uploadAirtable(recordId, 'Bild_Harmonisiert', jpg, `harm_${recordId}.jpg`);
     await setDone(recordId);
+
     return res.status(200).json({ ok: true, recordId });
 
   } catch (err) {
