@@ -1,8 +1,4 @@
-// Pfad: ulba-vision-renderer/app/api/harmonize/route.ts
-// Vercel Serverless — Node.js Runtime (nicht Edge!)
-export const runtime = 'nodejs';
-
-import type { NextRequest } from 'next/server';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 const FAL_API_KEY = process.env.FAL_API_KEY!;
 const RENDER_SECRET = process.env.RENDER_SECRET!;
@@ -14,7 +10,6 @@ const BG = { r: 168, g: 188, b: 197, alpha: 1 }; // #A8BCC5
 const CANVAS = 800;
 const PRODUCT_SCALE = 0.72;
 
-// fal.ai birefnet — Hintergrund entfernen → PNG mit Transparenz
 async function birefnet(imageUrl: string): Promise<Buffer> {
   const res = await fetch('https://fal.run/fal-ai/birefnet', {
     method: 'POST',
@@ -29,7 +24,6 @@ async function birefnet(imageUrl: string): Promise<Buffer> {
   return Buffer.from(await (await fetch(image.url)).arrayBuffer());
 }
 
-// Produkt auf Canvas platzieren (zentriert, skaliert)
 async function toCanvas(
   png: Buffer,
   sharp: any,
@@ -49,7 +43,6 @@ async function toCanvas(
   return { buf, left, top };
 }
 
-// Pfad A + C: 1 Produkt zentriert auf Canvas
 async function buildSingle(png: Buffer, sharp: any): Promise<Buffer> {
   const maxH = Math.round(CANVAS * PRODUCT_SCALE);
   const maxW = Math.round(CANVAS * 0.70);
@@ -62,16 +55,11 @@ async function buildSingle(png: Buffer, sharp: any): Promise<Buffer> {
     .toBuffer();
 }
 
-// Pfad B: Base links + Cap rechts auf einem Canvas
 async function buildBaseCap(basePng: Buffer, capPng: Buffer, sharp: any): Promise<Buffer> {
-  const half = CANVAS / 2; // 400px pro Seite
+  const half = CANVAS / 2;
   const maxH = Math.round(CANVAS * PRODUCT_SCALE);
-
-  // Base: linke Hälfte, max 65% der halben Breite
   const base = await toCanvas(basePng, sharp, half, CANVAS, Math.round(half * 0.65), maxH, 0);
-  // Cap: rechte Hälfte, max 50% der halben Breite (Caps sind kleiner)
   const cap = await toCanvas(capPng, sharp, half, CANVAS, Math.round(half * 0.50), Math.round(maxH * 0.65), half);
-
   return sharp({
     create: { width: CANVAS, height: CANVAS, channels: 4, background: BG },
   })
@@ -83,13 +71,7 @@ async function buildBaseCap(basePng: Buffer, capPng: Buffer, sharp: any): Promis
     .toBuffer();
 }
 
-// Airtable: Bild hochladen via content.airtable.com
-async function uploadAirtable(
-  recordId: string,
-  field: string,
-  jpg: Buffer,
-  filename: string
-): Promise<void> {
+async function uploadAirtable(recordId: string, field: string, jpg: Buffer, filename: string): Promise<void> {
   const res = await fetch(
     `https://content.airtable.com/v0/${BASE_ID}/${recordId}/${field}/uploadAttachment`,
     {
@@ -98,17 +80,12 @@ async function uploadAirtable(
         'Authorization': `Bearer ${AIRTABLE_PAT}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        contentType: 'image/jpeg',
-        filename,
-        file: jpg.toString('base64'),
-      }),
+      body: JSON.stringify({ contentType: 'image/jpeg', filename, file: jpg.toString('base64') }),
     }
   );
   if (!res.ok) throw new Error(`Airtable upload: ${res.status} ${await res.text()}`);
 }
 
-// Airtable: Vis_Status → done
 async function setDone(recordId: string): Promise<void> {
   const res = await fetch(
     `https://api.airtable.com/v0/${BASE_ID}/${TABLE_ID}/${recordId}`,
@@ -124,11 +101,11 @@ async function setDone(recordId: string): Promise<void> {
   if (!res.ok) throw new Error(`Airtable setDone: ${res.status}`);
 }
 
-export async function POST(req: NextRequest) {
-  if (req.headers.get('x-render-secret') !== RENDER_SECRET)
-    return new Response('Unauthorized', { status: 401 });
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.headers['x-render-secret'] !== RENDER_SECRET) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { recordId, bildTyp, urlSystem, urlBase, urlCap } = await req.json() as {
+  const { recordId, bildTyp, urlSystem, urlBase, urlCap } = req.body as {
     recordId: string;
     bildTyp: 'system' | 'base+cap_separat' | 'base_only';
     urlSystem?: string;
@@ -136,10 +113,8 @@ export async function POST(req: NextRequest) {
     urlCap?: string;
   };
 
-  if (!recordId || !bildTyp)
-    return new Response('Missing recordId or bildTyp', { status: 400 });
+  if (!recordId || !bildTyp) return res.status(400).json({ error: 'Missing recordId or bildTyp' });
 
-  // sharp dynamisch importieren (Vercel Serverless)
   const sharp = (await import('sharp')).default;
 
   try {
@@ -149,7 +124,6 @@ export async function POST(req: NextRequest) {
       await uploadAirtable(recordId, 'Bild_Harmonisiert', jpg, `harm_${recordId}.jpg`);
 
     } else if (bildTyp === 'base+cap_separat' && urlBase && urlCap) {
-      // Beide Bilder parallel freistellen → spart ~50% Zeit
       const [basePng, capPng] = await Promise.all([
         birefnet(urlBase.trim()),
         birefnet(urlCap.trim()),
@@ -163,14 +137,14 @@ export async function POST(req: NextRequest) {
       await uploadAirtable(recordId, 'Bild_Harmonisiert', jpg, `harm_${recordId}.jpg`);
 
     } else {
-      return new Response('Missing required URL fields for bildTyp', { status: 400 });
+      return res.status(400).json({ error: 'Missing required URL fields for bildTyp' });
     }
 
     await setDone(recordId);
-    return new Response(JSON.stringify({ ok: true, recordId }), { status: 200 });
+    return res.status(200).json({ ok: true, recordId });
 
   } catch (err) {
     console.error('[harmonize]', err);
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
+    return res.status(500).json({ error: String(err) });
   }
 }
