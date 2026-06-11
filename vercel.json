@@ -5,6 +5,10 @@
     },
     "api/render.ts": {
       "maxDuration": 60
+    },
+    "api/harmonize/route.ts": {
+      "memory": 1024,
+      "maxDuration": 30
     }
   }
 }
