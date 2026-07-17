@@ -1,129 +1,356 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { VercelRequest, VercelResponse } from '@vercel/node';
 
-const BASE_ID = 'app0QFyInfhvk66MC';
+// ── Config ──────────────────────────────────────────────────────────
+const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
 const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
+const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
 
-function cosineSimilarity(a: Record<string, number>, b: Record<string, number>): number {
-  const keys = Object.keys(a);
-  let dot = 0, normA = 0, normB = 0;
-  for (const k of keys) {
-    const av = a[k] ?? 0;
-    const bv = b[k] ?? 0;
-    dot += av * bv;
-    normA += av * av;
-    normB += bv * bv;
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+export const config = { api: { bodyParser: true } };
+
+// ── Helpers ─────────────────────────────────────────────────────────
+function selectName(field: any): string {
+  if (!field) return '';
+  if (typeof field === 'string') return field;
+  return field.name || '';
 }
 
-async function parseQueryToVector(query: string, openrouterKey: string): Promise<Record<string, number>> {
-  const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+function multiSelectNames(field: any): string[] {
+  if (!Array.isArray(field)) return [];
+  return field.map((f: any) => typeof f === 'string' ? f : f.name || '').filter(Boolean);
+}
+
+function imgUrl(attachmentField: any): string | null {
+  if (Array.isArray(attachmentField) && attachmentField.length > 0) {
+    return attachmentField[0].url || attachmentField[0].thumbnails?.full?.url || null;
+  }
+  return null;
+}
+
+async function airtableListAll(table: string, formula?: string): Promise<any[]> {
+  const params = new URLSearchParams({ pageSize: '100' });
+  if (formula) params.set('filterByFormula', formula);
+  const res = await fetch(
+    `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}?${params}`,
+    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+  );
+  if (!res.ok) throw new Error(`Airtable list ${table}: ${res.status}`);
+  const data = await res.json();
+  return data.records || [];
+}
+
+// ── Query Parsing ───────────────────────────────────────────────────
+interface ParsedQuery {
+  raw: string;
+  sizeMentions: string[];       // e.g. ["50ml", "100ml"]
+  materialMentions: string[];   // e.g. ["Glass"]
+  typeMentions: string[];       // e.g. ["Bottle"]
+  closureMentions: string[];    // e.g. ["Pump"]
+}
+
+function parseQuery(query: string): ParsedQuery {
+  const q = query.toLowerCase();
+
+  // Size: extract patterns like "50ml", "100 ml", "250ML"
+  const sizeMatches = query.match(/\d+\s*ml/gi) || [];
+  const sizeMentions = sizeMatches.map(s => s.replace(/\s/g, '').toLowerCase());
+
+  // Material keywords → Airtable option names
+  const materialMap: Record<string, string> = {
+    'glass': 'Glas', 'glas': 'Glas', 'gläser': 'Glas',
+    'plastic': 'Kunststoff', 'kunststoff': 'Kunststoff',
+    'pp': 'PP', 'hdpe': 'HDPE', 'pet': 'PET', 'petg': 'PETG',
+    'aluminium': 'Aluminium', 'aluminum': 'Aluminium', 'alu': 'Aluminium',
+    'pcr': 'Glas PCR',
+  };
+  const materialMentions = Object.entries(materialMap)
+    .filter(([kw]) => q.includes(kw))
+    .map(([, val]) => val)
+    .filter((v, i, a) => a.indexOf(v) === i);
+
+  // Type keywords
+  const typeMap: Record<string, string> = {
+    'bottle': 'Bottle', 'flasche': 'Bottle', 'flaschen': 'Bottle',
+    'jar': 'Jar', 'tiegel': 'Jar', 'dose': 'Jar',
+    'tube': 'Tube', 'tuben': 'Tube',
+    'airless': 'Airless',
+  };
+  const typeMentions = Object.entries(typeMap)
+    .filter(([kw]) => q.includes(kw))
+    .map(([, val]) => val)
+    .filter((v, i, a) => a.indexOf(v) === i);
+
+  // Closure keywords
+  const closureMap: Record<string, string> = {
+    'pump': 'Pump', 'pumpe': 'Pump',
+    'spray': 'Spray', 'sprüh': 'Spray',
+    'dropper': 'Dropper', 'pipette': 'Dropper', 'tropfer': 'Dropper',
+    'flip': 'Flip Top', 'flip-top': 'Flip Top',
+    'screw': 'Screw Cap', 'schraub': 'Screw Cap',
+    'disc': 'Disc Top', 'disc-top': 'Disc Top',
+  };
+  const closureMentions = Object.entries(closureMap)
+    .filter(([kw]) => q.includes(kw))
+    .map(([, val]) => val)
+    .filter((v, i, a) => a.indexOf(v) === i);
+
+  return { raw: query, sizeMentions, materialMentions, typeMentions, closureMentions };
+}
+
+// ── Produkt_Regeln Matching ─────────────────────────────────────────
+interface CategoryConstraints {
+  category: string;
+  bevorzugtMaterial: string[];
+  nichtMaterial: string[];
+  bevorzugtClosure: string[];
+  nichtClosure: string[];
+  bevorzugtType: string[];
+}
+
+function matchCategory(query: string, regeln: any[]): CategoryConstraints | null {
+  const q = query.toLowerCase();
+  for (const r of regeln) {
+    const keywords = (r.fields['Keywords'] || '').split(/[,\n]/).map((k: string) => k.trim().toLowerCase()).filter(Boolean);
+    if (keywords.some((k: string) => q.includes(k))) {
+      const f = r.fields;
+      const split = (text: string | undefined) => text ? text.split(/[,\n]/).map(s => s.trim()).filter(Boolean) : [];
+      return {
+        category: f['Kategorie'] || '',
+        bevorzugtMaterial: split(f['Bevorzugt_Material']),
+        nichtMaterial: split(f['Nicht_Material']),
+        bevorzugtClosure: split(f['Bevorzugt_Closure']),
+        nichtClosure: split(f['Nicht_Closure']),
+        bevorzugtType: split(f['Bevorzugt_Type']),
+      };
+    }
+  }
+  return null;
+}
+
+// ── Hard Filter ─────────────────────────────────────────────────────
+interface ProductData {
+  id: string;
+  name: string;
+  type: string;
+  material: string[];
+  form: string[];
+  closure: string;
+  description: string;
+  imageUrl: string | null;
+  capabilities: string[];
+  availableSizes: string[];
+  availableMaterials: string[];
+  capCount: number;
+}
+
+function extractProduct(rec: any): ProductData {
+  const f = rec.fields;
+  const caps: string[] = [];
+  if (f['SF_Einfaerbbar']) caps.push('Einfärbbar');
+  if (f['SF_Mattierbar']) caps.push('Mattierbar');
+  if (f['SF_HotFoil']) caps.push('Hot Foil');
+  if (f['SF_Embossing']) caps.push('Embossing');
+  if (f['SF_Siebdruck']) caps.push('Siebdruck');
+  if (f['SF_PCR']) caps.push('PCR');
+  if (f['SF_Refillable']) caps.push('Refillable');
+  if (f['SF_Airless']) caps.push('Airless');
+
+  return {
+    id: rec.id,
+    name: f['Page Titel'] || f['System ID'] || rec.id,
+    type: selectName(f['Type']),
+    material: multiSelectNames(f['Material']),
+    form: multiSelectNames(f['Form']),
+    closure: selectName(f['Closure']),
+    description: f['Kurzbeschreibung'] || '',
+    imageUrl: imgUrl(f['Bild_Harmonisiert']),
+    capabilities: caps,
+    availableSizes: multiSelectNames(f['Available_Sizes']),
+    availableMaterials: multiSelectNames(f['Available_Materials']),
+    capCount: (f['Caps'] as string[] || []).length,
+  };
+}
+
+function hardFilter(
+  products: ProductData[],
+  parsed: ParsedQuery,
+  category: CategoryConstraints | null
+): ProductData[] {
+  return products.filter(p => {
+    // User-explicit material filter
+    if (parsed.materialMentions.length > 0) {
+      const hasMatch = parsed.materialMentions.some(m =>
+        p.material.some(pm => pm.toLowerCase().includes(m.toLowerCase())) ||
+        p.availableMaterials.some(am => am.toLowerCase().includes(m.toLowerCase()))
+      );
+      if (!hasMatch) return false;
+    }
+
+    // User-explicit type filter
+    if (parsed.typeMentions.length > 0) {
+      if (!parsed.typeMentions.some(t => p.type.toLowerCase().includes(t.toLowerCase()))) return false;
+    }
+
+    // User-explicit closure filter
+    if (parsed.closureMentions.length > 0) {
+      if (!parsed.closureMentions.some(c => p.closure.toLowerCase().includes(c.toLowerCase()))) return false;
+    }
+
+    // User-explicit size filter
+    if (parsed.sizeMentions.length > 0) {
+      if (p.availableSizes.length > 0) {
+        const hasSize = parsed.sizeMentions.some(s =>
+          p.availableSizes.some(as => as.toLowerCase().includes(s))
+        );
+        if (!hasSize) return false;
+      }
+      // If product has no size data, don't exclude (data gap)
+    }
+
+    // Category constraints from Produkt_Regeln
+    if (category) {
+      // Exclude forbidden materials
+      if (category.nichtMaterial.length > 0) {
+        const forbidden = category.nichtMaterial.some(nm =>
+          p.material.some(pm => pm.toLowerCase().includes(nm.toLowerCase()))
+        );
+        if (forbidden) return false;
+      }
+
+      // Exclude forbidden closures
+      if (category.nichtClosure.length > 0) {
+        const forbidden = category.nichtClosure.some(nc =>
+          p.closure.toLowerCase().includes(nc.toLowerCase())
+        );
+        if (forbidden) return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+// ── Claude Ranking ──────────────────────────────────────────────────
+interface RankedProduct extends ProductData {
+  score: number;
+  reasoning: string;
+}
+
+async function claudeRank(
+  query: string,
+  products: ProductData[],
+  category: CategoryConstraints | null
+): Promise<RankedProduct[]> {
+  if (products.length === 0) return [];
+
+  const productList = products.map((p, i) => 
+    `[${i}] ${p.name} | Type: ${p.type} | Material: ${p.material.join(',')} | Form: ${p.form.join(',')} | Closure: ${p.closure} | Capabilities: ${p.capabilities.join(',')} | Sizes: ${p.availableSizes.join(',')} | ${p.description}`
+  ).join('\n');
+
+  let categoryContext = '';
+  if (category) {
+    categoryContext = `\nCategory "${category.category}" matched. Preferred materials: ${category.bevorzugtMaterial.join(', ')}. Preferred closure: ${category.bevorzugtClosure.join(', ')}. Preferred type: ${category.bevorzugtType.join(', ')}.`;
+  }
+
+  const systemPrompt = `You are a beauty packaging sourcing expert. 
+A brand searches for packaging with this query. Rank how well each product fits the query emotionally and functionally.
+Consider: brand vibe, target audience, product category fit, material appropriateness, form language.
+Products that match category preferences (preferred material, closure, type) should score higher.
+${categoryContext}
+
+Respond ONLY with a JSON array, no other text. Format:
+[{"index":0,"score":85,"reasoning":"Brief reason"},{"index":1,"score":42,"reasoning":"Brief reason"}]
+
+Score 0-100. Be decisive — spread scores widely. Best fit near 90+, poor fit below 30.`;
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${openrouterKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://ulba.ai',
+      'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+      'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'meta-llama/llama-3.1-8b-instruct',
-      messages: [{
-        role: 'user',
-        content: `You are a beauty packaging emotion analyzer. Given a search query, output ONLY a JSON object with these 15 keys and float values 0.0-1.0 based on how strongly the query implies each dimension:
-d01 (emotion/feeling), d02 (ritual/occasion), d03 (aesthetics/style), d04 (target group specificity), d05 (prestige/price level), d06a (feminine signal), d06b (masculine signal), d07 (brand archetype strength), d08 (sensory/haptic), d09 (sustainability values), d10 (product category fit), d11 (cultural reference), d12 (psychographic need), d13 (zeitgeist/trend), d14 (brand persona)
-
-Query: "${query}"
-
-Respond with ONLY valid JSON, no explanation. Example: {"d01":0.7,"d02":0.3,"d03":0.8,"d04":0.6,"d05":0.8,"d06a":0.1,"d06b":0.9,"d07":0.5,"d08":0.4,"d09":0.2,"d10":0.7,"d11":0.3,"d12":0.6,"d13":0.5,"d14":0.7}`
-      }],
-      max_tokens: 200,
-      temperature: 0,
+      model: 'claude-haiku-4-5',
+      max_tokens: 2000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: `Query: "${query}"\n\nProducts:\n${productList}` }],
     }),
   });
-  const data: any = await resp.json();
-  const text = data?.choices?.[0]?.message?.content?.trim() ?? '{}';
+
+  const data = await res.json() as { content: Array<{ text: string }> };
+  const text = data.content[0].text.trim();
+
   try {
-    return JSON.parse(text);
-  } catch {
-    return {};
+    const cleaned = text.replace(/```json\s?|```/g, '').trim();
+    const rankings = JSON.parse(cleaned) as Array<{ index: number; score: number; reasoning: string }>;
+
+    return rankings
+      .map(r => ({
+        ...products[r.index],
+        score: r.score,
+        reasoning: r.reasoning,
+      }))
+      .filter(r => r.id) // safety: skip invalid indices
+      .sort((a, b) => b.score - a.score);
+  } catch (e) {
+    // Fallback: return all products unranked
+    return products.map(p => ({ ...p, score: 50, reasoning: 'Ranking unavailable' }));
   }
 }
 
+// ── Main Handler ────────────────────────────────────────────────────
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method !== 'POST' && req.method !== 'GET') {
-    return res.status(405).json({ error: 'POST or GET only' });
-  }
+  const { query } = req.body as { query: string };
+  if (!query) return res.status(400).json({ error: 'query ist erforderlich' });
 
-  const query = (req.method === 'POST' ? req.body?.query : req.query?.q) as string;
-  if (!query || query.trim().length < 2) return res.status(400).json({ error: 'query required' });
-
-  const limit = Math.min(parseInt((req.body?.limit ?? req.query?.limit ?? '12') as string) || 12, 24);
-
-  const { OPENROUTER_API_KEY, AIRTABLE_PAT } = process.env;
-  if (!OPENROUTER_API_KEY || !AIRTABLE_PAT) return res.status(500).json({ error: 'Missing env vars' });
-
-  const airHeaders = { 'Authorization': `Bearer ${AIRTABLE_PAT}`, 'Content-Type': 'application/json' };
+  if (!process.env.AIRTABLE_PAT) return res.status(500).json({ error: 'AIRTABLE_PAT env var fehlt' });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY env var fehlt' });
 
   try {
-    // 1. Parse query → vector (parallel with fetching records)
-    const [queryVector, recordsResp] = await Promise.all([
-      parseQueryToVector(query.trim(), OPENROUTER_API_KEY),
-      fetch(
-        `https://api.airtable.com/v0/${BASE_ID}/${SYSTEM_TABLE}?filterByFormula=AND({Published}=TRUE(),{Cached_Vector}!='')&fields[]=System+ID&fields[]=Unternehmen&fields[]=Page+Titel&fields[]=Bild_Roh&fields[]=Vis_1_Pink_GenZ&fields[]=Vis_2_Forest_Natural&fields[]=Vis_3_White_Minimal&fields[]=Vis_4_Black_Tech&fields[]=Vis_5_Amber_Apothecary&fields[]=Vis_Status&fields[]=Cached_Vector&fields[]=Soft_Facts_Text&fields[]=Volumen&fields[]=Product_Family`,
-        { headers: airHeaders }
-      )
+    // 1. Load products + rules in parallel
+    const [allProducts, produktRegeln] = await Promise.all([
+      airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
+      airtableListAll(PRODUKT_REGELN_TABLE),
     ]);
 
-    if (!recordsResp.ok) throw new Error(`Airtable fetch ${recordsResp.status}`);
-    const recordsData: any = await recordsResp.json();
-    const records = recordsData.records ?? [];
+    // 2. Parse query
+    const parsed = parseQuery(query);
 
-    // 2. Cosine similarity + rank
-    const scored = records.map((r: any) => {
-      let cachedVec: Record<string, number> = {};
-      try { cachedVec = JSON.parse(r.fields?.Cached_Vector ?? '{}'); } catch {}
-      const score = cosineSimilarity(queryVector, cachedVec);
-      return { ...r, _score: score };
-    });
+    // 3. Match category
+    const category = matchCategory(query, produktRegeln);
 
-    scored.sort((a: any, b: any) => b._score - a._score);
-    const top = scored.slice(0, limit);
+    // 4. Extract product data
+    const products = allProducts.map(extractProduct);
 
-    // 3. Format response
-    const results = top.map((r: any) => ({
-      id: r.id,
-      systemId: r.fields?.['System ID'],
-      name: r.fields?.['Page Titel'],
-      supplier: r.fields?.Unternehmen,
-      volume: r.fields?.Volumen,
-      softFacts: r.fields?.Soft_Facts_Text,
-      productFamily: r.fields?.Product_Family,
-      score: Math.round(r._score * 100) / 100,
-      images: {
-        raw: r.fields?.Bild_Roh?.[0]?.url ?? null,
-        pink_genz: r.fields?.Vis_1_Pink_GenZ?.[0]?.url ?? null,
-        forest_natural: r.fields?.Vis_2_Forest_Natural?.[0]?.url ?? null,
-        white_minimal: r.fields?.Vis_3_White_Minimal?.[0]?.url ?? null,
-        black_tech: r.fields?.Vis_4_Black_Tech?.[0]?.url ?? null,
-        amber_apothecary: r.fields?.Vis_5_Amber_Apothecary?.[0]?.url ?? null,
-      },
-      visStatus: r.fields?.Vis_Status,
-    }));
+    // 5. Hard filter
+    const filtered = hardFilter(products, parsed, category);
+
+    // 6. Claude ranking
+    const ranked = await claudeRank(query, filtered, category);
 
     return res.status(200).json({
-      query,
-      queryVector,
-      total: results.length,
-      results,
+      results: ranked,
+      query: query,
+      totalProducts: products.length,
+      afterFilter: filtered.length,
+      categoryMatch: category?.category || null,
+      parsedFilters: {
+        sizes: parsed.sizeMentions,
+        materials: parsed.materialMentions,
+        types: parsed.typeMentions,
+        closures: parsed.closureMentions,
+      },
     });
 
-  } catch (e: any) {
-    return res.status(500).json({ error: e.message });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
+    console.error('Search error:', message);
+    return res.status(500).json({ error: message });
   }
 }
