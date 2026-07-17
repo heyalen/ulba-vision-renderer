@@ -104,6 +104,8 @@ interface CategoryConstraints {
   bevorzugtClosure: string[];
   nichtClosure: string[];
   bevorzugtType: string[];
+  volumeMin: number | null;
+  volumeMax: number | null;
 }
 
 function matchCategory(query: string, regeln: any[]): CategoryConstraints | null {
@@ -120,6 +122,8 @@ function matchCategory(query: string, regeln: any[]): CategoryConstraints | null
         bevorzugtClosure: split(f['Bevorzugt_Closure']),
         nichtClosure: split(f['Nicht_Closure']),
         bevorzugtType: split(f['Bevorzugt_Type']),
+        volumeMin: f['Volume_Min'] ?? null,
+        volumeMax: f['Volume_Max'] ?? null,
       };
     }
   }
@@ -222,6 +226,25 @@ function hardFilter(
           p.closure.toLowerCase().includes(nc.toLowerCase())
         );
         if (forbidden) return false;
+      }
+
+      // Volume range check from Produkt_Regeln
+      if ((category.volumeMin !== null || category.volumeMax !== null) && p.availableSizes.length > 0) {
+        // Parse ml values from Available_Sizes (e.g. "50ml" → 50)
+        const productMls = p.availableSizes
+          .map(s => parseInt(s.replace(/[^0-9]/g, ''), 10))
+          .filter(n => !isNaN(n));
+
+        if (productMls.length > 0) {
+          // Product must have at least one size within the allowed range
+          const hasValidSize = productMls.some(ml => {
+            if (category.volumeMin !== null && ml < category.volumeMin) return false;
+            if (category.volumeMax !== null && ml > category.volumeMax) return false;
+            return true;
+          });
+          if (!hasValidSize) return false;
+        }
+        // If no parseable sizes, don't exclude (data gap)
       }
     }
 
