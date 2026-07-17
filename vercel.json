@@ -1,5 +1,5 @@
 {
-    },
+  "functions": {
     "api/render.ts": {
       "maxDuration": 60
     },
