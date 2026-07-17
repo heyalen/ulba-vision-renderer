@@ -227,8 +227,9 @@ Given a brand brief and detailed context, write a precise Seedream image-editing
 ${fallInstructions}
 
 NEVER change shapes — only colors, materials, finishes.
+NEVER add text, logos, typography, labels, or branding of any kind. The product must be completely blank/unlabeled.
 Reply ONLY with the prompt text. Max 120 words. English.
-End with: "Studio product photography, clean white background, soft natural shadow, photorealistic. CRITICAL: Do not change shapes."
+End with: "No text, no logos, no labels, no branding. Studio product photography, clean white background, soft natural shadow, photorealistic. CRITICAL: Do not change shapes."
 
 ${context}`;
 
