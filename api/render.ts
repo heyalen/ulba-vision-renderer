@@ -1,8 +1,166 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
+import { createHash } from 'crypto';
 
+// ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
+const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
+const CAP_TABLE = 'tblQvnXPhiKGMoqDp';
 const CACHE_TABLE = 'tblsOp1WKPGIquBKQ';
+const CACHE_IMAGE_FIELD = 'fldFd5qi64yELhKna';
 
+const FAL_ENDPOINTS = {
+  lite: 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit',
+  pro: 'https://fal.run/fal-ai/bytedance/seedream/v5/pro/edit',
+} as const;
+
+type Tier = 'lite' | 'pro';
+type RenderFall = 'A' | 'B' | 'C' | 'D';
+
+// ── Helpers ─────────────────────────────────────────────────────────
+function queryHash(q: string): string {
+  return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
+}
+
+function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier): string {
+  return `${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}`;
+}
+
+function imgUrl(attachmentField: any): string | null {
+  if (Array.isArray(attachmentField) && attachmentField.length > 0) {
+    return attachmentField[0].url || attachmentField[0].thumbnails?.full?.url || null;
+  }
+  return null;
+}
+
+async function airtableFetch(table: string, recordId: string, fields: string[]): Promise<any> {
+  const params = fields.map(f => `fields[]=${encodeURIComponent(f)}`).join('&');
+  const res = await fetch(
+    `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}/${recordId}?${params}`,
+    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+  );
+  if (!res.ok) throw new Error(`Airtable ${table}/${recordId}: ${res.status}`);
+  return res.json();
+}
+
+async function airtableQuery(table: string, formula: string, fields: string[], maxRecords = 1): Promise<any[]> {
+  const params = new URLSearchParams({
+    filterByFormula: formula,
+    maxRecords: String(maxRecords),
+  });
+  fields.forEach(f => params.append('fields[]', f));
+  const res = await fetch(
+    `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}?${params}`,
+    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+  );
+  if (!res.ok) throw new Error(`Airtable query ${table}: ${res.status}`);
+  const data = await res.json();
+  return data.records || [];
+}
+
+// ── Determine Rendering Fall ────────────────────────────────────────
+function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; hasMultipleCaps: boolean } {
+  const bildRohBase = imgUrl(sys.fields['Bild_Roh_Base']);
+  const bildSystem = imgUrl(sys.fields['Bild_System']);
+  const caps = sys.fields['Caps'] as any[] | undefined;
+  const capCount = caps?.length || 0;
+
+  if (!bildRohBase && !bildSystem) throw new Error('Kein Bild vorhanden');
+
+  // Fall A: Nur Bild_System, keine separaten Caps
+  if (bildSystem && capCount === 0) {
+    return { fall: 'A', primaryUrl: bildSystem, hasMultipleCaps: false };
+  }
+  // Fall B: Bild_System vorhanden + separate Caps (Cap muss ERSETZT werden)
+  if (bildSystem && !bildRohBase && capCount > 0) {
+    return { fall: 'B', primaryUrl: bildSystem, hasMultipleCaps: capCount > 1 };
+  }
+  // Fall C: Bild_Roh_Base + genau 1 Cap
+  if (bildRohBase && capCount === 1) {
+    return { fall: 'C', primaryUrl: bildRohBase, hasMultipleCaps: false };
+  }
+  // Fall D: Bild_Roh_Base + Multiple Caps
+  if (bildRohBase && capCount > 1) {
+    return { fall: 'D', primaryUrl: bildRohBase, hasMultipleCaps: true };
+  }
+  // Fallback: Bild_Roh_Base ohne Caps (behandeln wie Fall A)
+  if (bildRohBase && capCount === 0) {
+    return { fall: 'A', primaryUrl: bildRohBase, hasMultipleCaps: false };
+  }
+
+  return { fall: 'A', primaryUrl: (bildSystem || bildRohBase)!, hasMultipleCaps: false };
+}
+
+// ── Prompt Assembly via Claude Haiku ────────────────────────────────
+async function assemblePrompt(query: string, fall: RenderFall, sysFields: any): Promise<string> {
+  const type = sysFields['Type']?.name || '';
+  const material = (sysFields['Material'] as any[])?.map((m: any) => m.name).join(', ') || '';
+  const form = (sysFields['Form'] as any[])?.map((f: any) => f.name).join(', ') || '';
+  const desc = sysFields['Kurzbeschreibung'] || '';
+
+  let systemPrompt: string;
+
+  if (fall === 'A') {
+    // Single image — recolor/refinish only
+    systemPrompt = `You are a beauty packaging rendering specialist.
+Given a brand brief and product context, write a precise Seedream image-editing prompt.
+The prompt describes ONLY color, finish, and material changes — NEVER alter shape or form.
+Reply ONLY with the prompt text. Max 80 words. English.
+Always start with: "Keep exact shape, form, and proportions unchanged."
+End with: "Studio product photography, clean white background, soft natural shadow, photorealistic."
+
+Product context: ${type} | ${material} | ${form} | ${desc}`;
+  } else if (fall === 'B') {
+    // System image has a cap that must be REPLACED
+    systemPrompt = `You are a beauty packaging rendering specialist.
+Given a brand brief, write a Seedream multi-reference compositing prompt.
+TWO reference images: image 1 = bottle WITH an existing cap, image 2 = replacement cap.
+The prompt MUST:
+1. Instruct to IGNORE and REPLACE the original cap from image 1
+2. Use the cap from image 2 as replacement
+3. Describe color/material/finish changes for BOTH body and cap
+4. Preserve exact shapes from both references
+Reply ONLY with the prompt. Max 120 words. English.
+Include: "REPLACE the original cap from image 1 with the cap from image 2. Do NOT merge them."
+End with: "Studio product photography, clean white background, soft natural shadow, photorealistic."
+
+Product context: ${type} | ${material} | ${form} | ${desc}`;
+  } else {
+    // Fall C & D — Base + Cap compositing
+    systemPrompt = `You are a beauty packaging rendering specialist.
+Given a brand brief, write a Seedream multi-reference compositing prompt.
+TWO reference images: image 1 = bottle body (base), image 2 = cap/closure.
+The prompt MUST:
+1. Use exact shape from image 1 for body, exact shape from image 2 for cap
+2. Describe color/material/finish for BOTH body and cap separately
+3. Instruct to assemble cap onto bottle neck, flush and aligned
+4. NEVER change shapes — only colors, materials, finishes
+Reply ONLY with the prompt. Max 120 words. English.
+Start with: "Compose a single product photo by combining the two reference images."
+End with: "Studio product photography, clean white background, soft natural shadow, photorealistic. CRITICAL: Do not change shapes."
+
+Product context: ${type} | ${material} | ${form} | ${desc}`;
+  }
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5',
+      max_tokens: 250,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: query }],
+    }),
+  });
+
+  const data = await res.json() as { content: Array<{ text: string }> };
+  return data.content[0].text.trim();
+}
+
+// ── Main Handler ────────────────────────────────────────────────────
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -12,114 +170,163 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { systemId, query, imageUrl } = req.body as { systemId: string; query: string; imageUrl: string };
-  if (!systemId || !query || !imageUrl) {
-    return res.status(400).json({ error: 'systemId, query und imageUrl sind erforderlich' });
+  const {
+    systemId,
+    query,
+    selectedCapId = null,
+    tier = 'lite',
+  } = req.body as {
+    systemId: string;
+    query: string;
+    selectedCapId?: string | null;
+    tier?: Tier;
+  };
+
+  if (!systemId || !query) {
+    return res.status(400).json({ error: 'systemId und query sind erforderlich' });
+  }
+  if (tier !== 'lite' && tier !== 'pro') {
+    return res.status(400).json({ error: 'tier muss "lite" oder "pro" sein' });
   }
 
   try {
-    // 1. Query → Rendering-Prompt via Claude Haiku
-    const promptRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY || '',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5',
-        max_tokens: 200,
-        system: `You are a beauty packaging design specialist.
-Translate a brand brief into a precise image-editing prompt for FLUX.1 Kontext.
-The prompt describes ONLY color and finish — NEVER the shape or form.
-Reply ONLY with the prompt text, nothing else before or after.
-Max 60 words. Language: English.
-Always start with: "Keep exact shape and form unchanged. Change only color and finish:"`,
-        messages: [{ role: 'user', content: query }],
-      }),
-    });
-    const promptData = await promptRes.json() as { content: Array<{ text: string }> };
-    const renderingPrompt = promptData.content[0].text.trim();
+    // ── 1. Cache Check ──────────────────────────────────────────────
+    const key = cacheKey(systemId, query, selectedCapId, tier);
+    const cached = await airtableQuery(
+      CACHE_TABLE,
+      `{Cache_Key}='${key}'`,
+      ['Cache_Key', 'Bild', 'Rendering_Prompt'],
+      1
+    );
 
-    // 2. FLUX.1 Kontext Pro via fal.ai
-    const falRes = await fetch('https://fal.run/fal-ai/flux-pro/kontext', {
+    if (cached.length > 0) {
+      const cachedImg = imgUrl(cached[0].fields['Bild']);
+      if (cachedImg) {
+        return res.status(200).json({
+          renderingUrl: cachedImg,
+          renderingPrompt: cached[0].fields['Rendering_Prompt'] || '',
+          cacheId: cached[0].id,
+          cached: true,
+        });
+      }
+    }
+
+    // ── 2. Fetch System Record ──────────────────────────────────────
+    const sys = await airtableFetch(SYSTEM_TABLE, systemId, [
+      'Bild_System', 'Bild_Roh_Base', 'Caps', 'Type', 'Material',
+      'Form', 'Kurzbeschreibung', 'Page Titel',
+    ]);
+
+    const { fall, primaryUrl } = determineFall(sys);
+
+    // ── 3. Resolve Cap ──────────────────────────────────────────────
+    let capImageUrl: string | null = null;
+    let resolvedCapId: string | null = selectedCapId;
+    const linkedCaps = sys.fields['Caps'] as Array<{ id: string }> | undefined;
+
+    if (fall !== 'A' && linkedCaps && linkedCaps.length > 0) {
+      // Use selected cap or default to first
+      const capId = selectedCapId || linkedCaps[0].id;
+      resolvedCapId = capId;
+      const capRec = await airtableFetch(CAP_TABLE, capId, ['Cap_Bild', 'Closure_Type']);
+      capImageUrl = imgUrl(capRec.fields['Cap_Bild']);
+      if (!capImageUrl) throw new Error(`Cap ${capId} hat kein Bild`);
+    }
+
+    // ── 4. Assemble Rendering Prompt ────────────────────────────────
+    const renderingPrompt = await assemblePrompt(query, fall, sys.fields);
+
+    // ── 5. Call Seedream via fal.ai ─────────────────────────────────
+    const falEndpoint = FAL_ENDPOINTS[tier];
+    const falBody: any = {
+      prompt: renderingPrompt,
+      output_format: 'jpeg',
+    };
+
+    if (fall === 'A') {
+      // Single image edit
+      falBody.image_url = primaryUrl;
+    } else {
+      // Multi-reference compositing (Fall B/C/D)
+      falBody.image_urls = capImageUrl ? [primaryUrl, capImageUrl] : [primaryUrl];
+    }
+
+    const falRes = await fetch(falEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Key ${process.env.FAL_API_KEY}`,
+        Authorization: `Key ${process.env.FAL_API_KEY}`,
       },
-      body: JSON.stringify({
-        image_url: imageUrl,
-        prompt: renderingPrompt,
-        guidance_scale: 3.5,
-        num_inference_steps: 28,
-        output_format: 'jpeg',
-      }),
+      body: JSON.stringify(falBody),
     });
 
     if (!falRes.ok) {
       const err = await falRes.text();
-      throw new Error(`fal.ai Fehler: ${err}`);
+      throw new Error(`fal.ai ${tier}: ${err}`);
     }
 
-    const falData = await falRes.json() as { images: Array<{ url: string }> };
-    const renderingUrl = falData.images?.[0]?.url;
-    if (!renderingUrl) throw new Error('Kein Bild von fal.ai zurückgekommen');
+    const falData = await falRes.json() as { images?: Array<{ url: string }>; image?: { url: string } };
+    const renderingUrl = falData.images?.[0]?.url || falData.image?.url;
+    if (!renderingUrl) throw new Error('Kein Bild von Seedream zurückgekommen');
 
-    // 3. Bild downloaden
+    // ── 6. Download + Cache in Airtable ─────────────────────────────
     const imgRes = await fetch(renderingUrl);
     const imgBuffer = await imgRes.arrayBuffer();
     const base64 = Buffer.from(imgBuffer).toString('base64');
 
-    // 4. Airtable Record erstellen
+    // Create cache record
     const createRes = await fetch(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`,
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.AIRTABLE_PAT}`,
+          Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
         },
         body: JSON.stringify({
           fields: {
+            Cache_Key: key,
             System: [systemId],
             Query_Input: query,
             Rendering_Prompt: renderingPrompt,
+            Tier: { name: tier },
+            Fall: { name: fall },
             Created_At: new Date().toISOString(),
           },
         }),
       }
     );
-    const createData = await createRes.json() as { id: string; error?: string };
-    if (!createData.id) throw new Error(`Airtable Record Create fehlgeschlagen: ${JSON.stringify(createData)}`);
-    const recordId = createData.id;
+    const createData = await createRes.json() as { id: string; error?: any };
+    if (!createData.id) throw new Error(`Cache-Record Fehler: ${JSON.stringify(createData)}`);
 
-    // 5. Bild als base64 uploaden
-    const fieldId = 'fldFd5qi64yELhKna';
+    // Upload rendered image
     const uploadRes = await fetch(
-      `https://content.airtable.com/v0/${AIRTABLE_BASE}/${recordId}/${fieldId}/uploadAttachment`,
+      `https://content.airtable.com/v0/${AIRTABLE_BASE}/${createData.id}/${CACHE_IMAGE_FIELD}/uploadAttachment`,
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.AIRTABLE_PAT}`,
+          Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
         },
         body: JSON.stringify({
           contentType: 'image/jpeg',
           file: base64,
-          filename: `rendering_${systemId}_${Date.now()}.jpg`,
+          filename: `render_${sys.fields['Page Titel'] || systemId}_${tier}_${Date.now()}.jpg`,
         }),
       }
     );
     if (!uploadRes.ok) {
-      const uploadErr = await uploadRes.text();
-      throw new Error(`Airtable Upload fehlgeschlagen: ${uploadErr}`);
+      console.error('Airtable upload failed:', await uploadRes.text());
+      // Non-fatal — rendering still succeeded
     }
 
     return res.status(200).json({
       renderingUrl,
       renderingPrompt,
-      cacheId: recordId,
+      cacheId: createData.id,
+      cached: false,
+      fall,
+      tier,
     });
 
   } catch (err) {
