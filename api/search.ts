@@ -367,6 +367,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 6. Claude ranking
     const ranked = await claudeRank(query, filtered, category);
 
+    // 7. Log search (fire-and-forget, don't block response)
+    const SEARCH_LOG_TABLE = 'tbljh9GowT7JkJcn4';
+    fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${SEARCH_LOG_TABLE}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
+      },
+      body: JSON.stringify({
+        fields: {
+          Query: query,
+          Category_Match: category?.category || '',
+          Total_Products: products.length,
+          After_Filter: filtered.length,
+          Top_Results: JSON.stringify(ranked.slice(0, 5).map(r => ({ id: r.id, name: r.name, score: r.score }))),
+          Parsed_Filters: JSON.stringify({ sizes: parsed.sizeMentions, materials: parsed.materialMentions, types: parsed.typeMentions, closures: parsed.closureMentions }),
+          Timestamp: new Date().toISOString(),
+        },
+      }),
+    }).catch(() => {}); // silent fail — logging must never break search
+
     return res.status(200).json({
       results: ranked,
       query: query,
