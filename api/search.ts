@@ -104,6 +104,7 @@ interface CategoryConstraints {
   bevorzugtClosure: string[];
   nichtClosure: string[];
   bevorzugtType: string[];
+  nichtType: string[];
   volumeMin: number | null;
   volumeMax: number | null;
 }
@@ -122,6 +123,7 @@ function matchCategory(query: string, regeln: any[]): CategoryConstraints | null
         bevorzugtClosure: split(f['Bevorzugt_Closure']),
         nichtClosure: split(f['Nicht_Closure']),
         bevorzugtType: split(f['Bevorzugt_Type']),
+        nichtType: split(f['Nicht_Typen']),
         volumeMin: f['Volume_Min'] ?? null,
         volumeMax: f['Volume_Max'] ?? null,
       };
@@ -224,6 +226,14 @@ function hardFilter(
       if (category.nichtClosure.length > 0) {
         const forbidden = category.nichtClosure.some(nc =>
           p.closure.toLowerCase().includes(nc.toLowerCase())
+        );
+        if (forbidden) return false;
+      }
+
+      // Exclude forbidden types
+      if (category.nichtType.length > 0) {
+        const forbidden = category.nichtType.some(nt =>
+          p.type.toLowerCase().includes(nt.toLowerCase())
         );
         if (forbidden) return false;
       }
