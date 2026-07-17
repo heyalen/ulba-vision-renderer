@@ -218,11 +218,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ── 3. Resolve Cap ──────────────────────────────────────────────
     let capImageUrl: string | null = null;
     let resolvedCapId: string | null = selectedCapId;
-    const linkedCaps = sys.fields['Caps'] as Array<{ id: string }> | undefined;
+    const linkedCaps = sys.fields['Caps'] as string[] | undefined;
 
     if (fall !== 'A' && linkedCaps && linkedCaps.length > 0) {
-      // Use selected cap or default to first
-      const capId = selectedCapId || linkedCaps[0].id;
+      // Airtable returns linked records as string array of record IDs
+      const capId = selectedCapId || linkedCaps[0];
       resolvedCapId = capId;
       const capRec = await airtableFetch(CAP_TABLE, capId);
       capImageUrl = imgUrl(capRec.fields['Cap_Bild']);
