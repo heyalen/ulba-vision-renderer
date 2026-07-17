@@ -7,6 +7,9 @@ const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
 const CAP_TABLE = 'tblQvnXPhiKGMoqDp';
 const CACHE_TABLE = 'tblsOp1WKPGIquBKQ';
 const CACHE_IMAGE_FIELD = 'fldFd5qi64yELhKna';
+const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
+const DESIGN_REGELN_TABLE = 'tblEVWQUJtf87JgOc';
+const FARBPALETTEN_TABLE = 'tblTIeUTyVptGIpKp';
 
 const FAL_ENDPOINTS = {
   lite: 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit',
@@ -89,56 +92,145 @@ function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; hasMul
   return { fall: 'A', primaryUrl: (bildSystem || bildRohBase)!, hasMultipleCaps: false };
 }
 
-// ── Prompt Assembly via Claude Haiku ────────────────────────────────
+// ── Airtable List All (for small tables) ────────────────────────────
+async function airtableListAll(table: string): Promise<any[]> {
+  const res = await fetch(
+    `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}?pageSize=100`,
+    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+  );
+  if (!res.ok) throw new Error(`Airtable list ${table}: ${res.status}`);
+  const data = await res.json();
+  return data.records || [];
+}
+
+// ── Keyword Matching ────────────────────────────────────────────────
+function queryMatchesKeywords(query: string, keywordText: string | undefined): boolean {
+  if (!keywordText) return false;
+  const q = query.toLowerCase();
+  const keywords = keywordText.split(/[,\n]/).map(k => k.trim().toLowerCase()).filter(Boolean);
+  return keywords.some(k => q.includes(k));
+}
+
+function selectName(field: any): string {
+  if (!field) return '';
+  if (typeof field === 'string') return field;
+  return field.name || '';
+}
+
+function multiSelectNames(field: any): string[] {
+  if (!Array.isArray(field)) return [];
+  return field.map((f: any) => typeof f === 'string' ? f : f.name || '').filter(Boolean);
+}
+
+// ── Prompt Assembly v2 via Claude Haiku ─────────────────────────────
 async function assemblePrompt(query: string, fall: RenderFall, sysFields: any): Promise<string> {
-  const type = sysFields['Type']?.name || '';
-  const material = (sysFields['Material'] as any[])?.map((m: any) => m.name).join(', ') || '';
-  const form = (sysFields['Form'] as any[])?.map((f: any) => f.name).join(', ') || '';
+  // 1. Load context tables in parallel
+  const [produktRegeln, designRegeln, farbpaletten] = await Promise.all([
+    airtableListAll(PRODUKT_REGELN_TABLE),
+    airtableListAll(DESIGN_REGELN_TABLE),
+    airtableListAll(FARBPALETTEN_TABLE),
+  ]);
+
+  // 2. Match Produkt_Regeln (keyword match)
+  const matchedProdukt = produktRegeln.filter(r =>
+    queryMatchesKeywords(query, r.fields['Keywords'])
+  );
+
+  // 3. Match Design_Regeln (query signal match)
+  const matchedDesign = designRegeln.filter(r =>
+    queryMatchesKeywords(query, r.fields['Wenn_Query_Signal'])
+  );
+
+  // 4. Resolve Farbpaletten from matched Design_Regeln
+  const paletteIds = matchedDesign.flatMap(r => r.fields['Palette_Link'] || []);
+  const matchedPaletten = farbpaletten.filter(p => paletteIds.includes(p.id));
+  // Fallback: if no palette matched via rules, check all palettes for emotion match
+  const activePaletten = matchedPaletten.length > 0
+    ? matchedPaletten
+    : farbpaletten.filter(p => queryMatchesKeywords(query, multiSelectNames(p.fields['Emotion_Tags']).join(',')));
+
+  // 5. Product basics
+  const type = selectName(sysFields['Type']);
+  const material = multiSelectNames(sysFields['Material']).join(', ');
+  const form = multiSelectNames(sysFields['Form']).join(', ');
   const desc = sysFields['Kurzbeschreibung'] || '';
+  const availMaterials = multiSelectNames(sysFields['Available_Materials']);
 
-  let systemPrompt: string;
+  // 6. Capabilities from SF_ fields
+  const caps: string[] = [];
+  if (sysFields['SF_Einfaerbbar']) caps.push('Einfärbbar');
+  if (sysFields['SF_Mattierbar']) caps.push('Matt-Finish möglich');
+  if (sysFields['SF_HotFoil']) caps.push('Hot Foil möglich');
+  if (sysFields['SF_Embossing']) caps.push('Embossing möglich');
+  if (sysFields['SF_Siebdruck']) caps.push('Siebdruck möglich');
+  if (sysFields['SF_PCR']) caps.push('PCR-Material verfügbar');
+  if (sysFields['SF_Refillable']) caps.push('Refillable');
+  if (sysFields['SF_Airless']) caps.push('Airless-System');
+  const notPossible: string[] = [];
+  if (!sysFields['SF_Mattierbar']) notPossible.push('Kein Matt-Finish');
+  if (!sysFields['SF_HotFoil']) notPossible.push('Kein Hot Foil');
+  if (!sysFields['SF_Embossing']) notPossible.push('Kein Embossing');
 
+  // 7. Build context blocks
+  let context = `PRODUCT: ${type} | ${material} | ${form}\n${desc}\n`;
+
+  if (matchedProdukt.length > 0) {
+    const pr = matchedProdukt[0].fields;
+    context += `\nCATEGORY RULES (${pr['Kategorie'] || 'matched'}):\n`;
+    if (pr['Bevorzugt_Material']) context += `- Preferred materials: ${pr['Bevorzugt_Material']}\n`;
+    if (pr['Nicht_Material']) context += `- Avoid materials: ${pr['Nicht_Material']}\n`;
+    if (pr['Bevorzugt_Closure']) context += `- Preferred closure: ${pr['Bevorzugt_Closure']}\n`;
+  }
+
+  if (matchedDesign.length > 0) {
+    context += `\nDESIGN RULES:\n`;
+    for (const dr of matchedDesign) {
+      const f = dr.fields;
+      if (f['Dann_Design_Codes']) context += `- Design codes: ${f['Dann_Design_Codes']}\n`;
+      if (f['Nie']) context += `- NEVER: ${f['Nie']}\n`;
+      if (f['Kanal_Signal']) context += `- Channel signal: ${f['Kanal_Signal']}\n`;
+    }
+  }
+
+  if (activePaletten.length > 0) {
+    const pal = activePaletten[0].fields;
+    context += `\nCOLOR PALETTE "${pal['Name'] || ''}":\n`;
+    if (pal['Hex_Codes']) context += `- Hex codes: ${pal['Hex_Codes']}\n`;
+    if (pal['Beschreibung']) context += `- ${pal['Beschreibung']}\n`;
+    context += `- USE THESE EXACT HEX CODES, do not invent colors.\n`;
+  }
+
+  if (caps.length > 0) context += `\nCAPABILITIES: ${caps.join(', ')}\n`;
+  if (notPossible.length > 0) context += `CONSTRAINTS: ${notPossible.join(', ')} — do NOT suggest these.\n`;
+  if (availMaterials.length > 0) context += `AVAILABLE MATERIALS: ${availMaterials.join(', ')} — only use these.\n`;
+
+  // 8. Fall-specific instructions
+  let fallInstructions: string;
   if (fall === 'A') {
-    // Single image — recolor/refinish only
-    systemPrompt = `You are a beauty packaging rendering specialist.
-Given a brand brief and product context, write a precise Seedream image-editing prompt.
-The prompt describes ONLY color, finish, and material changes — NEVER alter shape or form.
-Reply ONLY with the prompt text. Max 80 words. English.
-Always start with: "Keep exact shape, form, and proportions unchanged."
-End with: "Studio product photography, clean white background, soft natural shadow, photorealistic."
-
-Product context: ${type} | ${material} | ${form} | ${desc}`;
+    fallInstructions = `SINGLE IMAGE edit. Change ONLY color, finish, material — NEVER shape.
+Start with: "Keep exact shape, form, and proportions unchanged."`;
   } else if (fall === 'B') {
-    // System image has a cap that must be REPLACED
-    systemPrompt = `You are a beauty packaging rendering specialist.
-Given a brand brief, write a Seedream multi-reference compositing prompt.
-TWO reference images: image 1 = bottle WITH an existing cap, image 2 = replacement cap.
-The prompt MUST:
-1. Instruct to IGNORE and REPLACE the original cap from image 1
-2. Use the cap from image 2 as replacement
-3. Describe color/material/finish changes for BOTH body and cap
-4. Preserve exact shapes from both references
-Reply ONLY with the prompt. Max 120 words. English.
-Include: "REPLACE the original cap from image 1 with the cap from image 2. Do NOT merge them."
-End with: "Studio product photography, clean white background, soft natural shadow, photorealistic."
-
-Product context: ${type} | ${material} | ${form} | ${desc}`;
+    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle WITH existing cap, image 2 = replacement cap.
+MUST include: "REPLACE the original cap from image 1 with the cap from image 2. Do NOT merge them."
+Describe color/material/finish for BOTH body and cap separately.`;
   } else {
-    // Fall C & D — Base + Cap compositing
-    systemPrompt = `You are a beauty packaging rendering specialist.
-Given a brand brief, write a Seedream multi-reference compositing prompt.
-TWO reference images: image 1 = bottle body (base), image 2 = cap/closure.
-The prompt MUST:
-1. Use exact shape from image 1 for body, exact shape from image 2 for cap
-2. Describe color/material/finish for BOTH body and cap separately
-3. Instruct to assemble cap onto bottle neck, flush and aligned
-4. NEVER change shapes — only colors, materials, finishes
-Reply ONLY with the prompt. Max 120 words. English.
+    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle body (base), image 2 = cap/closure.
 Start with: "Compose a single product photo by combining the two reference images."
+Use exact shape from image 1 for body, exact shape from image 2 for cap.
+Describe color/material/finish for BOTH body and cap separately.
+Instruct to assemble cap onto bottle neck, flush and aligned.`;
+  }
+
+  const systemPrompt = `You are a beauty packaging rendering specialist.
+Given a brand brief and detailed context, write a precise Seedream image-editing prompt.
+
+${fallInstructions}
+
+NEVER change shapes — only colors, materials, finishes.
+Reply ONLY with the prompt text. Max 120 words. English.
 End with: "Studio product photography, clean white background, soft natural shadow, photorealistic. CRITICAL: Do not change shapes."
 
-Product context: ${type} | ${material} | ${form} | ${desc}`;
-  }
+${context}`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -149,7 +241,7 @@ Product context: ${type} | ${material} | ${form} | ${desc}`;
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5',
-      max_tokens: 250,
+      max_tokens: 300,
       system: systemPrompt,
       messages: [{ role: 'user', content: query }],
     }),
