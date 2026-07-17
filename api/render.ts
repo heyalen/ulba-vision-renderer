@@ -32,10 +32,9 @@ function imgUrl(attachmentField: any): string | null {
   return null;
 }
 
-async function airtableFetch(table: string, recordId: string, fields: string[]): Promise<any> {
-  const params = fields.map(f => `fields[]=${encodeURIComponent(f)}`).join('&');
+async function airtableFetch(table: string, recordId: string): Promise<any> {
   const res = await fetch(
-    `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}/${recordId}?${params}`,
+    `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}/${recordId}`,
     { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
   );
   if (!res.ok) throw new Error(`Airtable ${table}/${recordId}: ${res.status}`);
@@ -212,10 +211,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ── 2. Fetch System Record ──────────────────────────────────────
-    const sys = await airtableFetch(SYSTEM_TABLE, systemId, [
-      'Bild_System', 'Bild_Roh_Base', 'Caps', 'Type', 'Material',
-      'Form', 'Kurzbeschreibung', 'Page Titel',
-    ]);
+    const sys = await airtableFetch(SYSTEM_TABLE, systemId);
 
     const { fall, primaryUrl } = determineFall(sys);
 
@@ -228,7 +224,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Use selected cap or default to first
       const capId = selectedCapId || linkedCaps[0].id;
       resolvedCapId = capId;
-      const capRec = await airtableFetch(CAP_TABLE, capId, ['Cap_Bild', 'Closure_Type']);
+      const capRec = await airtableFetch(CAP_TABLE, capId);
       capImageUrl = imgUrl(capRec.fields['Cap_Bild']);
       if (!capImageUrl) throw new Error(`Cap ${capId} hat kein Bild`);
     }
