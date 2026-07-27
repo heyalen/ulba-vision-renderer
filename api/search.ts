@@ -4,6 +4,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
 const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
 const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
+const CAP_TABLE = 'tblQvnXPhiKGMoqDp';   // Cap-Tabelle — 1 Record = 1 Verschluss
 
 export const config = { api: { bodyParser: true } };
 
@@ -96,6 +97,21 @@ function parseQuery(query: string): ParsedQuery {
   return { raw: query, sizeMentions, materialMentions, typeMentions, closureMentions };
 }
 
+// active_filters vom Client anwenden: erlaubt gezieltes Entfernen einzelner
+// geparster Filter (X-Klick auf Chip). Client sendet die reduzierte Menge zurück.
+// Nur bekannte Keys werden übernommen — kein Injizieren neuer Constraints.
+function applyActiveFilters(parsed: ParsedQuery, override: any): ParsedQuery {
+  if (!override || typeof override !== 'object') return parsed;
+  const arr = (v: any): string[] => Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
+  return {
+    raw: parsed.raw,
+    sizeMentions:     'sizes'    in override ? arr(override.sizes)    : parsed.sizeMentions,
+    materialMentions: 'materials' in override ? arr(override.materials) : parsed.materialMentions,
+    typeMentions:     'types'    in override ? arr(override.types)    : parsed.typeMentions,
+    closureMentions:  'closures' in override ? arr(override.closures) : parsed.closureMentions,
+  };
+}
+
 // ── Produkt_Regeln Matching ─────────────────────────────────────────
 interface CategoryConstraints {
   category: string;
@@ -146,6 +162,8 @@ interface ProductData {
   availableSizes: string[];
   availableMaterials: string[];
   capCount: number;
+  capIds: string[];         // verlinkte Cap-Record-IDs (intern für Bild-Auflösung)
+  capImages: string[];      // aufgelöste Cap-Bild-URLs (an Client geliefert)
 }
 
 function extractProduct(rec: any): ProductData {
@@ -160,6 +178,8 @@ function extractProduct(rec: any): ProductData {
   if (f['SF_Refillable']) caps.push('Refillable');
   if (f['SF_Airless']) caps.push('Airless');
 
+  const capIds = (f['Caps'] as string[] | undefined || []).filter(Boolean);
+
   return {
     id: rec.id,
     name: f['Page Titel'] || f['System ID'] || rec.id,
@@ -172,8 +192,25 @@ function extractProduct(rec: any): ProductData {
     capabilities: caps,
     availableSizes: multiSelectNames(f['Available_Sizes']),
     availableMaterials: multiSelectNames(f['Available_Materials']),
-    capCount: (f['Caps'] as string[] || []).length,
+    capCount: capIds.length,
+    capIds,
+    capImages: [],   // wird nach dem Ranking für die Top-Ergebnisse aufgelöst
   };
+}
+
+// Cap-Bilder für gegebene Cap-Record-IDs auflösen (Batch, ein Load der Cap-Tabelle).
+// Baut Map capId → Cap_Bild-URL. Caps werden nie harmonisiert → Rohbild aus Cap_Bild.
+async function resolveCapImages(capIds: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (capIds.length === 0) return map;
+  // Ganze (kleine) Cap-Tabelle laden und lokal mappen — günstiger als N ID-Lookups,
+  // solange die Cap-Tabelle < einige hundert Records ist (aktuell der Fall).
+  const capRecords = await airtableListAll(CAP_TABLE);
+  for (const rec of capRecords) {
+    const url = imgUrl(rec.fields['Cap_Bild']);
+    if (url) map.set(rec.id, url);
+  }
+  return map;
 }
 
 function hardFilter(
@@ -339,7 +376,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { query } = req.body as { query: string };
+  const { query, active_filters } = req.body as { query: string; active_filters?: any };
   if (!query) return res.status(400).json({ error: 'query ist erforderlich' });
 
   if (!process.env.AIRTABLE_PAT) return res.status(500).json({ error: 'AIRTABLE_PAT env var fehlt' });
@@ -352,8 +389,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       airtableListAll(PRODUKT_REGELN_TABLE),
     ]);
 
-    // 2. Parse query
-    const parsed = parseQuery(query);
+    // 2. Parse query, then apply client-side filter overrides (Chip-Removal)
+    const parsedBase = parseQuery(query);
+    const parsed = applyActiveFilters(parsedBase, active_filters);
 
     // 3. Match category
     const category = matchCategory(query, produktRegeln);
@@ -366,6 +404,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // 6. Claude ranking
     const ranked = await claudeRank(query, filtered, category);
+
+    // 6b. Cap-Bilder nur für Top-Ergebnisse auflösen (Detail-Slider)
+    const TOP_N_FOR_CAPS = 30;
+    const neededCapIds = Array.from(new Set(
+      ranked.slice(0, TOP_N_FOR_CAPS).flatMap(r => r.capIds)
+    ));
+    if (neededCapIds.length > 0) {
+      try {
+        const capMap = await resolveCapImages(neededCapIds);
+        for (const r of ranked) {
+          r.capImages = r.capIds.map(id => capMap.get(id)).filter(Boolean) as string[];
+        }
+      } catch { /* Cap-Bilder optional — Suche darf daran nie scheitern */ }
+    }
+
+    // Interne Felder (capIds) nicht an Client leaken
+    const publicResults = ranked.map(({ capIds, ...rest }) => rest);
 
     // 7. Log search (fire-and-forget, don't block response)
     const SEARCH_LOG_TABLE = 'tbljh9GowT7JkJcn4';
@@ -389,7 +444,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }).catch(() => {}); // silent fail — logging must never break search
 
     return res.status(200).json({
-      results: ranked,
+      results: publicResults,
       query: query,
       totalProducts: products.length,
       afterFilter: filtered.length,
