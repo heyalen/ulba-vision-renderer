@@ -4,7 +4,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
 const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
 const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
-const CAP_TABLE = 'tblQvnXPhiKGMoqDp';   // Cap-Tabelle — 1 Record = 1 Verschluss
+const CAP_TABLE = 'tblQvnXPhiKGMoqDp'; // Cap-Tabelle — 1 Record = 1 Verschluss
 
 export const config = { api: { bodyParser: true } };
 
@@ -42,10 +42,10 @@ async function airtableListAll(table: string, formula?: string): Promise<any[]> 
 // ── Query Parsing ───────────────────────────────────────────────────
 interface ParsedQuery {
   raw: string;
-  sizeMentions: string[];       // e.g. ["50ml", "100ml"]
-  materialMentions: string[];   // e.g. ["Glass"]
-  typeMentions: string[];       // e.g. ["Bottle"]
-  closureMentions: string[];    // e.g. ["Pump"]
+  sizeMentions: string[];     // e.g. ["50ml", "100ml"]
+  materialMentions: string[]; // e.g. ["Glass"]
+  typeMentions: string[];     // e.g. ["Bottle"]
+  closureMentions: string[];  // e.g. ["Pump"]
 }
 
 function parseQuery(query: string): ParsedQuery {
@@ -105,10 +105,10 @@ function applyActiveFilters(parsed: ParsedQuery, override: any): ParsedQuery {
   const arr = (v: any): string[] => Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
   return {
     raw: parsed.raw,
-    sizeMentions:     'sizes'    in override ? arr(override.sizes)    : parsed.sizeMentions,
+    sizeMentions: 'sizes' in override ? arr(override.sizes) : parsed.sizeMentions,
     materialMentions: 'materials' in override ? arr(override.materials) : parsed.materialMentions,
-    typeMentions:     'types'    in override ? arr(override.types)    : parsed.typeMentions,
-    closureMentions:  'closures' in override ? arr(override.closures) : parsed.closureMentions,
+    typeMentions: 'types' in override ? arr(override.types) : parsed.typeMentions,
+    closureMentions: 'closures' in override ? arr(override.closures) : parsed.closureMentions,
   };
 }
 
@@ -162,12 +162,14 @@ interface ProductData {
   availableSizes: string[];
   availableMaterials: string[];
   capCount: number;
-  capIds: string[];         // verlinkte Cap-Record-IDs (intern für Bild-Auflösung)
-  capImages: string[];      // aufgelöste Cap-Bild-URLs (an Client geliefert)
+  capIds: string[];    // verlinkte Cap-Record-IDs (intern für Bild-Auflösung)
+  capImages: string[]; // aufgelöste Cap-Bild-URLs (an Client geliefert)
+  supplier: string;    // Lieferant (Link-Feld → Name), an Client geliefert
 }
 
 function extractProduct(rec: any): ProductData {
   const f = rec.fields;
+
   const caps: string[] = [];
   if (f['SF_Einfaerbbar']) caps.push('Einfärbbar');
   if (f['SF_Mattierbar']) caps.push('Mattierbar');
@@ -194,7 +196,9 @@ function extractProduct(rec: any): ProductData {
     availableMaterials: multiSelectNames(f['Available_Materials']),
     capCount: capIds.length,
     capIds,
-    capImages: [],   // wird nach dem Ranking für die Top-Ergebnisse aufgelöst
+    capImages: [], // wird nach dem Ranking für die Top-Ergebnisse aufgelöst
+    // Lieferant ist ein Link-Feld → [{id, name}]. Ersten Namen als String übernehmen.
+    supplier: multiSelectNames(f['Lieferant'])[0] || '',
   };
 }
 
@@ -258,7 +262,6 @@ function hardFilter(
         );
         if (forbidden) return false;
       }
-
       // Exclude forbidden closures
       if (category.nichtClosure.length > 0) {
         const forbidden = category.nichtClosure.some(nc =>
@@ -266,7 +269,6 @@ function hardFilter(
         );
         if (forbidden) return false;
       }
-
       // Exclude forbidden types
       if (category.nichtType.length > 0) {
         const forbidden = category.nichtType.some(nt =>
@@ -274,14 +276,12 @@ function hardFilter(
         );
         if (forbidden) return false;
       }
-
       // Volume range check from Produkt_Regeln
       if ((category.volumeMin !== null || category.volumeMax !== null) && p.availableSizes.length > 0) {
         // Parse ml values from Available_Sizes (e.g. "50ml" → 50)
         const productMls = p.availableSizes
           .map(s => parseInt(s.replace(/[^0-9]/g, ''), 10))
           .filter(n => !isNaN(n));
-
         if (productMls.length > 0) {
           // Product must have at least one size within the allowed range
           const hasValidSize = productMls.some(ml => {
@@ -312,7 +312,7 @@ async function claudeRank(
 ): Promise<RankedProduct[]> {
   if (products.length === 0) return [];
 
-  const productList = products.map((p, i) => 
+  const productList = products.map((p, i) =>
     `[${i}] ${p.name} | Type: ${p.type} | Material: ${p.material.join(',')} | Form: ${p.form.join(',')} | Closure: ${p.closure} | Capabilities: ${p.capabilities.join(',')} | Sizes: ${p.availableSizes.join(',')} | ${p.description}`
   ).join('\n');
 
@@ -321,15 +321,13 @@ async function claudeRank(
     categoryContext = `\nCategory "${category.category}" matched. Preferred materials: ${category.bevorzugtMaterial.join(', ')}. Preferred closure: ${category.bevorzugtClosure.join(', ')}. Preferred type: ${category.bevorzugtType.join(', ')}.`;
   }
 
-  const systemPrompt = `You are a beauty packaging sourcing expert. 
+  const systemPrompt = `You are a beauty packaging sourcing expert.
 A brand searches for packaging with this query. Rank how well each product fits the query emotionally and functionally.
 Consider: brand vibe, target audience, product category fit, material appropriateness, form language.
 Products that match category preferences (preferred material, closure, type) should score higher.
 ${categoryContext}
-
 Respond ONLY with a JSON array, no other text. Format:
 [{"index":0,"score":85,"reasoning":"Brief reason"},{"index":1,"score":42,"reasoning":"Brief reason"}]
-
 Score 0-100. Be decisive — spread scores widely. Best fit near 90+, poor fit below 30.`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -353,7 +351,6 @@ Score 0-100. Be decisive — spread scores widely. Best fit near 90+, poor fit b
   try {
     const cleaned = text.replace(/```json\s?|```/g, '').trim();
     const rankings = JSON.parse(cleaned) as Array<{ index: number; score: number; reasoning: string }>;
-
     return rankings
       .map(r => ({
         ...products[r.index],
@@ -373,12 +370,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { query, active_filters } = req.body as { query: string; active_filters?: any };
   if (!query) return res.status(400).json({ error: 'query ist erforderlich' });
-
   if (!process.env.AIRTABLE_PAT) return res.status(500).json({ error: 'AIRTABLE_PAT env var fehlt' });
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY env var fehlt' });
 
@@ -456,7 +453,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         closures: parsed.closureMentions,
       },
     });
-
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
     console.error('Search error:', message);
