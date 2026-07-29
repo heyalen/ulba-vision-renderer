@@ -149,6 +149,8 @@ function matchCategory(query: string, regeln: any[]): CategoryConstraints | null
 }
 
 // ── Hard Filter ─────────────────────────────────────────────────────
+interface CapRef { id: string; imageUrl: string }
+
 interface ProductData {
   id: string;
   name: string;
@@ -162,9 +164,10 @@ interface ProductData {
   availableSizes: string[];
   availableMaterials: string[];
   capCount: number;
-  capIds: string[];    // verlinkte Cap-Record-IDs (intern für Bild-Auflösung)
-  capImages: string[]; // aufgelöste Cap-Bild-URLs (an Client geliefert)
-  supplier: string;    // Lieferant (Link-Feld → Name), an Client geliefert
+  capIds: string[];        // verlinkte Cap-Record-IDs (intern für Bild-Auflösung, wird gestrippt)
+  caps: CapRef[];          // {id,imageUrl}-Paare — an Client geliefert (id für Render, url für Anzeige)
+  capImages: string[];     // nur URLs — Rückwärtskompatibilität, aus caps abgeleitet
+  supplier: string;        // Lieferant (Link-Feld → Name), an Client geliefert
 }
 
 function extractProduct(rec: any): ProductData {
@@ -196,7 +199,8 @@ function extractProduct(rec: any): ProductData {
     availableMaterials: multiSelectNames(f['Available_Materials']),
     capCount: capIds.length,
     capIds,
-    capImages: [], // wird nach dem Ranking für die Top-Ergebnisse aufgelöst
+    caps: [],        // wird nach dem Ranking für die Top-Ergebnisse aufgelöst
+    capImages: [],   // s.o., abgeleitet aus caps
     // Lieferant ist ein Link-Feld → [{id, name}]. Ersten Namen als String übernehmen.
     supplier: multiSelectNames(f['Lieferant'])[0] || '',
   };
@@ -231,17 +235,14 @@ function hardFilter(
       );
       if (!hasMatch) return false;
     }
-
     // User-explicit type filter
     if (parsed.typeMentions.length > 0) {
       if (!parsed.typeMentions.some(t => p.type.toLowerCase().includes(t.toLowerCase()))) return false;
     }
-
     // User-explicit closure filter
     if (parsed.closureMentions.length > 0) {
       if (!parsed.closureMentions.some(c => p.closure.toLowerCase().includes(c.toLowerCase()))) return false;
     }
-
     // User-explicit size filter
     if (parsed.sizeMentions.length > 0) {
       if (p.availableSizes.length > 0) {
@@ -252,7 +253,6 @@ function hardFilter(
       }
       // If product has no size data, don't exclude (data gap)
     }
-
     // Category constraints from Produkt_Regeln
     if (category) {
       // Exclude forbidden materials
@@ -294,7 +294,6 @@ function hardFilter(
         // If no parseable sizes, don't exclude (data gap)
       }
     }
-
     return true;
   });
 }
@@ -370,7 +369,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
@@ -402,7 +400,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 6. Claude ranking
     const ranked = await claudeRank(query, filtered, category);
 
-    // 6b. Cap-Bilder nur für Top-Ergebnisse auflösen (Detail-Slider)
+    // 6b. Cap-Bilder nur für Top-Ergebnisse auflösen (Detail-Slider).
+    //     caps = [{id, imageUrl}] — id für den Render, url für die Anzeige.
+    //     WICHTIG: nur Caps MIT Bild aufnehmen — id und url bleiben so immer gepaart.
     const TOP_N_FOR_CAPS = 30;
     const neededCapIds = Array.from(new Set(
       ranked.slice(0, TOP_N_FOR_CAPS).flatMap(r => r.capIds)
@@ -411,12 +411,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       try {
         const capMap = await resolveCapImages(neededCapIds);
         for (const r of ranked) {
-          r.capImages = r.capIds.map(id => capMap.get(id)).filter(Boolean) as string[];
+          r.caps = r.capIds
+            .map(id => ({ id, imageUrl: capMap.get(id) || '' }))
+            .filter(c => c.imageUrl);
+          r.capImages = r.caps.map(c => c.imageUrl);
+          r.capCount = r.caps.length;
         }
       } catch { /* Cap-Bilder optional — Suche darf daran nie scheitern */ }
     }
 
-    // Interne Felder (capIds) nicht an Client leaken
+    // Interne Felder (capIds) nicht an Client leaken — caps/capImages bleiben.
     const publicResults = ranked.map(({ capIds, ...rest }) => rest);
 
     // 7. Log search (fire-and-forget, don't block response)
