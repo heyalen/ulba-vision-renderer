@@ -149,7 +149,7 @@ function matchCategory(query: string, regeln: any[]): CategoryConstraints | null
 }
 
 // ── Hard Filter ─────────────────────────────────────────────────────
-interface CapRef { id: string; imageUrl: string }
+interface CapRef { id: string; name: string; imageUrl: string }
 
 interface ProductData {
   id: string;
@@ -164,8 +164,8 @@ interface ProductData {
   availableSizes: string[];
   availableMaterials: string[];
   capCount: number;
-  capIds: string[];        // verlinkte Cap-Record-IDs (intern für Bild-Auflösung, wird gestrippt)
-  caps: CapRef[];          // {id,imageUrl}-Paare — an Client geliefert (id für Render, url für Anzeige)
+  capIds: string[];        // verlinkte Cap-Record-IDs (intern für Auflösung, wird gestrippt)
+  caps: CapRef[];          // {id,name,imageUrl} — an Client geliefert (id+name für Anfrage, url für Anzeige)
   capImages: string[];     // nur URLs — Rückwärtskompatibilität, aus caps abgeleitet
   supplier: string;        // Lieferant (Link-Feld → Name), an Client geliefert
 }
@@ -206,17 +206,18 @@ function extractProduct(rec: any): ProductData {
   };
 }
 
-// Cap-Bilder für gegebene Cap-Record-IDs auflösen (Batch, ein Load der Cap-Tabelle).
-// Baut Map capId → Cap_Bild-URL. Caps werden nie harmonisiert → Rohbild aus Cap_Bild.
-async function resolveCapImages(capIds: string[]): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
+// Caps für gegebene Cap-Record-IDs auflösen (Batch, ein Load der Cap-Tabelle).
+// Baut Map capId → {url, name}. Caps werden nie harmonisiert → Rohbild aus Cap_Bild.
+async function resolveCaps(capIds: string[]): Promise<Map<string, { url: string; name: string }>> {
+  const map = new Map<string, { url: string; name: string }>();
   if (capIds.length === 0) return map;
   // Ganze (kleine) Cap-Tabelle laden und lokal mappen — günstiger als N ID-Lookups,
   // solange die Cap-Tabelle < einige hundert Records ist (aktuell der Fall).
   const capRecords = await airtableListAll(CAP_TABLE);
   for (const rec of capRecords) {
     const url = imgUrl(rec.fields['Cap_Bild']);
-    if (url) map.set(rec.id, url);
+    const name = rec.fields['Cap_Name'] || rec.fields['Artikelnummer'] || '';
+    if (url) map.set(rec.id, { url, name });
   }
   return map;
 }
@@ -400,24 +401,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 6. Claude ranking
     const ranked = await claudeRank(query, filtered, category);
 
-    // 6b. Cap-Bilder nur für Top-Ergebnisse auflösen (Detail-Slider).
-    //     caps = [{id, imageUrl}] — id für den Render, url für die Anzeige.
-    //     WICHTIG: nur Caps MIT Bild aufnehmen — id und url bleiben so immer gepaart.
+    // 6b. Caps nur für Top-Ergebnisse auflösen (Detail-Slider).
+    //     caps = [{id, name, imageUrl}] — id+name für die Anfrage, url für die Anzeige.
+    //     WICHTIG: nur Caps MIT Bild aufnehmen — id/name/url bleiben so immer gepaart.
     const TOP_N_FOR_CAPS = 30;
     const neededCapIds = Array.from(new Set(
       ranked.slice(0, TOP_N_FOR_CAPS).flatMap(r => r.capIds)
     ));
     if (neededCapIds.length > 0) {
       try {
-        const capMap = await resolveCapImages(neededCapIds);
+        const capMap = await resolveCaps(neededCapIds);
         for (const r of ranked) {
           r.caps = r.capIds
-            .map(id => ({ id, imageUrl: capMap.get(id) || '' }))
-            .filter(c => c.imageUrl);
+            .map(id => {
+              const c = capMap.get(id);
+              return c ? { id, name: c.name, imageUrl: c.url } : null;
+            })
+            .filter((c): c is CapRef => c !== null);
           r.capImages = r.caps.map(c => c.imageUrl);
           r.capCount = r.caps.length;
         }
-      } catch { /* Cap-Bilder optional — Suche darf daran nie scheitern */ }
+      } catch { /* Cap-Daten optional — Suche darf daran nie scheitern */ }
     }
 
     // Interne Felder (capIds) nicht an Client leaken — caps/capImages bleiben.
