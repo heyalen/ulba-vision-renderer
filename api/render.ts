@@ -84,7 +84,9 @@ async function airtableListAll(table: string): Promise<any[]> {
 // ── Determine Rendering Fall ────────────────────────────────────────
 function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; hasMultipleCaps: boolean } {
   const bildRohBase = imgUrl(sys.fields['Bild_Roh_Base']);
-  const bildSystem = imgUrl(sys.fields['Bild_System']);
+  // v5: Bild_Harmonisiert ist der bevorzugte Anker (neutrales Studio-Foto),
+  // Bild_System nur Fallback. Fall C/D (Base+Cap-Komposition) bleibt auf Roh_Base.
+  const bildSystem = imgUrl(sys.fields['Bild_Harmonisiert']) || imgUrl(sys.fields['Bild_System']);
   const caps = sys.fields['Caps'] as any[] | undefined;
   const capCount = caps?.length || 0;
 
@@ -206,7 +208,7 @@ function buildHardRule(fall: RenderFall, forbidden: string[]): string {
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
     // ── Markenwelt erlaubt, aber Guardrail ──
-    'The bottle carries a realistic PRINTED LABEL like a real retail product: a clean fictional brand wordmark, one short product descriptor line and small fine-print — crisp, professionally typeset, correctly wrapped around the bottle. STRICTLY FORBIDDEN: any real existing brand name, logo or trademark (e.g. never Porsche, never a car-brand crest).',
+    'The label shows ONLY the wordmark and category text specified above — no additional words, no invented claims. STRICTLY FORBIDDEN: any real existing brand name, logo or trademark (e.g. never Porsche, never a car-brand crest).',
     // ── Garantierte Render-Tells (code-seitig, verlässlich) ──
     'Ground the product on the surface with a soft contact shadow — the product must never float.',
     'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
@@ -223,164 +225,165 @@ type Concept = {
   szene_id: string;
 };
 
-// ── Prompt Assembly v4 — Konzept-Brief ──────────────────────────────
+// ── Prompt Assembly v5 — Constrained Selection ──────────────────────
+// Haiku schreibt KEINEN visuellen Prompt mehr. Es wählt nur aus endlichen
+// Listen (Palette/Finish/Akzent/Szene aus SF_-Feldern, Farbpaletten,
+// Design_Regeln) und liefert das Konzept (Name/Story/Herleitung).
+// Der Seedream-Prompt wird zu 100 % deterministisch im Code assembliert:
+// Preserve-first + Attribut-Ground-Truth (Render_Constraint) + echtes
+// Material + Hex/Pantone der gewählten Palette + Label in Quotes.
+// Halluzinationsfläche für Form/Material: null — der Pfad existiert nicht.
+
+const ATTRIBUT_TABLE = 'tblsWJ0q2sQ7sXwvk';
+
+// Bekannte reale Marken — dürfen NIE als Wortmarke aufs Label (Code-Guardrail,
+// zusätzlich zur Haiku-Instruktion).
+const REAL_BRAND_BLOCK = [
+  'porsche', 'audi', 'bmw', 'mercedes', 'ferrari', 'lamborghini', 'tesla',
+  'chanel', 'dior', 'gucci', 'prada', 'hermes', 'ysl', 'armani',
+  'nivea', 'loreal', "l'oreal", 'garnier', 'dove', 'vichy', 'kerastase',
+  'apple', 'nike', 'adidas', 'rolex', 'gillette',
+];
+
+const FINISH_EN: Record<string, string> = {
+  gloss: 'a clean glossy finish',
+  matt: 'a premium matte finish',
+  soft_touch: 'a soft-touch matte coating',
+};
+const FINISH_DE: Record<string, string> = {
+  gloss: 'Glanz-Finish',
+  matt: 'Matt-Finish',
+  soft_touch: 'Soft-Touch-Matt',
+};
+const AKZENT_EN: Record<string, string> = {
+  none: '',
+  hot_foil_detail: 'one single small hot-foil accent detail near the wordmark',
+  silkscreen_graphic: 'a clean minimal silkscreen-printed graphic element',
+};
+const AKZENT_DE: Record<string, string> = {
+  none: '',
+  hot_foil_detail: 'Hot-Foil-Akzent',
+  silkscreen_graphic: 'Siebdruck-Grafik',
+};
+
+function parseJsonArray(raw: any): string[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(String(raw));
+    if (Array.isArray(arr)) return arr.map(String).filter(Boolean);
+  } catch { /* Fallback: Hex/Pantone per Regex */ }
+  const m = String(raw).match(/#[0-9a-fA-F]{6}|[0-9]{2,4}\s?C?\b/g);
+  return m ? m.slice(0, 6) : [];
+}
+
+function sanitizeBrandname(name: any, brief: string): string {
+  const n = String(name || '').trim().replace(/[^A-Za-zÀ-ž0-9 &'-]/g, '').slice(0, 14);
+  if (n.length < 2) return '';
+  const low = n.toLowerCase();
+  if (REAL_BRAND_BLOCK.some(b => low.includes(b))) return '';
+  return n;
+}
+
 async function assemblePrompt(
   brief: string,
   fall: RenderFall,
   sysFields: any,
   capFields: any | null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
-  const [produktRegeln, designRegeln, farbpaletten] = await Promise.all([
+  const [produktRegeln, designRegeln, farbpalettenAll] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
     airtableListAll(DESIGN_REGELN_TABLE),
     airtableListAll(FARBPALETTEN_TABLE),
   ]);
+  // v5: Active-Filter (Bugfix — inaktive Paletten konnten bisher matchen).
+  const farbpaletten = farbpalettenAll.filter(p => !!p.fields['Active']);
 
-  const matchedProdukt = produktRegeln.filter(r =>
-    queryMatchesKeywords(brief, r.fields['Keywords'])
-  );
-  const matchedDesign = designRegeln.filter(r =>
-    queryMatchesKeywords(brief, r.fields['Wenn_Query_Signal'])
-  );
+  // ── Attribut-Ground-Truth (Render_Constraint) — positive Fixierung ─
+  const attrIds: string[] = Array.isArray(sysFields['Attribute']) ? sysFields['Attribute'] : [];
+  let attrConstraints: string[] = [];
+  if (attrIds.length > 0) {
+    try {
+      const formula = `OR(${attrIds.slice(0, 25).map(id => `RECORD_ID()='${id}'`).join(',')})`;
+      const recs = await airtableQuery(ATTRIBUT_TABLE, formula, ['A_Name (Wert)', 'Render_Constraint'], 25);
+      attrConstraints = recs
+        .map(r => String(r.fields['Render_Constraint'] || '').trim())
+        .filter(Boolean);
+    } catch { attrConstraints = []; }
+  }
 
+  const matchedProdukt = produktRegeln.filter(r => queryMatchesKeywords(brief, r.fields['Keywords']));
+  const matchedDesign = designRegeln.filter(r => queryMatchesKeywords(brief, r.fields['Wenn_Query_Signal']));
+  const nieRules = matchedDesign.map(r => String(r.fields['Nie'] || '').trim()).filter(Boolean);
+  const designCodes = matchedDesign.map(r => String(r.fields['Dann_Design_Codes'] || '').trim()).filter(Boolean);
+  const kanalSignale = matchedDesign.map(r => String(r.fields['Kanal_Signal'] || '').trim()).filter(Boolean);
+
+  // ── Paletten-Kandidaten: Design_Regeln verengen VOR der Wahl ──────
   const paletteIds = matchedDesign.flatMap(r => r.fields['Palette_Link'] || []);
-  const matchedPaletten = farbpaletten.filter(p => paletteIds.includes(p.id));
-  const activePaletten = matchedPaletten.length > 0
-    ? matchedPaletten
-    : farbpaletten.filter(p => queryMatchesKeywords(brief, multiSelectNames(p.fields['Emotion_Tags']).join(',')));
+  let candidates = farbpaletten.filter(p => paletteIds.includes(p.id));
+  if (candidates.length === 0) candidates = farbpaletten;
+  if (candidates.length === 0) throw new Error('Keine aktiven Farbpaletten vorhanden');
 
-  // Produkt-Basics
+  // ── Produkt-Basics ────────────────────────────────────────────────
   const type = selectName(sysFields['Type']);
   const material = multiSelectNames(sysFields['Material']);
   const form = multiSelectNames(sysFields['Form']).join(', ');
   const desc = sysFields['Kurzbeschreibung'] || '';
   const availMaterials = multiSelectNames(sysFields['Available_Materials']);
 
-  // Closure-Ist-Zustand: System + verlinkter Cap
   const sysClosure = multiSelectNames(sysFields['Closure']).concat(selectName(sysFields['Closure']) || []);
   const capClosure = capFields
     ? multiSelectNames(capFields['Closure_Type']).concat(selectName(capFields['Closure_Type']) || [])
     : [];
   const closureCoverage = [...new Set([...sysClosure, ...capClosure].filter(Boolean))];
+  const capMaterial = capFields ? multiSelectNames(capFields['Material']).join(', ') : '';
 
-  // ── GATES (Invariante — unverändert) ─────────────────────────────
+  // ── Gates auf den Brief (Demand-Signal 'rejected' bleibt) ─────────
   const materialCoverage = [...new Set([...availMaterials, ...material])];
   const forbiddenMaterials = runGate(brief, MATERIAL_LEXICON, materialCoverage);
   const forbiddenClosures = runGate(brief, CLOSURE_LEXICON, closureCoverage);
-  const forbidden = [...forbiddenMaterials, ...forbiddenClosures];
+  const forbidden = [...new Set([...forbiddenMaterials, ...forbiddenClosures])];
 
-  // Capabilities aus SF_-Feldern (Produzierbarkeits-Schicht)
-  const capsList: string[] = [];
-  if (sysFields['SF_Einfaerbbar']) capsList.push('Einfärbbar');
-  if (sysFields['SF_Mattierbar']) capsList.push('Matt-Finish möglich');
-  if (sysFields['SF_HotFoil']) capsList.push('Hot Foil möglich');
-  if (sysFields['SF_Embossing']) capsList.push('Embossing möglich');
-  if (sysFields['SF_Siebdruck']) capsList.push('Siebdruck möglich');
-  if (sysFields['SF_PCR']) capsList.push('PCR-Material verfügbar');
-  if (sysFields['SF_Refillable']) capsList.push('Refillable');
-  if (sysFields['SF_Airless']) capsList.push('Airless-System');
+  // ── Erlaubte Enums aus SF_-Feldern (Produzierbarkeit by construction) ─
+  const finishes: string[] = ['gloss'];
+  if (sysFields['SF_Mattierbar']) finishes.push('matt', 'soft_touch');
+  const akzente: string[] = ['none'];
+  if (sysFields['SF_HotFoil']) akzente.push('hot_foil_detail');
+  if (sysFields['SF_Siebdruck']) akzente.push('silkscreen_graphic');
+  const colorable = !!sysFields['SF_Einfaerbbar'];
+  const decoProfile = String(sysFields['Decoration_Profile'] || '').trim();
 
-  const notPossible: string[] = [];
-  if (!sysFields['SF_Mattierbar']) notPossible.push('Kein Matt-Finish');
-  if (!sysFields['SF_HotFoil']) notPossible.push('Kein Hot Foil');
-  if (!sysFields['SF_Embossing']) notPossible.push('Kein Embossing');
-  if (!sysFields['SF_Refillable']) notPossible.push('Nicht refillable — kein Refill-Visual');
-  if (!sysFields['SF_Airless']) notPossible.push('Kein Airless-System');
+  // Emotions-Label-Set = Union der Emotion_Tags der Kandidaten-Paletten.
+  const emotionTagSet = [...new Set(candidates.flatMap(p => multiSelectNames(p.fields['Emotion_Tags'])))];
 
-  // ── Context ──────────────────────────────────────────────────────
-  let context = `PRODUCT (fixed, not negotiable): ${type} | ${material.join(', ')} | ${form}\n${desc}\n`;
-  if (closureCoverage.length > 0) {
-    context += `CURRENT CLOSURE (fixed): ${closureCoverage.join(', ')}\n`;
-  }
+  // ── Haiku: NUR Auswahl + Konzept — striktes JSON, keine Prosa ─────
+  const paletteList = candidates.map(p => {
+    const f = p.fields;
+    return `- id: ${p.id} | ${f['Name'] || ''} | tags: ${multiSelectNames(f['Emotion_Tags']).join(', ')} | warmth: ${selectName(f['SF_Warmth']) || '-'} | prestige: ${f['SF_Prestige_Score'] ?? '-'}/5 | zeitgeist: ${f['SF_Zeitgeist_Score'] ?? '-'}/5 | ${String(f['Beschreibung'] || '').slice(0, 90)}`;
+  }).join('\n');
 
-  if (matchedProdukt.length > 0) {
-    const pr = matchedProdukt[0].fields;
-    context += `\nCATEGORY RULES (${pr['Kategorie'] || 'matched'}):\n`;
-    if (pr['Bevorzugt_Material']) context += `- Preferred materials: ${pr['Bevorzugt_Material']}\n`;
-    if (pr['Nicht_Material']) context += `- Avoid materials: ${pr['Nicht_Material']}\n`;
-    if (pr['Bevorzugt_Closure']) context += `- Preferred closure: ${pr['Bevorzugt_Closure']}\n`;
-  }
+  const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
+You NEVER write a visual prompt and NEVER invent materials, shapes, ingredients, actives, scents or claims.
+You only SELECT from the finite options below and write a short German concept grounded in the brief.
 
-  if (matchedDesign.length > 0) {
-    context += `\nDESIGN RULES:\n`;
-    for (const dr of matchedDesign) {
-      const f = dr.fields;
-      if (f['Dann_Design_Codes']) context += `- Design codes: ${f['Dann_Design_Codes']}\n`;
-      if (f['Nie']) context += `- NEVER: ${f['Nie']}\n`;
-      if (f['Kanal_Signal']) context += `- Channel signal: ${f['Kanal_Signal']}\n`;
-    }
-  }
+PRODUCT (fixed, never changed): ${type} | ${material.join(', ')} | ${form}
+${desc ? String(desc).slice(0, 200) : ''}
+${closureCoverage.length ? `CLOSURE (fixed): ${closureCoverage.join(', ')}` : ''}
+${designCodes.length ? `DESIGN CODES (apply): ${designCodes.join(' · ')}` : ''}
+${kanalSignale.length ? `CHANNEL SIGNAL: ${kanalSignale.join(' · ')}` : ''}
+${nieRules.length ? `NEVER (hard): ${nieRules.join(' · ')}` : ''}
 
-  if (activePaletten.length > 0) {
-    const pal = activePaletten[0].fields;
-    context += `\nCOLOR PALETTE "${pal['Name'] || ''}":\n`;
-    if (pal['Hex_Codes']) context += `- Hex codes: ${pal['Hex_Codes']}\n`;
-    if (pal['Beschreibung']) context += `- ${pal['Beschreibung']}\n`;
-    context += `- USE THESE EXACT HEX CODES, do not invent colors.\n`;
-  }
+STEP 1 — ziel_profil: choose 3–5 tags ONLY from: [${emotionTagSet.join(', ')}]. They must express the brief's audience/mood.
+STEP 2 — palette_id: exactly one id from PALETTES below whose tags/warmth/prestige best fit ziel_profil.
+PALETTES:
+${paletteList}
+STEP 3 — finish: one of [${finishes.join(', ')}].
+STEP 4 — akzent: one of [${akzente.join(', ')}].
+STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
+STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
+STEP 7 — konzept_name (1–3 words), story (ONE German sentence, only what the brief says), herleitung (ONE German sentence: why palette/finish follow from the ziel_profil).
 
-  if (capsList.length > 0) context += `\nCAPABILITIES: ${capsList.join(', ')}\n`;
-  if (notPossible.length > 0) context += `CONSTRAINTS: ${notPossible.join(', ')} — do NOT render these.\n`;
-  if (availMaterials.length > 0) context += `AVAILABLE MATERIALS (the only ones the supplier offers): ${availMaterials.join(', ')}\n`;
-
-  if (forbidden.length > 0) {
-    context += `\nREJECTED FROM BRIEF — the brief mentions these, but the product does not offer them.\n`;
-    context += `Do NOT render, imply or hint at: ${forbidden.join(', ')}.\n`;
-  }
-
-  // ── Fall-Instruktionen (Bild-Kombination — orthogonal zur Markenwelt) ─
-  let fallInstructions: string;
-  if (fall === 'A') {
-    fallInstructions = `SINGLE IMAGE edit. Change ONLY color, finish, surface treatment and applied label-world — never shape, never the closure. The visual prompt must open with: "Keep exact shape, form, proportions and closure unchanged."`;
-  } else if (fall === 'B') {
-    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle WITH existing cap, image 2 = replacement cap. The visual prompt MUST include: "REPLACE the original cap from image 1 with the cap from image 2 exactly as shown. Do NOT merge them, do NOT invent a new cap." Describe color/finish for body and cap separately.`;
-  } else {
-    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle body (base), image 2 = cap/closure. The visual prompt must open with: "Compose a single product photo by combining the two reference images." Body shape comes exactly from image 1. Cap shape and mechanism come exactly from image 2 — never invented. Describe color/finish for body and cap separately, and assemble the cap onto the bottle neck, flush and aligned.`;
-  }
-
-  // ── Konzept-Brief System-Prompt ──────────────────────────────────
-  const systemPrompt = `You are the ulba concept-brief generator for beauty packaging.
-You receive a REAL, existing catalog product — its shape, material and closure are already fixed by the reference images and the PRODUCT DATA below — plus a brand brief describing a mood and a brand.
-Your job: apply a BRAND WORLD onto the fixed body. You never redesign the object.
-
-FIXED — NON-NEGOTIABLE (restate for yourself; also enforced downstream):
-- Shape, silhouette, proportions, size, closure and material are fixed. Never change, imply or hint at changing them.
-- If the brief implies a different form, material or closure, silently drop that part and express the intention ONLY through color, finish, decoration, graphic label-world and scene.
-- INVENT NOTHING BEYOND THE BRIEF: never invent ingredients, actives (e.g. vitamin C), scents, flavors, benefits or marketing claims that the brief does not state. Concept name, story and colors must stay within what the brief actually says. A thin brief (e.g. just an audience + a category) gets a RESTRAINED result: one clean color direction fitting the audience, a calm finish, a minimal label — not an invented product concept.
-- MATERIAL-LOOK LOCK: a metallic look on a plastic body (PET, PETG, PP, acrylic) is ONLY a thin metallized lacquer ON the plastic — the object stays visibly a plastic bottle. NEVER render or describe a solid metal body, an aluminium can, brushed steel or a chrome cylinder unless metal is the product's ACTUAL material. When unsure, put the metallic accent only on the cap / ring / label and keep the body clearly plastic.
-- BRAND CUE: if the brief names a real brand (a car, fashion, tech or luxury name), translate it ONLY into SURFACE language — color, finish, ONE accent stripe or detail, label-graphic impression, scene mood — NEVER into shape, proportion, silhouette, a new form, a different closure, a material or a logo. A brand never makes the bottle angular, faceted, "architectural", tapered, geometric or a different container. Choose one ground tone and exactly ONE accent.
-
-WHAT YOU DECIDE (the brand world on top of the fixed body):
-1. FINISH / DECORATION — only techniques the product actually supports (see CAPABILITIES / CONSTRAINTS / AVAILABLE MATERIALS). Real techniques only: coloring, metallization, hot foil, direct print, label, matt / gloss / soft-touch coating.
-2. GRAPHIC / LABEL WORLD — design a minimal retail label: INVENT a fictional brand name (2–8 letters, evocative, NEVER a real brand or car brand) plus the product CATEGORY exactly as the brief states it (e.g. "SERUM", "MEN'S SHAMPOO · 300ml"). NOTHING else on the label: no invented ingredients, actives, benefits or claims. Typography, layout and placement like a real premium product — restrained, not busy.
-3. COLOR — use the palette hex codes when provided; do not invent colors then.
-4. SCENE — DEFAULT to a clean e-commerce packshot: pick 'studio_soft' or 'highkey_bright' (bright, neutral, like a retail product photo) UNLESS the brief explicitly asks for a dark, moody or editorial setting — only then pick a matching darker scene id.
-5. CONCEPT — a concept name (1–3 words) + a one-sentence story that turns the part into a vision.
-6. RATIONALE — one sentence on why this product fits the brief.
-
-Respect all CATEGORY RULES and DESIGN RULES below — never violate a "NEVER" rule.
-
-SCENE OPTIONS:
-${SCENE_PRESETS.map(s => `- ${s.id}: ${s.en}`).join('\n')}
-
-${fallInstructions}
-
-OUTPUT — reply with ONLY a JSON object. No markdown, no code fences, no prose. Exactly:
-{
-  "visuell_en": "ONE short English Seedream EDIT instruction (max 60 words) that recolors and re-finishes the EXACT bottle in the reference image. It MUST START with: 'Keep the exact same bottle shape, silhouette, proportions, neck and closure from the reference image — change only the surface.' Then: the body color and finish named POSITIVELY with its real material (e.g. 'matte soft-touch black plastic'), ONE accent, and the printed label with the invented brand name and product line IN QUOTES (e.g. label text: \\"AXEN\\" and \\"MEN'S SHAMPOO\\") in clean typography, plus the scene backdrop. NO shape or form words (no angular, faceted, architectural, geometric, tapered, sleek, redesigned), never a different closure, never a real brand name.",
-  "konzept_name": "1-3 words",
-  "story": "one sentence, German",
-  "rationale": "one sentence, German",
-  "produzierbar_de": {
-    "finish": ["real producible finish values, German"],
-    "dekoration": ["real producible decoration techniques, German"],
-    "grafik_label": "typography feeling + layout + logo placement, German",
-    "farbkonzept": "German"
-  },
-  "szene_id": "one id from SCENE OPTIONS"
-}
-
-${context}`;
+OUTPUT ONLY this JSON, no fences, no prose:
+{"ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…"}`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -391,53 +394,102 @@ ${context}`;
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5',
-      max_tokens: 700,
-      system: systemPrompt,
+      max_tokens: 500,
+      temperature: 0,
+      system: selectionPrompt,
       messages: [{ role: 'user', content: brief }],
     }),
   });
-
   const data = await res.json() as { content: Array<{ text: string }> };
   const rawText = (data.content?.[0]?.text || '').trim();
-  if (!rawText) throw new Error('Prompt-Assembly leer');
-
-  // Robustes JSON-Parsing (Fences strippen, Fallback: ganzer Text = visuell).
-  const cleaned = rawText
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/, '')
-    .replace(/```$/, '')
-    .trim();
 
   let parsed: any = null;
-  try { parsed = JSON.parse(cleaned); } catch { parsed = null; }
+  try {
+    parsed = JSON.parse(rawText.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim());
+  } catch { parsed = null; }
 
-  const visuell = (parsed?.visuell_en || '').trim() || rawText;
-  const concept: Concept = {
-    konzept_name: parsed?.konzept_name || '',
-    story: parsed?.story || '',
-    rationale: parsed?.rationale || '',
-    produzierbar: parsed?.produzierbar_de || null,
-    szene_id: parsed?.szene_id || '',
+  // ── Validierung mit deterministischen Fallbacks ───────────────────
+  const pal = candidates.find(p => p.id === parsed?.palette_id) || candidates[0];
+  const finish = finishes.includes(parsed?.finish) ? parsed.finish : finishes[finishes.length - 1];
+  const akzent = akzente.includes(parsed?.akzent) ? parsed.akzent : 'none';
+  const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id) ? parsed.szene_id : 'studio_soft';
+  const szene = SCENE_PRESETS.find(s => s.id === szeneId)!;
+  const brandname = sanitizeBrandname(parsed?.brandname, brief);
+  const zielProfil: string[] = Array.isArray(parsed?.ziel_profil)
+    ? parsed.ziel_profil.filter((t: any) => emotionTagSet.includes(t)).slice(0, 5)
+    : [];
+
+  const palName = String(pal.fields['Name'] || '');
+  const hex = parseJsonArray(pal.fields['Hex_Codes']).slice(0, 3);
+  const pantone = parseJsonArray(pal.fields['Pantone_Nearest']).slice(0, 3);
+
+  // ── Deterministische Prompt-Assembly (kein Haiku-Text) ────────────
+  const primaryMat = (material[0] || 'plastic').toLowerCase();
+  const isPlastic = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
+  const matEN = material.join(' / ') || 'plastic';
+  const kategorie = String(matchedProdukt[0]?.fields['Kategorie'] || type || 'Beauty Product');
+
+  const lines: string[] = [];
+  lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY surface color, finish and label.`);
+  if (attrConstraints.length) {
+    lines.push(`Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`);
+  }
+  if (fall === 'B') {
+    lines.push(`Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap.`);
+  } else if (fall === 'C' || fall === 'D') {
+    lines.push(`Compose a single product photo by combining the two reference images: body shape exactly from image 1, cap shape and mechanism exactly from image 2, assembled onto the bottle neck, flush and aligned.`);
+  }
+  lines.push(`The body is ${matEN}${isPlastic ? ' — it must clearly read as a plastic container, never as solid metal, aluminium, steel, glass or ceramic' : ''}.`);
+  if (capMaterial) lines.push(`The cap is ${capMaterial}.`);
+  if (colorable && hex.length) {
+    lines.push(`Recolor the body in ${hex[0]}${hex[1] ? ` with ${hex[1]} as secondary tone` : ''}, applied as ${FINISH_EN[finish]} on the existing material.`);
+  } else if (hex.length) {
+    lines.push(`Do NOT recolor the body material itself — express the palette (${hex.join(', ')}) only through the printed label and the cap; body keeps ${FINISH_EN[finish]}.`);
+  }
+  if (AKZENT_EN[akzent]) lines.push(`Add ${AKZENT_EN[akzent]}.`);
+  const labelText = brandname
+    ? `label text: "${brandname.toUpperCase()}" and "${kategorie.toUpperCase()}"`
+    : `label text: "${kategorie.toUpperCase()}"`;
+  lines.push(`The bottle carries a realistic printed retail label — ${labelText} — in clean, professionally typeset typography, correctly wrapped around the bottle. No other words, no invented claims, no real existing brand names or logos.`);
+  lines.push(`Scene: ${szene.en}.`);
+
+  const visuell = lines.join(' ');
+
+  // ── Konzept + Produzierbar (code-built, Register 2) ───────────────
+  const produzierbar = {
+    finish: [FINISH_DE[finish]],
+    dekoration: [
+      ...(AKZENT_DE[akzent] ? [AKZENT_DE[akzent]] : []),
+      ...(colorable ? ['Einfärbung Primärbehälter'] : ['Farbe via Label/Cap (Behälter nicht einfärbbar)']),
+      ...(decoProfile ? [decoProfile.slice(0, 120)] : []),
+    ],
+    grafik_label: brandname
+      ? `Wortmarke "${brandname}" + "${kategorie}", reduzierte Typo`
+      : `Wortmarke (Platzhalter) + "${kategorie}", reduzierte Typo`,
+    farbkonzept: `${palName} — Hex: ${hex.join(', ')}${pantone.length ? ` · Pantone: ${pantone.join(', ')}` : ''}`,
   };
 
-  // ── POST-GATE (Integritäts-Netz) ─────────────────────────────────
-  // Der Input-Gate oben prüft nur den Brief. Haiku kann im visuell_en aber ein
-  // Material/Verschluss erfinden, das der Brief nie erwähnte (z. B. "brushed
-  // metallic chrome" auf einer PET-Flasche). Also visuell_en gegen dieselbe
-  // Coverage gaten und mergen — Chrom auf Kunststoff wird so hart forbidden.
+  const herleitung = String(parsed?.herleitung || '').trim();
+  const rationale = [
+    zielProfil.length ? `Zielprofil: ${zielProfil.join(' · ')}` : '',
+    herleitung || `Palette ${palName} und ${FINISH_DE[finish]} folgen aus dem Brief.`,
+  ].filter(Boolean).join(' — ');
 
-  const outputForbidden = [
-    ...runGate(visuell, MATERIAL_LEXICON, materialCoverage),
-    ...runGate(visuell, CLOSURE_LEXICON, closureCoverage),
-  ];
-  const forbiddenAll = [...new Set([...forbidden, ...outputForbidden])];
+  const concept: Concept = {
+    konzept_name: String(parsed?.konzept_name || palName || '').slice(0, 60),
+    story: String(parsed?.story || '').slice(0, 240),
+    rationale,
+    produzierbar,
+    szene_id: szeneId,
+  };
 
   return {
-    prompt: `${visuell}\n\n${buildHardRule(fall, forbiddenAll)}`,
-    forbidden: forbiddenAll,
+    prompt: `${visuell}\n\n${buildHardRule(fall, forbidden)}`,
+    forbidden,
     concept,
   };
 }
+
 
 // ── Main Handler ────────────────────────────────────────────────────
 export const config = { api: { bodyParser: true } };
