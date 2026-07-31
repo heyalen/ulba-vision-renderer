@@ -138,7 +138,7 @@ const MATERIAL_LEXICON: LexEntry[] = [
   { label: 'Glas', en: 'glass', tokens: ['glas', 'glass'] },
   { label: 'Keramik', en: 'ceramic', tokens: ['keramik', 'ceramic', 'porzellan', 'porcelain'] },
   { label: 'Stein', en: 'stone or marble', tokens: ['stein', 'stone', 'marmor', 'marble', 'terrazzo'] },
-  { label: 'Aluminium', en: 'aluminium', tokens: ['aluminium', 'aluminum', 'alu'] },
+  { label: 'Aluminium', en: 'aluminium', tokens: ['aluminium', 'aluminum', 'alu', 'chrom', 'chrome', 'chromed', 'verchromt'] },
   { label: 'Metall', en: 'metal', tokens: ['metall', 'metal'] },
   { label: 'Stahl', en: 'steel', tokens: ['stahl', 'steel'] },
   { label: 'Messing', en: 'brass', tokens: ['messing', 'brass'] },
@@ -345,6 +345,8 @@ Your job: apply a BRAND WORLD onto the fixed body. You never redesign the object
 FIXED — NON-NEGOTIABLE (restate for yourself; also enforced downstream):
 - Shape, silhouette, proportions, size, closure and material are fixed. Never change, imply or hint at changing them.
 - If the brief implies a different form, material or closure, silently drop that part and express the intention ONLY through color, finish, decoration, graphic label-world and scene.
+- MATERIAL-LOOK LOCK: a metallic look on a plastic body (PET, PETG, PP, acrylic) is ONLY a thin metallized lacquer ON the plastic — the object stays visibly a plastic bottle. NEVER render or describe a solid metal body, an aluminium can, brushed steel or a chrome cylinder unless metal is the product's ACTUAL material. When unsure, put the metallic accent only on the cap / ring / label and keep the body clearly plastic.
+- BRAND CUE: if the brief names a real brand (a car, fashion, tech or luxury name), translate it ONLY into design language — proportion, restraint, one accent, finish, color mood — NEVER into a material, a logo, or "make it all chrome". A brand name never becomes full chrome and never a readable logo. Choose one ground tone and exactly ONE accent.
 
 WHAT YOU DECIDE (the brand world on top of the fixed body):
 1. FINISH / DECORATION — only techniques the product actually supports (see CAPABILITIES / CONSTRAINTS / AVAILABLE MATERIALS). Real techniques only: coloring, metallization, hot foil, direct print, label, matt / gloss / soft-touch coating.
@@ -416,9 +418,21 @@ ${context}`;
     szene_id: parsed?.szene_id || '',
   };
 
+  // ── POST-GATE (Integritäts-Netz) ─────────────────────────────────
+  // Der Input-Gate oben prüft nur den Brief. Haiku kann im visuell_en aber ein
+  // Material/Verschluss erfinden, das der Brief nie erwähnte (z. B. "brushed
+  // metallic chrome" auf einer PET-Flasche). Also visuell_en gegen dieselbe
+  // Coverage gaten und mergen — Chrom auf Kunststoff wird so hart forbidden.
+
+  const outputForbidden = [
+    ...runGate(visuell, MATERIAL_LEXICON, materialCoverage),
+    ...runGate(visuell, CLOSURE_LEXICON, closureCoverage),
+  ];
+  const forbiddenAll = [...new Set([...forbidden, ...outputForbidden])];
+
   return {
-    prompt: `${visuell}\n\n${buildHardRule(fall, forbidden)}`,
-    forbidden,
+    prompt: `${visuell}\n\n${buildHardRule(fall, forbiddenAll)}`,
+    forbidden: forbiddenAll,
     concept,
   };
 }
