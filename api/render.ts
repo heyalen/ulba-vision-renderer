@@ -463,26 +463,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const cached = await airtableQuery(
       CACHE_TABLE,
       `{Cache_Key}='${key}'`,
-      ['Cache_Key', 'Bild', 'Rendering_Prompt'],
+      ['Cache_Key', 'Bild', 'Rendering_Prompt', 'Konzept_Name', 'Konzept_Story', 'Konzept_Rationale', 'Szene_ID', 'Produzierbar'],
       1
     );
     if (cached.length > 0) {
       const cachedImg = imgUrl(cached[0].fields['Bild']);
       if (cachedImg) {
-        // Rendering_Prompt speichert jetzt {prompt, concept} als JSON.
-        let cachedPrompt = cached[0].fields['Rendering_Prompt'] || '';
-        let cachedConcept: Concept | null = null;
-        try {
-          const o = JSON.parse(cachedPrompt);
-          if (o && typeof o === 'object' && o.prompt) {
-            cachedPrompt = o.prompt;
-            cachedConcept = o.concept || null;
-          }
-        } catch { /* alter Record: reiner Prompt-String */ }
+        const cf = cached[0].fields;
+        let produzierbar: any = null;
+        try { produzierbar = cf['Produzierbar'] ? JSON.parse(cf['Produzierbar']) : null; } catch { produzierbar = null; }
+        const cachedConcept: Concept | null = (cf['Konzept_Name'] || cf['Szene_ID'] || produzierbar)
+          ? {
+              konzept_name: cf['Konzept_Name'] || '',
+              story: cf['Konzept_Story'] || '',
+              rationale: cf['Konzept_Rationale'] || '',
+              produzierbar,
+              szene_id: cf['Szene_ID'] || '',
+            }
+          : null;
 
         return res.status(200).json({
           renderingUrl: cachedImg,
-          renderingPrompt: cachedPrompt,
+          renderingPrompt: cf['Rendering_Prompt'] || '',
           briefUsed: effectiveBrief,
           cacheId: cached[0].id,
           cached: true,
@@ -562,8 +564,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             Cache_Key: key,
             System: [systemId],
             Query_Input: query, // roh, nie sanitisiert — Demand-Signal
-            // Prompt + Konzept gebündelt (kein neues Airtable-Feld nötig).
-            Rendering_Prompt: JSON.stringify({ prompt: renderingPrompt, concept }),
+            Rendering_Prompt: renderingPrompt, // reiner Seedream-Prompt
+            // Konzept als eigene, auswertbare Felder (Demand-Signal / Provenienz).
+            Konzept_Name: concept.konzept_name || '',
+            Konzept_Story: concept.story || '',
+            Konzept_Rationale: concept.rationale || '',
+            Szene_ID: concept.szene_id || '',
+            Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
             Tier: tier,
             Fall: fall,
             Created_At: new Date().toISOString(),
