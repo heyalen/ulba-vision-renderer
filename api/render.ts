@@ -19,6 +19,18 @@ const FAL_ENDPOINTS = {
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
 
+// ── Szenen-Presets (handkuratiert, kein Korpus, kein Airtable) ──────
+// Haiku wählt genau EINE ID passend zur Emotion. Nur Backdrop/Licht-Stimmung —
+// nie Form/Material. Ergänzbar ohne Deploy-Risiko.
+const SCENE_PRESETS: { id: string; en: string }[] = [
+  { id: 'studio_soft',      en: 'minimal seamless studio, soft neutral off-white backdrop, gentle gradient' },
+  { id: 'concrete_cool',    en: 'dark micro-cement surface, cool blue-grey side light, engineered technical mood' },
+  { id: 'highkey_bright',   en: 'bright high-key set, clean pastel backdrop, playful and fresh' },
+  { id: 'stone_luxe',       en: 'honed stone or marble surface, warm directional light, quiet-luxury mood' },
+  { id: 'botanical_warm',   en: 'warm linen surface, soft daylight, a hint of out-of-focus greenery' },
+  { id: 'vanity_editorial', en: 'glossy dark vanity surface with a soft reflection, editorial beauty lighting' },
+];
+
 // ── Helpers ─────────────────────────────────────────────────────────
 function queryHash(q: string): string {
   return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
@@ -93,7 +105,6 @@ function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; hasMul
   if (bildRohBase && capCount === 0) {
     return { fall: 'A', primaryUrl: bildRohBase, hasMultipleCaps: false };
   }
-
   return { fall: 'A', primaryUrl: (bildSystem || bildRohBase)!, hasMultipleCaps: false };
 }
 
@@ -120,37 +131,37 @@ function queryMatchesKeywords(query: string, keywordText: string | undefined): b
 type LexEntry = { label: string; en: string; tokens: string[] };
 
 const MATERIAL_LEXICON: LexEntry[] = [
-  { label: 'Bambus',    en: 'bamboo',            tokens: ['bambus', 'bamboo'] },
-  { label: 'Holz',      en: 'wood',              tokens: ['holz', 'wood', 'wooden', 'timber', 'oak', 'eiche'] },
-  { label: 'Kork',      en: 'cork',              tokens: ['kork', 'cork'] },
-  { label: 'Papier',    en: 'paper or cardboard',tokens: ['papier', 'paper', 'karton', 'cardboard', 'pappe'] },
-  { label: 'Glas',      en: 'glass',             tokens: ['glas', 'glass'] },
-  { label: 'Keramik',   en: 'ceramic',           tokens: ['keramik', 'ceramic', 'porzellan', 'porcelain'] },
-  { label: 'Stein',     en: 'stone or marble',   tokens: ['stein', 'stone', 'marmor', 'marble', 'terrazzo'] },
-  { label: 'Aluminium', en: 'aluminium',         tokens: ['aluminium', 'aluminum', 'alu'] },
-  { label: 'Metall',    en: 'metal',             tokens: ['metall', 'metal'] },
-  { label: 'Stahl',     en: 'steel',             tokens: ['stahl', 'steel'] },
-  { label: 'Messing',   en: 'brass',             tokens: ['messing', 'brass'] },
-  { label: 'Kupfer',    en: 'copper',            tokens: ['kupfer', 'copper'] },
-  { label: 'Zamak',     en: 'zamak',             tokens: ['zamak'] },
-  { label: 'PCR',       en: 'visible recycled material texture', tokens: ['pcr', 'rezyklat', 'recycled', 'ocean plastic'] },
-  { label: 'Acryl',     en: 'acrylic',           tokens: ['acryl', 'acrylic', 'pmma', 'plexiglas'] },
-  { label: 'Surlyn',    en: 'surlyn',            tokens: ['surlyn'] },
-  { label: 'PETG',      en: 'petg',              tokens: ['petg'] },
-  { label: 'PET',       en: 'pet',               tokens: ['pet'] },
-  { label: 'HDPE',      en: 'hdpe',              tokens: ['hdpe'] },
-  { label: 'PP',        en: 'polypropylene',     tokens: ['pp', 'polypropylen', 'polypropylene'] },
+  { label: 'Bambus', en: 'bamboo', tokens: ['bambus', 'bamboo'] },
+  { label: 'Holz', en: 'wood', tokens: ['holz', 'wood', 'wooden', 'timber', 'oak', 'eiche'] },
+  { label: 'Kork', en: 'cork', tokens: ['kork', 'cork'] },
+  { label: 'Papier', en: 'paper or cardboard',tokens: ['papier', 'paper', 'karton', 'cardboard', 'pappe'] },
+  { label: 'Glas', en: 'glass', tokens: ['glas', 'glass'] },
+  { label: 'Keramik', en: 'ceramic', tokens: ['keramik', 'ceramic', 'porzellan', 'porcelain'] },
+  { label: 'Stein', en: 'stone or marble', tokens: ['stein', 'stone', 'marmor', 'marble', 'terrazzo'] },
+  { label: 'Aluminium', en: 'aluminium', tokens: ['aluminium', 'aluminum', 'alu'] },
+  { label: 'Metall', en: 'metal', tokens: ['metall', 'metal'] },
+  { label: 'Stahl', en: 'steel', tokens: ['stahl', 'steel'] },
+  { label: 'Messing', en: 'brass', tokens: ['messing', 'brass'] },
+  { label: 'Kupfer', en: 'copper', tokens: ['kupfer', 'copper'] },
+  { label: 'Zamak', en: 'zamak', tokens: ['zamak'] },
+  { label: 'PCR', en: 'visible recycled material texture', tokens: ['pcr', 'rezyklat', 'recycled', 'ocean plastic'] },
+  { label: 'Acryl', en: 'acrylic', tokens: ['acryl', 'acrylic', 'pmma', 'plexiglas'] },
+  { label: 'Surlyn', en: 'surlyn', tokens: ['surlyn'] },
+  { label: 'PETG', en: 'petg', tokens: ['petg'] },
+  { label: 'PET', en: 'pet', tokens: ['pet'] },
+  { label: 'HDPE', en: 'hdpe', tokens: ['hdpe'] },
+  { label: 'PP', en: 'polypropylene', tokens: ['pp', 'polypropylen', 'polypropylene'] },
 ];
 
 const CLOSURE_LEXICON: LexEntry[] = [
-  { label: 'Pipette',   en: 'a dropper or pipette', tokens: ['pipette', 'dropper', 'tropfer'] },
-  { label: 'Pumpe',     en: 'a pump',               tokens: ['pumpe', 'pump', 'lotion pump'] },
-  { label: 'Spray',     en: 'a spray or atomizer',  tokens: ['spray', 'sprüh', 'spruh', 'atomizer', 'zerstäuber', 'zerstauber', 'mist'] },
-  { label: 'Airless',   en: 'an airless dispenser', tokens: ['airless'] },
-  { label: 'Disc Top',  en: 'a disc top',           tokens: ['disc top', 'disctop'] },
-  { label: 'Flip Top',  en: 'a flip top',           tokens: ['flip top', 'fliptop', 'klappdeckel'] },
-  { label: 'Roll-On',   en: 'a roll-on ball',       tokens: ['roll-on', 'rollon', 'roller', 'rollerball', 'kugel'] },
-  { label: 'Schraubverschluss', en: 'a screw cap',  tokens: ['schraubverschluss', 'screw cap', 'twist off'] },
+  { label: 'Pipette', en: 'a dropper or pipette', tokens: ['pipette', 'dropper', 'tropfer'] },
+  { label: 'Pumpe', en: 'a pump', tokens: ['pumpe', 'pump', 'lotion pump'] },
+  { label: 'Spray', en: 'a spray or atomizer', tokens: ['spray', 'sprüh', 'spruh', 'atomizer', 'zerstäuber', 'zerstauber', 'mist'] },
+  { label: 'Airless', en: 'an airless dispenser', tokens: ['airless'] },
+  { label: 'Disc Top', en: 'a disc top', tokens: ['disc top', 'disctop'] },
+  { label: 'Flip Top', en: 'a flip top', tokens: ['flip top', 'fliptop', 'klappdeckel'] },
+  { label: 'Roll-On', en: 'a roll-on ball', tokens: ['roll-on', 'rollon', 'roller', 'rollerball', 'kugel'] },
+  { label: 'Schraubverschluss', en: 'a screw cap', tokens: ['schraubverschluss', 'screw cap', 'twist off'] },
 ];
 
 function tokenPresent(text: string, token: string): boolean {
@@ -163,7 +174,6 @@ function runGate(brief: string, lexicon: LexEntry[], coverage: string[]): string
   const text = ` ${brief.toLowerCase()} `;
   const cov = coverage.map(c => c.toLowerCase()).filter(Boolean);
   const forbidden: string[] = [];
-
   for (const entry of lexicon) {
     const mentioned = entry.tokens.some(t => tokenPresent(text, t));
     if (!mentioned) continue;
@@ -175,7 +185,13 @@ function runGate(brief: string, lexicon: LexEntry[], coverage: string[]): string
   return [...new Set(forbidden)];
 }
 
-/** Hard-Rule wird IMMER im Code angehängt — nie von Haiku geschrieben. */
+/**
+ * Hard-Rule wird IMMER im Code angehängt — nie von Haiku geschrieben.
+ * FORM / MATERIAL / VERSCHLUSS / forbidden bleiben hart gesperrt (Invariante).
+ * Geändert ggü. Blank-Version: statt „completely blank / white background"
+ * jetzt Marken-Anmutung erlaubt (aber kein lesbarer Text / kein echtes Logo)
+ * + garantierte Render-Tells (Grounding, Licht, Optik).
+ */
 function buildHardRule(fall: RenderFall, forbidden: string[]): string {
   const closureRule = fall === 'A'
     ? 'Do not add, remove, replace or restyle the closure — keep the closure exactly as shown in the reference image.'
@@ -183,23 +199,36 @@ function buildHardRule(fall: RenderFall, forbidden: string[]): string {
 
   return [
     'CRITICAL RULES — these override everything above.',
+    // ── Invariante (unverändert hart) ──
     'Do not change the shape, silhouette, proportions or size of the packaging.',
     closureRule,
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
-    'No text, no logos, no labels, no typography, no branding — the product must be completely blank.',
-    'Studio product photography, clean white background, soft natural shadow, photorealistic.',
+    // ── Markenwelt erlaubt, aber Guardrail ──
+    'Label artwork and typography may appear ONLY as the impression of a brand — no legible or readable text, no real words, no existing or recognizable brand logos or names.',
+    // ── Garantierte Render-Tells (code-seitig, verlässlich) ──
+    'Ground the product on the surface with a soft contact shadow — the product must never float.',
+    'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
+    '100mm macro, f/8, commercial product photography, photorealistic.',
+    'No hard shadows, no clutter, no oversaturation, no cheap plastic look.',
   ].filter(Boolean).join(' ');
 }
 
-// ── Prompt Assembly v3 ──────────────────────────────────────────────
+type Concept = {
+  konzept_name: string;
+  story: string;
+  rationale: string;
+  produzierbar: any | null;
+  szene_id: string;
+};
+
+// ── Prompt Assembly v4 — Konzept-Brief ──────────────────────────────
 async function assemblePrompt(
   brief: string,
   fall: RenderFall,
   sysFields: any,
   capFields: any | null
-): Promise<{ prompt: string; forbidden: string[] }> {
-
+): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
   const [produktRegeln, designRegeln, farbpaletten] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
     airtableListAll(DESIGN_REGELN_TABLE),
@@ -233,13 +262,13 @@ async function assemblePrompt(
     : [];
   const closureCoverage = [...new Set([...sysClosure, ...capClosure].filter(Boolean))];
 
-  // ── GATES ────────────────────────────────────────────────────────
+  // ── GATES (Invariante — unverändert) ─────────────────────────────
   const materialCoverage = [...new Set([...availMaterials, ...material])];
   const forbiddenMaterials = runGate(brief, MATERIAL_LEXICON, materialCoverage);
   const forbiddenClosures = runGate(brief, CLOSURE_LEXICON, closureCoverage);
   const forbidden = [...forbiddenMaterials, ...forbiddenClosures];
 
-  // Capabilities aus SF_-Feldern
+  // Capabilities aus SF_-Feldern (Produzierbarkeits-Schicht)
   const capsList: string[] = [];
   if (sysFields['SF_Einfaerbbar']) capsList.push('Einfärbbar');
   if (sysFields['SF_Mattierbar']) capsList.push('Matt-Finish möglich');
@@ -292,48 +321,60 @@ async function assemblePrompt(
   if (capsList.length > 0) context += `\nCAPABILITIES: ${capsList.join(', ')}\n`;
   if (notPossible.length > 0) context += `CONSTRAINTS: ${notPossible.join(', ')} — do NOT render these.\n`;
   if (availMaterials.length > 0) context += `AVAILABLE MATERIALS (the only ones the supplier offers): ${availMaterials.join(', ')}\n`;
+
   if (forbidden.length > 0) {
     context += `\nREJECTED FROM BRIEF — the brief mentions these, but the product does not offer them.\n`;
     context += `Do NOT render, imply or hint at: ${forbidden.join(', ')}.\n`;
   }
 
-  // ── Fall-Instruktionen ───────────────────────────────────────────
+  // ── Fall-Instruktionen (Bild-Kombination — orthogonal zur Markenwelt) ─
   let fallInstructions: string;
   if (fall === 'A') {
-    fallInstructions = `SINGLE IMAGE edit. Change ONLY color, finish and surface material treatment — never shape, never the closure.
-Start with: "Keep exact shape, form, proportions and closure unchanged."`;
+    fallInstructions = `SINGLE IMAGE edit. Change ONLY color, finish, surface treatment and applied label-world — never shape, never the closure. The visual prompt must open with: "Keep exact shape, form, proportions and closure unchanged."`;
   } else if (fall === 'B') {
-    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle WITH existing cap, image 2 = replacement cap.
-MUST include: "REPLACE the original cap from image 1 with the cap from image 2 exactly as shown. Do NOT merge them, do NOT invent a new cap."
-Describe color/finish for body and cap separately.`;
+    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle WITH existing cap, image 2 = replacement cap. The visual prompt MUST include: "REPLACE the original cap from image 1 with the cap from image 2 exactly as shown. Do NOT merge them, do NOT invent a new cap." Describe color/finish for body and cap separately.`;
   } else {
-    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle body (base), image 2 = cap/closure.
-Start with: "Compose a single product photo by combining the two reference images."
-Body shape comes exactly from image 1. Cap shape and mechanism come exactly from image 2 — never invented.
-Describe color/finish for body and cap separately.
-Instruct to assemble the cap onto the bottle neck, flush and aligned.`;
+    fallInstructions = `TWO REFERENCE IMAGES: image 1 = bottle body (base), image 2 = cap/closure. The visual prompt must open with: "Compose a single product photo by combining the two reference images." Body shape comes exactly from image 1. Cap shape and mechanism come exactly from image 2 — never invented. Describe color/finish for body and cap separately, and assemble the cap onto the bottle neck, flush and aligned.`;
   }
 
-  const systemPrompt = `You are a beauty packaging rendering specialist.
-You turn a brand brief into a precise Seedream image-editing prompt.
+  // ── Konzept-Brief System-Prompt ──────────────────────────────────
+  const systemPrompt = `You are the ulba concept-brief generator for beauty packaging.
+You receive a REAL, existing catalog product — its shape, material and closure are already fixed by the reference images and the PRODUCT DATA below — plus a brand brief describing a mood and a brand.
+Your job: apply a BRAND WORLD onto the fixed body. You never redesign the object.
 
-INPUT FILTERING — do this first, before writing anything:
-The brief describes a MOOD and a BRAND, not the object. The object is already fixed
-by the reference images and the product data below.
-Extract from the brief ONLY: colors, finish (gloss, matt, frosted, metallic, soft-touch),
-and decoration (embossing, hot foil, screen print).
-DISCARD everything about: shape, form, silhouette, proportions, height, size, volume,
-packaging type, closure type, dispensing mechanism, and material.
-Example: "tall sustainable bamboo refill bottle in warm gold, matt" -> use only "warm gold, matt".
-If the brief implies a material or closure that is not listed under AVAILABLE MATERIALS
-or CURRENT CLOSURE, silently drop it. Never render it, never hint at it.
+FIXED — NON-NEGOTIABLE (restate for yourself; also enforced downstream):
+- Shape, silhouette, proportions, size, closure and material are fixed. Never change, imply or hint at changing them.
+- If the brief implies a different form, material or closure, silently drop that part and express the intention ONLY through color, finish, decoration, graphic label-world and scene.
+
+WHAT YOU DECIDE (the brand world on top of the fixed body):
+1. FINISH / DECORATION — only techniques the product actually supports (see CAPABILITIES / CONSTRAINTS / AVAILABLE MATERIALS). Real techniques only: coloring, metallization, hot foil, direct print, label, matt / gloss / soft-touch coating.
+2. GRAPHIC / LABEL WORLD — typography *feeling*, layout, color concept, logo placement — as impression only, never legible text, never a real brand logo.
+3. COLOR — use the palette hex codes when provided; do not invent colors then.
+4. SCENE — pick exactly ONE scene id from SCENE OPTIONS that fits the emotion.
+5. CONCEPT — a concept name (1–3 words) + a one-sentence story that turns the part into a vision.
+6. RATIONALE — one sentence on why this product fits the brief.
+
+Respect all CATEGORY RULES and DESIGN RULES below — never violate a "NEVER" rule.
+
+SCENE OPTIONS:
+${SCENE_PRESETS.map(s => `- ${s.id}: ${s.en}`).join('\n')}
 
 ${fallInstructions}
 
-NEVER change shapes. NEVER change or invent a closure. NEVER add text, logos, typography,
-labels or branding — the product must be completely blank.
-Reply ONLY with the prompt text. Max 100 words. English.
-Do NOT write a closing rules block — it is appended automatically.
+OUTPUT — reply with ONLY a JSON object. No markdown, no code fences, no prose. Exactly:
+{
+  "visuell_en": "one single English Seedream editing prompt: the fixed body with the chosen finish, decoration, graphic/label impression, colors and the chosen scene backdrop. Never describe changing shape, material or closure. Max ~90 words.",
+  "konzept_name": "1-3 words",
+  "story": "one sentence, German",
+  "rationale": "one sentence, German",
+  "produzierbar_de": {
+    "finish": ["real producible finish values, German"],
+    "dekoration": ["real producible decoration techniques, German"],
+    "grafik_label": "typography feeling + layout + logo placement, German",
+    "farbkonzept": "German"
+  },
+  "szene_id": "one id from SCENE OPTIONS"
+}
 
 ${context}`;
 
@@ -346,19 +387,39 @@ ${context}`;
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5',
-      max_tokens: 300,
+      max_tokens: 700,
       system: systemPrompt,
       messages: [{ role: 'user', content: brief }],
     }),
   });
 
   const data = await res.json() as { content: Array<{ text: string }> };
-  const body = (data.content?.[0]?.text || '').trim();
-  if (!body) throw new Error('Prompt-Assembly leer');
+  const rawText = (data.content?.[0]?.text || '').trim();
+  if (!rawText) throw new Error('Prompt-Assembly leer');
+
+  // Robustes JSON-Parsing (Fences strippen, Fallback: ganzer Text = visuell).
+  const cleaned = rawText
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/, '')
+    .replace(/```$/, '')
+    .trim();
+
+  let parsed: any = null;
+  try { parsed = JSON.parse(cleaned); } catch { parsed = null; }
+
+  const visuell = (parsed?.visuell_en || '').trim() || rawText;
+  const concept: Concept = {
+    konzept_name: parsed?.konzept_name || '',
+    story: parsed?.story || '',
+    rationale: parsed?.rationale || '',
+    produzierbar: parsed?.produzierbar_de || null,
+    szene_id: parsed?.szene_id || '',
+  };
 
   return {
-    prompt: `${body}\n\n${buildHardRule(fall, forbidden)}`,
+    prompt: `${visuell}\n\n${buildHardRule(fall, forbidden)}`,
     forbidden,
+    concept,
   };
 }
 
@@ -405,16 +466,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ['Cache_Key', 'Bild', 'Rendering_Prompt'],
       1
     );
-
     if (cached.length > 0) {
       const cachedImg = imgUrl(cached[0].fields['Bild']);
       if (cachedImg) {
+        // Rendering_Prompt speichert jetzt {prompt, concept} als JSON.
+        let cachedPrompt = cached[0].fields['Rendering_Prompt'] || '';
+        let cachedConcept: Concept | null = null;
+        try {
+          const o = JSON.parse(cachedPrompt);
+          if (o && typeof o === 'object' && o.prompt) {
+            cachedPrompt = o.prompt;
+            cachedConcept = o.concept || null;
+          }
+        } catch { /* alter Record: reiner Prompt-String */ }
+
         return res.status(200).json({
           renderingUrl: cachedImg,
-          renderingPrompt: cached[0].fields['Rendering_Prompt'] || '',
+          renderingPrompt: cachedPrompt,
           briefUsed: effectiveBrief,
           cacheId: cached[0].id,
           cached: true,
+          concept: cachedConcept,
         });
       }
     }
@@ -427,8 +499,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let capImageUrl: string | null = null;
     let capFields: any | null = null;
     let resolvedCapId: string | null = selectedCapId;
-    const linkedCaps = sys.fields['Caps'] as string[] | undefined;
 
+    const linkedCaps = sys.fields['Caps'] as string[] | undefined;
     if (fall !== 'A' && linkedCaps && linkedCaps.length > 0) {
       const capId = selectedCapId || linkedCaps[0];
       resolvedCapId = capId;
@@ -438,8 +510,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!capImageUrl) throw new Error(`Cap ${capId} hat kein Bild`);
     }
 
-    // ── 4. Assemble Rendering Prompt ────────────────────────────────
-    const { prompt: renderingPrompt, forbidden } =
+    // ── 4. Assemble Rendering Prompt (Konzept-Brief) ────────────────
+    const { prompt: renderingPrompt, forbidden, concept } =
       await assemblePrompt(effectiveBrief, fall, sys.fields, capFields);
 
     // ── 5. Call Seedream via fal.ai ─────────────────────────────────
@@ -448,7 +520,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       prompt: renderingPrompt,
       output_format: 'jpeg',
     };
-
     if (fall === 'A' || !capImageUrl) {
       falBody.image_url = primaryUrl;
     } else {
@@ -490,8 +561,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           fields: {
             Cache_Key: key,
             System: [systemId],
-            Query_Input: query,          // roh, nie sanitisiert — Demand-Signal
-            Rendering_Prompt: renderingPrompt,
+            Query_Input: query, // roh, nie sanitisiert — Demand-Signal
+            // Prompt + Konzept gebündelt (kein neues Airtable-Feld nötig).
+            Rendering_Prompt: JSON.stringify({ prompt: renderingPrompt, concept }),
             Tier: tier,
             Fall: fall,
             Created_At: new Date().toISOString(),
@@ -499,6 +571,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }),
       }
     );
+
     const createData = await createRes.json() as { id: string; error?: any };
     if (!createData.id) throw new Error(`Cache-Record Fehler: ${JSON.stringify(createData)}`);
 
@@ -517,6 +590,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }),
       }
     );
+
     if (!uploadRes.ok) {
       console.error('Airtable upload failed:', await uploadRes.text());
     }
@@ -531,8 +605,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       cached: false,
       fall,
       tier,
+      concept, // { konzept_name, story, rationale, produzierbar, szene_id }
     });
-
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
     console.error('Render error:', message);
