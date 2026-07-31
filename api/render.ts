@@ -206,7 +206,7 @@ function buildHardRule(fall: RenderFall, forbidden: string[]): string {
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
     // ── Markenwelt erlaubt, aber Guardrail ──
-    'Label artwork and typography may appear ONLY as the impression of a brand — no legible or readable text, no real words, no existing or recognizable brand logos or names.',
+    'The bottle carries a realistic PRINTED LABEL like a real retail product: a clean fictional brand wordmark, one short product descriptor line and small fine-print — crisp, professionally typeset, correctly wrapped around the bottle. STRICTLY FORBIDDEN: any real existing brand name, logo or trademark (e.g. never Porsche, never a car-brand crest).',
     // ── Garantierte Render-Tells (code-seitig, verlässlich) ──
     'Ground the product on the surface with a soft contact shadow — the product must never float.',
     'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
@@ -346,14 +346,15 @@ Your job: apply a BRAND WORLD onto the fixed body. You never redesign the object
 FIXED — NON-NEGOTIABLE (restate for yourself; also enforced downstream):
 - Shape, silhouette, proportions, size, closure and material are fixed. Never change, imply or hint at changing them.
 - If the brief implies a different form, material or closure, silently drop that part and express the intention ONLY through color, finish, decoration, graphic label-world and scene.
+- INVENT NOTHING BEYOND THE BRIEF: never invent ingredients, actives (e.g. vitamin C), scents, flavors, benefits or marketing claims that the brief does not state. Concept name, story and colors must stay within what the brief actually says. A thin brief (e.g. just an audience + a category) gets a RESTRAINED result: one clean color direction fitting the audience, a calm finish, a minimal label — not an invented product concept.
 - MATERIAL-LOOK LOCK: a metallic look on a plastic body (PET, PETG, PP, acrylic) is ONLY a thin metallized lacquer ON the plastic — the object stays visibly a plastic bottle. NEVER render or describe a solid metal body, an aluminium can, brushed steel or a chrome cylinder unless metal is the product's ACTUAL material. When unsure, put the metallic accent only on the cap / ring / label and keep the body clearly plastic.
 - BRAND CUE: if the brief names a real brand (a car, fashion, tech or luxury name), translate it ONLY into SURFACE language — color, finish, ONE accent stripe or detail, label-graphic impression, scene mood — NEVER into shape, proportion, silhouette, a new form, a different closure, a material or a logo. A brand never makes the bottle angular, faceted, "architectural", tapered, geometric or a different container. Choose one ground tone and exactly ONE accent.
 
 WHAT YOU DECIDE (the brand world on top of the fixed body):
 1. FINISH / DECORATION — only techniques the product actually supports (see CAPABILITIES / CONSTRAINTS / AVAILABLE MATERIALS). Real techniques only: coloring, metallization, hot foil, direct print, label, matt / gloss / soft-touch coating.
-2. GRAPHIC / LABEL WORLD — typography *feeling*, layout, color concept, logo placement — as impression only, never legible text, never a real brand logo.
+2. GRAPHIC / LABEL WORLD — design a minimal retail label: INVENT a fictional brand name (2–8 letters, evocative, NEVER a real brand or car brand) plus the product CATEGORY exactly as the brief states it (e.g. "SERUM", "MEN'S SHAMPOO · 300ml"). NOTHING else on the label: no invented ingredients, actives, benefits or claims. Typography, layout and placement like a real premium product — restrained, not busy.
 3. COLOR — use the palette hex codes when provided; do not invent colors then.
-4. SCENE — pick exactly ONE scene id from SCENE OPTIONS that fits the emotion.
+4. SCENE — DEFAULT to a clean e-commerce packshot: pick 'studio_soft' or 'highkey_bright' (bright, neutral, like a retail product photo) UNLESS the brief explicitly asks for a dark, moody or editorial setting — only then pick a matching darker scene id.
 5. CONCEPT — a concept name (1–3 words) + a one-sentence story that turns the part into a vision.
 6. RATIONALE — one sentence on why this product fits the brief.
 
@@ -366,7 +367,7 @@ ${fallInstructions}
 
 OUTPUT — reply with ONLY a JSON object. No markdown, no code fences, no prose. Exactly:
 {
-  "visuell_en": "ONE short English Seedream EDIT instruction (max 45 words) that recolors and re-finishes the EXACT bottle in the reference image. It MUST START with: 'Keep the exact same bottle shape, silhouette, proportions, neck and closure from the reference image — change only the surface.' Then describe ONLY color, finish, ONE accent, a blurred non-legible label impression and the scene backdrop. Use NO shape or form words (no angular, faceted, architectural, geometric, tapered, sleek, redesigned, new bottle) and never describe a different or new closure.",
+  "visuell_en": "ONE short English Seedream EDIT instruction (max 60 words) that recolors and re-finishes the EXACT bottle in the reference image. It MUST START with: 'Keep the exact same bottle shape, silhouette, proportions, neck and closure from the reference image — change only the surface.' Then: the body color and finish named POSITIVELY with its real material (e.g. 'matte soft-touch black plastic'), ONE accent, and the printed label with the invented brand name and product line IN QUOTES (e.g. label text: \\"AXEN\\" and \\"MEN'S SHAMPOO\\") in clean typography, plus the scene backdrop. NO shape or form words (no angular, faceted, architectural, geometric, tapered, sleek, redesigned), never a different closure, never a real brand name.",
   "konzept_name": "1-3 words",
   "story": "one sentence, German",
   "rationale": "one sentence, German",
