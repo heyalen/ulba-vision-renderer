@@ -223,6 +223,11 @@ type Concept = {
   rationale: string;
   produzierbar: any | null;
   szene_id: string;
+  // v5.1 Board-Felder (Frontend komponiert Label/Chips/Radar über den Render):
+  label?: { wortmarke: string; kategorie: string; ist_platzhalter: boolean };
+  palette?: { name: string; hex: string[]; pantone: string[] };
+  radar?: Record<string, number>;
+  zielprofil?: string[];
 };
 
 // ── Prompt Assembly v5 — Constrained Selection ──────────────────────
@@ -344,12 +349,16 @@ async function assemblePrompt(
   const forbidden = [...new Set([...forbiddenMaterials, ...forbiddenClosures])];
 
   // ── Erlaubte Enums aus SF_-Feldern (Produzierbarkeit by construction) ─
+  const primaryMatEarly = (multiSelectNames(sysFields['Material'])[0] || '').toLowerCase();
+  const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMatEarly);
   const finishes: string[] = ['gloss'];
-  if (sysFields['SF_Mattierbar']) finishes.push('matt', 'soft_touch');
+  if (sysFields['SF_Mattierbar'] || isPlasticBody) finishes.push('matt', 'soft_touch');
   const akzente: string[] = ['none'];
   if (sysFields['SF_HotFoil']) akzente.push('hot_foil_detail');
   if (sysFields['SF_Siebdruck']) akzente.push('silkscreen_graphic');
-  const colorable = !!sysFields['SF_Einfaerbbar'];
+  // Leere Checkbox = ungetaggt, nicht "nein". Kunststoff ist industriell immer
+  // einfärbbar (Masterbatch) → default true; Glas/Metall nur bei explizitem Tag.
+  const colorable = !!sysFields['SF_Einfaerbbar'] || isPlasticBody;
   const decoProfile = String(sysFields['Decoration_Profile'] || '').trim();
 
   // Emotions-Label-Set = Union der Emotion_Tags der Kandidaten-Paletten.
@@ -373,17 +382,19 @@ ${kanalSignale.length ? `CHANNEL SIGNAL: ${kanalSignale.join(' · ')}` : ''}
 ${nieRules.length ? `NEVER (hard): ${nieRules.join(' · ')}` : ''}
 
 STEP 1 — ziel_profil: choose 3–5 tags ONLY from: [${emotionTagSet.join(', ')}]. They must express the brief's audience/mood.
-STEP 2 — palette_id: exactly one id from PALETTES below whose tags/warmth/prestige best fit ziel_profil.
+AUDIENCE RULE (hard): the palette MUST fit the audience in the brief. Feminine / curls / warm / natural briefs get warm or soft palettes — NEVER tech/chrome/futurist palettes. Masculine/tech briefs get cool restrained palettes. When in doubt, choose the softer, warmer palette.
+STEP 2 — palette_id: exactly one id from PALETTES below whose tags/warmth/prestige best fit ziel_profil AND the audience rule.
 PALETTES:
 ${paletteList}
 STEP 3 — finish: one of [${finishes.join(', ')}].
 STEP 4 — akzent: one of [${akzente.join(', ')}].
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
-STEP 7 — konzept_name (1–3 words), story (ONE German sentence, only what the brief says), herleitung (ONE German sentence: why palette/finish follow from the ziel_profil).
+STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why palette + finish follow from the ziel_profil — mention ONLY the chosen palette name and the chosen finish, NEVER materials, metal, chrome or techniques that were not selected).
+STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
-{"ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…"}`;
+{"ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -423,14 +434,18 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const hex = parseJsonArray(pal.fields['Hex_Codes']).slice(0, 3);
   const pantone = parseJsonArray(pal.fields['Pantone_Nearest']).slice(0, 3);
 
-  // ── Deterministische Prompt-Assembly (kein Haiku-Text) ────────────
+  // ── Deterministische Prompt-Assembly — RECOLOR-ONLY ───────────────
+  // Bewiesener Modus: Seedream ändert NUR Farbe/Finish auf der exakten
+  // Bild_Harmonisiert-Flasche. KEIN Labeltext (verschreibt sich, bricht Form),
+  // KEINE Szenenfantasie — immer weisses Studio. Label + Emotionsprofil +
+  // Palette-Chips baut das Frontend als Board ÜBER den Render.
   const primaryMat = (material[0] || 'plastic').toLowerCase();
   const isPlastic = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
   const matEN = material.join(' / ') || 'plastic';
   const kategorie = String(matchedProdukt[0]?.fields['Kategorie'] || type || 'Beauty Product');
 
   const lines: string[] = [];
-  lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY surface color, finish and label.`);
+  lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY the surface color and finish. Keep the label area blank.`);
   if (attrConstraints.length) {
     lines.push(`Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`);
   }
@@ -444,16 +459,20 @@ OUTPUT ONLY this JSON, no fences, no prose:
   if (colorable && hex.length) {
     lines.push(`Recolor the body in ${hex[0]}${hex[1] ? ` with ${hex[1]} as secondary tone` : ''}, applied as ${FINISH_EN[finish]} on the existing material.`);
   } else if (hex.length) {
-    lines.push(`Do NOT recolor the body material itself — express the palette (${hex.join(', ')}) only through the printed label and the cap; body keeps ${FINISH_EN[finish]}.`);
+    lines.push(`Do NOT recolor the body material itself — express the palette (${hex.join(', ')}) only through the cap; body keeps ${FINISH_EN[finish]} in its original tone.`);
   }
   if (AKZENT_EN[akzent]) lines.push(`Add ${AKZENT_EN[akzent]}.`);
-  const labelText = brandname
-    ? `label text: "${brandname.toUpperCase()}" and "${kategorie.toUpperCase()}"`
-    : `label text: "${kategorie.toUpperCase()}"`;
-  lines.push(`The bottle carries a realistic printed retail label — ${labelText} — in clean, professionally typeset typography, correctly wrapped around the bottle. No other words, no invented claims, no real existing brand names or logos.`);
-  lines.push(`Scene: ${szene.en}.`);
+  // Immer weisses Studio — kein Szenen-Preset im Recolor-Modus.
+  lines.push(`Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`);
 
   const visuell = lines.join(' ');
+
+  // Label-Daten strukturiert fürs Frontend-Board (NICHT an Seedream).
+  const labelData = {
+    wortmarke: brandname || '',
+    kategorie,
+    ist_platzhalter: !brandname,
+  };
 
   // ── Konzept + Produzierbar (code-built, Register 2) ───────────────
   const produzierbar = {
@@ -475,12 +494,24 @@ OUTPUT ONLY this JSON, no fences, no prose:
     herleitung || `Palette ${palName} und ${FINISH_DE[finish]} folgen aus dem Brief.`,
   ].filter(Boolean).join(' — ');
 
+  const rawRadar = parsed?.radar || {};
+  const radarAxes = ['waerme', 'prestige', 'energie', 'ruhe', 'natuerlichkeit', 'praezision'];
+  const radar: Record<string, number> = {};
+  for (const ax of radarAxes) {
+    const v = Number(rawRadar[ax]);
+    radar[ax] = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 50;
+  }
+
   const concept: Concept = {
     konzept_name: String(parsed?.konzept_name || palName || '').slice(0, 60),
     story: String(parsed?.story || '').slice(0, 240),
     rationale,
     produzierbar,
     szene_id: szeneId,
+    label: labelData,
+    palette: { name: palName, hex, pantone },
+    radar,
+    zielprofil: zielProfil,
   };
 
   return {
@@ -528,18 +559,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
     const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier);
-    const cached = await airtableQuery(
-      CACHE_TABLE,
-      `{Cache_Key}='${key}'`,
-      ['Cache_Key', 'Bild', 'Rendering_Prompt', 'Konzept_Name', 'Konzept_Story', 'Konzept_Rationale', 'Szene_ID', 'Produzierbar'],
-      1
-    );
+    let cached: any[] = [];
+    try {
+      cached = await airtableQuery(
+        CACHE_TABLE,
+        `{Cache_Key}='${key}'`,
+        ['Cache_Key', 'Bild', 'Rendering_Prompt', 'Konzept_Name', 'Konzept_Story', 'Konzept_Rationale', 'Szene_ID', 'Produzierbar', 'Board'],
+        1
+      );
+    } catch {
+      // z.B. Feld 'Board' noch nicht angelegt → als Cache-Miss behandeln, frisch rendern.
+      cached = [];
+    }
     if (cached.length > 0) {
       const cachedImg = imgUrl(cached[0].fields['Bild']);
       if (cachedImg) {
         const cf = cached[0].fields;
         let produzierbar: any = null;
         try { produzierbar = cf['Produzierbar'] ? JSON.parse(cf['Produzierbar']) : null; } catch { produzierbar = null; }
+        let board: any = {};
+        try { board = cf['Board'] ? JSON.parse(cf['Board']) : {}; } catch { board = {}; }
         const cachedConcept: Concept | null = (cf['Konzept_Name'] || cf['Szene_ID'] || produzierbar)
           ? {
               konzept_name: cf['Konzept_Name'] || '',
@@ -547,6 +586,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               rationale: cf['Konzept_Rationale'] || '',
               produzierbar,
               szene_id: cf['Szene_ID'] || '',
+              label: board.label,
+              palette: board.palette,
+              radar: board.radar,
+              zielprofil: board.zielprofil,
             }
           : null;
 
@@ -639,6 +682,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             Konzept_Rationale: concept.rationale || '',
             Szene_ID: concept.szene_id || '',
             Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
+            Board: JSON.stringify({ label: concept.label, palette: concept.palette, radar: concept.radar, zielprofil: concept.zielprofil }),
             Tier: tier,
             Fall: fall,
             Created_At: new Date().toISOString(),
@@ -648,7 +692,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     );
 
     const createData = await createRes.json() as { id: string; error?: any };
-    if (!createData.id) throw new Error(`Cache-Record Fehler: ${JSON.stringify(createData)}`);
+    if (!createData.id) {
+      // Cachen fehlgeschlagen (z.B. Feld 'Board' fehlt) — Render trotzdem ausliefern.
+      console.error('Cache-Record Fehler (Render wird dennoch ausgeliefert):', JSON.stringify(createData.error || createData));
+      return res.status(200).json({
+        renderingUrl, renderingPrompt, briefUsed: effectiveBrief,
+        rejected: forbidden, capId: resolvedCapId, cacheId: null,
+        cached: false, fall, tier, concept,
+      });
+    }
 
     const uploadRes = await fetch(
       `https://content.airtable.com/v0/${AIRTABLE_BASE}/${createData.id}/${CACHE_IMAGE_FIELD}/uploadAttachment`,
