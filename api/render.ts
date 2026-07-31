@@ -201,6 +201,7 @@ function buildHardRule(fall: RenderFall, forbidden: string[]): string {
     'CRITICAL RULES — these override everything above.',
     // ── Invariante (unverändert hart) ──
     'Do not change the shape, silhouette, proportions or size of the packaging.',
+    'Do not redesign the bottle: no angular, faceted, architectural, geometric or tapered body, no new silhouette, no different neck — the container outline must stay identical to the reference image.',
     closureRule,
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
@@ -346,7 +347,7 @@ FIXED — NON-NEGOTIABLE (restate for yourself; also enforced downstream):
 - Shape, silhouette, proportions, size, closure and material are fixed. Never change, imply or hint at changing them.
 - If the brief implies a different form, material or closure, silently drop that part and express the intention ONLY through color, finish, decoration, graphic label-world and scene.
 - MATERIAL-LOOK LOCK: a metallic look on a plastic body (PET, PETG, PP, acrylic) is ONLY a thin metallized lacquer ON the plastic — the object stays visibly a plastic bottle. NEVER render or describe a solid metal body, an aluminium can, brushed steel or a chrome cylinder unless metal is the product's ACTUAL material. When unsure, put the metallic accent only on the cap / ring / label and keep the body clearly plastic.
-- BRAND CUE: if the brief names a real brand (a car, fashion, tech or luxury name), translate it ONLY into design language — proportion, restraint, one accent, finish, color mood — NEVER into a material, a logo, or "make it all chrome". A brand name never becomes full chrome and never a readable logo. Choose one ground tone and exactly ONE accent.
+- BRAND CUE: if the brief names a real brand (a car, fashion, tech or luxury name), translate it ONLY into SURFACE language — color, finish, ONE accent stripe or detail, label-graphic impression, scene mood — NEVER into shape, proportion, silhouette, a new form, a different closure, a material or a logo. A brand never makes the bottle angular, faceted, "architectural", tapered, geometric or a different container. Choose one ground tone and exactly ONE accent.
 
 WHAT YOU DECIDE (the brand world on top of the fixed body):
 1. FINISH / DECORATION — only techniques the product actually supports (see CAPABILITIES / CONSTRAINTS / AVAILABLE MATERIALS). Real techniques only: coloring, metallization, hot foil, direct print, label, matt / gloss / soft-touch coating.
@@ -365,7 +366,7 @@ ${fallInstructions}
 
 OUTPUT — reply with ONLY a JSON object. No markdown, no code fences, no prose. Exactly:
 {
-  "visuell_en": "one single English Seedream editing prompt: the fixed body with the chosen finish, decoration, graphic/label impression, colors and the chosen scene backdrop. Never describe changing shape, material or closure. Max ~90 words.",
+  "visuell_en": "ONE short English Seedream EDIT instruction (max 45 words) that recolors and re-finishes the EXACT bottle in the reference image. It MUST START with: 'Keep the exact same bottle shape, silhouette, proportions, neck and closure from the reference image — change only the surface.' Then describe ONLY color, finish, ONE accent, a blurred non-legible label impression and the scene backdrop. Use NO shape or form words (no angular, faceted, architectural, geometric, tapered, sleek, redesigned, new bottle) and never describe a different or new closure.",
   "konzept_name": "1-3 words",
   "story": "one sentence, German",
   "rationale": "one sentence, German",
