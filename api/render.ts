@@ -490,7 +490,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
   if (colorable && hex.length) {
     lines.push(`Recolor the body in ${hex[0]}${hex[1] ? ` with ${hex[1]} as secondary tone` : ''}, applied as ${FINISH_EN[finish]} on the existing material.`);
   } else if (hex.length) {
-    lines.push(`Do NOT recolor the body material itself — express the palette (${hex.join(', ')}) only through the cap; body keeps ${FINISH_EN[finish]} in its original tone.`);
+    lines.push(`Do NOT recolor the ${matEN} body — keep it in its original tone. Color ONLY the cap, as ONE single solid ${hex[0]} tone across the entire cap as a single part in ${FINISH_EN[finish]}. Do NOT split the cap into multiple colored segments and do NOT use more than this one color on it.`);
   }
   if (AKZENT_EN[akzent]) lines.push(`Add ${AKZENT_EN[akzent]}.`);
   // Immer weisses Studio — kein Szenen-Preset im Recolor-Modus.
