@@ -24,11 +24,12 @@ type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
 
 // ── Deterministisches Cap-Compositing (sharp) ───────────────────────
-// Macht den Verschluss zu "behaltenen Pixeln": der echte Cap wird per Code auf
-// den Hals der Base gesetzt → EIN Bild, das Gemini nur noch umfärbt (Fall A).
-// Kein generatives Neu-Zeichnen des Caps → kein Drift, kein Form-zu-Form-Lotto.
-// Getestet in Sandbox (Pixel-Asserts). Freistellen v1 = Weiß-Schwelle (Katalog-
-// Caps auf Weiß); robustere Variante bei Bedarf: birefnet-Matte vorschalten.
+// Der Cap SCHWEBT über der Base — kein Aufsetzen (Hals-Innengeometrie unbekannt),
+// keine erfundene Passung, echte Proportionen: Cap-Kragen wird auf Base-Hals
+// skaliert (in Wirklichkeit gleicher Durchmesser → Proportion by construction).
+// Base bleibt voll sichtbar. Beide sind "behaltene Pixel" → Gemini färbt nur um.
+// Getestet in Sandbox (Pixel-Asserts: Hals/Kragen-Messung, Schwebe-Lücke, Proportion).
+// Freistellen v1 = Weiß-Schwelle (Katalog-Caps auf Weiß); robuster: birefnet vorschalten.
 async function fetchBuffer(url: string): Promise<Buffer> {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Bild-Fetch ${r.status}`);
@@ -44,25 +45,87 @@ async function whiteToAlpha(buffer: Buffer, threshold = 245): Promise<Buffer> {
   return sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } }).png().toBuffer();
 }
 
-// opts pro Base kalibrierbar (Default reicht für konsistent harmonisierte Bilder).
-async function composeCapOnBase(
+type Extent = { w: number; h: number; minX: number; maxX: number; minY: number; maxY: number; rowMinX: Int32Array; rowMaxX: Int32Array };
+
+async function contentExtent(buffer: Buffer, whiteThresh = 245): Promise<Extent> {
+  const { data, info } = await sharp(buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const w = info.width, h = info.height, c = info.channels;
+  const rowMinX = new Int32Array(h).fill(w);
+  const rowMaxX = new Int32Array(h).fill(-1);
+  let minX = w, maxX = -1, minY = h, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    const rowBase = y * w * c;
+    for (let x = 0; x < w; x++) {
+      const i = rowBase + x * c;
+      const opaque = data[i + 3] > 10 && !(data[i] >= whiteThresh && data[i + 1] >= whiteThresh && data[i + 2] >= whiteThresh);
+      if (opaque) {
+        if (x < rowMinX[y]) rowMinX[y] = x;
+        if (x > rowMaxX[y]) rowMaxX[y] = x;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+  return { w, h, minX, maxX, minY, maxY, rowMinX, rowMaxX };
+}
+
+const rowW = (e: Extent, y: number) => (e.rowMaxX[y] >= 0 ? e.rowMaxX[y] - e.rowMinX[y] + 1 : 0);
+
+function neckWidth(e: Extent): number {
+  const band = Math.max(2, Math.round((e.maxY - e.minY) * 0.20));
+  let min = Infinity;
+  for (let y = e.minY; y <= e.minY + band; y++) { const w = rowW(e, y); if (w > 0 && w < min) min = w; }
+  return isFinite(min) ? min : rowW(e, e.minY);
+}
+
+function collarWidth(e: Extent): number {
+  const band = Math.max(2, Math.round((e.maxY - e.minY) * 0.15));
+  let max = 0;
+  for (let y = e.maxY - band; y <= e.maxY; y++) { const w = rowW(e, y); if (w > max) max = w; }
+  return max || rowW(e, e.maxY);
+}
+
+// opts.capScale pro Base überschreibbar; sonst Hals-Matching. Getestet.
+async function composeHover(
   baseBuffer: Buffer,
   capBuffer: Buffer,
-  opts: { capWidthFrac?: number; neckYFrac?: number; overlapFrac?: number; whiteThresh?: number } = {}
+  opts: { gapFrac?: number; capScale?: number | null; clampMin?: number; clampMax?: number; whiteThresh?: number } = {}
 ): Promise<Buffer> {
-  const { capWidthFrac = 0.28, neckYFrac = 0.17, overlapFrac = 0.06, whiteThresh = 245 } = opts;
-  const bMeta = await sharp(baseBuffer).metadata();
-  const baseW = bMeta.width!, baseH = bMeta.height!;
-  let cap = await whiteToAlpha(capBuffer, whiteThresh);
-  cap = await sharp(cap).trim().png().toBuffer();
-  const capW = Math.round(baseW * capWidthFrac);
-  cap = await sharp(cap).resize({ width: capW }).png().toBuffer();
-  const capH = (await sharp(cap).metadata()).height!;
-  const neckY = Math.round(baseH * neckYFrac);
-  const overlapPx = Math.round(capH * overlapFrac);
-  const left = Math.round(baseW / 2 - capW / 2);
-  const top = Math.max(0, neckY - capH + overlapPx);
-  return sharp(baseBuffer).composite([{ input: cap, left, top }]).jpeg({ quality: 95 }).toBuffer();
+  const { gapFrac = 0.12, capScale = null, clampMin = 0.10, clampMax = 0.40, whiteThresh = 245 } = opts;
+
+  const baseAlpha = await whiteToAlpha(baseBuffer, whiteThresh);
+  const bE = await contentExtent(baseAlpha, whiteThresh);
+  const bw = bE.maxX - bE.minX + 1, bh = bE.maxY - bE.minY + 1;
+  const baseTrim = await sharp(baseAlpha).extract({ left: bE.minX, top: bE.minY, width: bw, height: bh }).png().toBuffer();
+  const baseNeck = neckWidth(bE);
+
+  const capAlpha = await whiteToAlpha(capBuffer, whiteThresh);
+  const cE = await contentExtent(capAlpha, whiteThresh);
+  const cw0 = cE.maxX - cE.minX + 1, ch0 = cE.maxY - cE.minY + 1;
+  let capTrim = await sharp(capAlpha).extract({ left: cE.minX, top: cE.minY, width: cw0, height: ch0 }).png().toBuffer();
+  const capCollar = collarWidth(cE);
+
+  let capFinalW = capScale != null
+    ? Math.round(bw * capScale)
+    : Math.round(cw0 * (baseNeck / Math.max(1, capCollar)));
+  capFinalW = Math.max(Math.round(bw * clampMin), Math.min(Math.round(bw * clampMax), capFinalW));
+  capTrim = await sharp(capTrim).resize({ width: capFinalW }).png().toBuffer();
+  const cM = await sharp(capTrim).metadata();
+  const cw = cM.width!, ch = cM.height!;
+
+  const gap = Math.round(bh * gapFrac);
+  const sideM = Math.round(Math.max(bw, cw) * 0.18);
+  const canvasW = Math.max(bw, cw) + sideM * 2;
+  const vM = Math.round((ch + gap + bh) * 0.07);
+  const canvasH = vM + ch + gap + bh + vM;
+
+  return sharp({ create: { width: canvasW, height: canvasH, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
+    .composite([
+      { input: capTrim, left: Math.round(canvasW / 2 - cw / 2), top: vM },
+      { input: baseTrim, left: Math.round(canvasW / 2 - bw / 2), top: vM + ch + gap },
+    ])
+    .jpeg({ quality: 95 })
+    .toBuffer();
 }
 
 // ── Szenen-Presets (handkuratiert, kein Korpus, kein Airtable) ──────
@@ -255,7 +318,7 @@ function buildHardRule(fall: RenderFall, forbidden: string[]): string {
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
     // ── Markenwelt erlaubt, aber Guardrail ──
-    'The label shows ONLY the wordmark and category text specified above — no additional words, no invented claims. STRICTLY FORBIDDEN: any real existing brand name, logo or trademark (e.g. never Porsche, never a car-brand crest).',
+    'No printed label, sticker, wordmark, panel or lettering anywhere on the product — the surface is bare, uninterrupted material. STRICTLY FORBIDDEN: any real existing brand name, logo or trademark (e.g. never Porsche, never a car-brand crest).',
     // ── Garantierte Render-Tells (code-seitig, verlässlich) ──
     'Ground the product on the surface with a soft contact shadow — the product must never float.',
     'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
@@ -519,7 +582,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const kategorie = String(matchedProdukt[0]?.fields['Kategorie'] || type || 'Beauty Product');
 
   const lines: string[] = [];
-  lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY the surface color and finish. Keep the label area blank.`);
+  lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
   if (attrConstraints.length) {
     lines.push(`Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`);
   }
@@ -711,7 +774,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           fetchBuffer(primaryUrl),
           fetchBuffer(capImageUrl),
         ]);
-        const composed = await composeCapOnBase(baseBuf, capBuf);
+        const composed = await composeHover(baseBuf, capBuf);
         compositeDataUri = `data:image/jpeg;base64,${composed.toString('base64')}`;
       } catch (e) {
         console.error('Cap-Composite fehlgeschlagen — Fallback auf Zwei-Bild-Aufruf:', e);
