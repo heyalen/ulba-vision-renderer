@@ -821,9 +821,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (useSplitCompose) {
       try {
-        // Base allein umfärben (Gemini, formtreu). Cap bleibt echtes Bild,
-        // nur in Palette getönt (sharp) → Form exakt, kein Modell fasst ihn an.
-        const recoloredBaseUrl = await geminiEdit([primaryUrl], renderingPrompt);
+        // Base allein umfärben — mit EIGENEM Prompt, der KEINEN Cap erlaubt.
+        // Der Standard-Prompt erwähnt "closure/cap" → Gemini malt sonst einen
+        // Cap auf die nackte Base (Doppel-Cap). Der echte Cap kommt separat rein.
+        const matRaw = sys.fields['Material'];
+        const primaryMat = String(Array.isArray(matRaw) ? matRaw[0] : (matRaw || '')).toLowerCase();
+        const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
+        const bodyColorable = !!sys.fields['SF_Einfaerbbar'] || isPlasticBody;
+        const bodyHex = concept.palette?.hex?.[0] || null;
+        const bodyColorLine = bodyColorable && bodyHex
+          ? `Recolor the bottle body to ${bodyHex} with a clean surface finish.`
+          : `Keep the bottle body as clear transparent glass — do not add colour to the glass itself.`;
+        const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. This image shows ONLY the open bottle body with a bare, empty neck opening — do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere; the neck stays open and empty. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
+
+        const recoloredBaseUrl = await geminiEdit([primaryUrl], baseOnlyPrompt);
         const [baseBuf, capBuf] = await Promise.all([
           fetchBuffer(recoloredBaseUrl),
           fetchBuffer(capImageUrl!),
