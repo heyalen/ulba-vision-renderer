@@ -11,6 +11,10 @@ const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
 const DESIGN_REGELN_TABLE = 'tblEVWQUJtf87JgOc';
 const FARBPALETTEN_TABLE = 'tblTIeUTyVptGIpKp';
 
+// Positionierungs-Welten. Harter Gate für Palettenwahl. Identisch zu
+// Farbpaletten.Segment / Stil.Segment in Airtable.
+const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical'] as const;
+
 const FAL_ENDPOINTS = {
   lite: 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit',
   pro: 'https://fal.run/fal-ai/bytedance/seedream/v5/pro/edit',
@@ -36,8 +40,8 @@ function queryHash(q: string): string {
   return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
 }
 
-function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier): string {
-  return `${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}`;
+function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null): string {
+  return `${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}`;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -228,6 +232,7 @@ type Concept = {
   palette?: { name: string; hex: string[]; pantone: string[] };
   radar?: Record<string, number>;
   zielprofil?: string[];
+  segment?: string | null;
 };
 
 // ── Prompt Assembly v5 — Constrained Selection ──────────────────────
@@ -293,7 +298,8 @@ async function assemblePrompt(
   brief: string,
   fall: RenderFall,
   sysFields: any,
-  capFields: any | null
+  capFields: any | null,
+  reqSegment: string | null = null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
   const [produktRegeln, designRegeln, farbpalettenAll] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
@@ -317,16 +323,25 @@ async function assemblePrompt(
   }
 
   const matchedProdukt = produktRegeln.filter(r => queryMatchesKeywords(brief, r.fields['Keywords']));
+  // Design_Regeln liefert NUR NOCH Verfeinerung (Ausschlüsse/Codes/Kanal) —
+  // KEINE Palettenverengung mehr. Die Welt-Wahl macht das Segment (s.u.).
   const matchedDesign = designRegeln.filter(r => queryMatchesKeywords(brief, r.fields['Wenn_Query_Signal']));
   const nieRules = matchedDesign.map(r => String(r.fields['Nie'] || '').trim()).filter(Boolean);
   const designCodes = matchedDesign.map(r => String(r.fields['Dann_Design_Codes'] || '').trim()).filter(Boolean);
   const kanalSignale = matchedDesign.map(r => String(r.fields['Kanal_Signal'] || '').trim()).filter(Boolean);
 
-  // ── Paletten-Kandidaten: Design_Regeln verengen VOR der Wahl ──────
-  const paletteIds = matchedDesign.flatMap(r => r.fields['Palette_Link'] || []);
-  let candidates = farbpaletten.filter(p => paletteIds.includes(p.id));
+  // ── Segment-Gate (HART) ───────────────────────────────────────────
+  // Welt-Zuordnung fest (A), Palettenfeinwahl via Haiku (B). Kein
+  // Fallback-auf-ALLE mehr — das war die Ursache der Citrus/Orange-Konvergenz.
+  // Schickt das Frontend eine Pill (reqSegment) → Welt fix, Haiku sieht nur diese.
+  // Sonst wählt Haiku die Welt selbst (STEP 0) und wir filtern hart nach.
+  if (farbpaletten.length === 0) throw new Error('Keine aktiven Farbpaletten vorhanden');
+  const requestedSegment = SEGMENTS.includes(reqSegment as any) ? (reqSegment as string) : null;
+  let candidates = requestedSegment
+    ? farbpaletten.filter(p => multiSelectNames(p.fields['Segment']).includes(requestedSegment))
+    : farbpaletten;
+  // Sicherheitsnetz: Welt (noch) ohne aktive Palette → nicht crashen, statt Welt alle zeigen.
   if (candidates.length === 0) candidates = farbpaletten;
-  if (candidates.length === 0) throw new Error('Keine aktiven Farbpaletten vorhanden');
 
   // ── Produkt-Basics ────────────────────────────────────────────────
   const type = selectName(sysFields['Type']);
@@ -367,8 +382,14 @@ async function assemblePrompt(
   // ── Haiku: NUR Auswahl + Konzept — striktes JSON, keine Prosa ─────
   const paletteList = candidates.map(p => {
     const f = p.fields;
-    return `- id: ${p.id} | ${f['Name'] || ''} | tags: ${multiSelectNames(f['Emotion_Tags']).join(', ')} | warmth: ${selectName(f['SF_Warmth']) || '-'} | prestige: ${f['SF_Prestige_Score'] ?? '-'}/5 | zeitgeist: ${f['SF_Zeitgeist_Score'] ?? '-'}/5 | ${String(f['Beschreibung'] || '').slice(0, 90)}`;
+    return `- id: ${p.id} | seg: ${multiSelectNames(f['Segment']).join('/') || '-'} | ${f['Name'] || ''} | tags: ${multiSelectNames(f['Emotion_Tags']).join(', ')} | warmth: ${selectName(f['SF_Warmth']) || '-'} | prestige: ${f['SF_Prestige_Score'] ?? '-'}/5 | zeitgeist: ${f['SF_Zeitgeist_Score'] ?? '-'}/5 | ${String(f['Beschreibung'] || '').slice(0, 90)}`;
   }).join('\n');
+
+  // Welten, die in den gezeigten Paletten real vorkommen (leere Welten nie anbieten).
+  const worldsAvail = [...new Set(candidates.flatMap(p => multiSelectNames(p.fields['Segment'])))].filter(Boolean);
+  const segmentStep = requestedSegment
+    ? `WORLD (fixed by the user): ${requestedSegment}. Set "segment" to exactly this. Every palette below already belongs to this world.`
+    : `STEP 0 — segment: choose EXACTLY ONE world from [${worldsAvail.join(', ')}] that the brief's positioning belongs to. In STEP 2 you may ONLY pick a palette whose "seg" contains this chosen segment.`;
 
   const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
 You NEVER write a visual prompt and NEVER invent materials, shapes, ingredients, actives, scents or claims.
@@ -381,9 +402,10 @@ ${designCodes.length ? `DESIGN CODES (apply): ${designCodes.join(' · ')}` : ''}
 ${kanalSignale.length ? `CHANNEL SIGNAL: ${kanalSignale.join(' · ')}` : ''}
 ${nieRules.length ? `NEVER (hard): ${nieRules.join(' · ')}` : ''}
 
+${segmentStep}
 STEP 1 — ziel_profil: choose 3–5 tags ONLY from: [${emotionTagSet.join(', ')}]. They must express the brief's audience/mood.
 AUDIENCE RULE (hard): the palette MUST fit the audience in the brief. Feminine / curls / warm / natural briefs get warm or soft palettes — NEVER tech/chrome/futurist palettes. Masculine/tech briefs get cool restrained palettes. When in doubt, choose the softer, warmer palette.
-STEP 2 — palette_id: exactly one id from PALETTES below whose tags/warmth/prestige best fit ziel_profil AND the audience rule.
+STEP 2 — palette_id: exactly one id from PALETTES below whose "seg" contains your chosen segment AND whose tags/warmth/prestige best fit ziel_profil AND the audience rule.
 PALETTES:
 ${paletteList}
 STEP 3 — finish: one of [${finishes.join(', ')}].
@@ -394,7 +416,7 @@ STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
-{"ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
+{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -420,7 +442,16 @@ OUTPUT ONLY this JSON, no fences, no prose:
   } catch { parsed = null; }
 
   // ── Validierung mit deterministischen Fallbacks ───────────────────
-  const pal = candidates.find(p => p.id === parsed?.palette_id) || candidates[0];
+  // Effektive Welt: Pill > Haiku-Wahl > Welt der ersten Kandidatenpalette.
+  const validSeg = SEGMENTS.includes(parsed?.segment) ? String(parsed.segment) : null;
+  const effectiveSegment = requestedSegment || validSeg
+    || (candidates[0] ? multiSelectNames(candidates[0].fields['Segment'])[0] : null) || null;
+  // HART: nur Paletten der effektiven Welt sind wählbar (schnappt Fehlwahl zurück).
+  const worldPool = effectiveSegment
+    ? candidates.filter(p => multiSelectNames(p.fields['Segment']).includes(effectiveSegment))
+    : candidates;
+  const pool = worldPool.length ? worldPool : candidates;
+  const pal = pool.find(p => p.id === parsed?.palette_id) || pool[0];
   const finish = finishes.includes(parsed?.finish) ? parsed.finish : finishes[finishes.length - 1];
   const akzent = akzente.includes(parsed?.akzent) ? parsed.akzent : 'none';
   const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id) ? parsed.szene_id : 'studio_soft';
@@ -512,6 +543,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     palette: { name: palName, hex, pantone },
     radar,
     zielprofil: zielProfil,
+    segment: effectiveSegment,
   };
 
   return {
@@ -538,12 +570,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     renderBrief = null,
     selectedCapId = null,
     tier = 'lite',
+    segment = null,
   } = req.body as {
     systemId: string;
     query: string;
     renderBrief?: string | null;
     selectedCapId?: string | null;
     tier?: Tier;
+    segment?: string | null;
   };
 
   if (!systemId || !query) {
@@ -558,7 +592,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier);
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment);
     let cached: any[] = [];
     try {
       cached = await airtableQuery(
@@ -625,7 +659,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 4. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, fall, sys.fields, capFields);
+      await assemblePrompt(effectiveBrief, fall, sys.fields, capFields, segment);
 
     // ── 5. Call Seedream via fal.ai ─────────────────────────────────
     const falEndpoint = FAL_ENDPOINTS[tier];
