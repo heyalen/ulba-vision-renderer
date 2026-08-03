@@ -15,10 +15,9 @@ const FARBPALETTEN_TABLE = 'tblTIeUTyVptGIpKp';
 // Farbpaletten.Segment / Stil.Segment in Airtable.
 const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical'] as const;
 
-const FAL_ENDPOINTS = {
-  lite: 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit',
-  pro: 'https://fal.run/fal-ai/bytedance/seedream/v5/pro/edit',
-} as const;
+// Ein Modell für alles: Gemini 2.5 Flash Image (Nano Banana) via fal.ai.
+// Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
+const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
@@ -662,19 +661,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { prompt: renderingPrompt, forbidden, concept } =
       await assemblePrompt(effectiveBrief, fall, sys.fields, capFields, segment);
 
-    // ── 5. Call Seedream via fal.ai ─────────────────────────────────
-    const falEndpoint = FAL_ENDPOINTS[tier];
+    // ── 5. Call Gemini 2.5 Flash Image (Nano Banana) via fal.ai ─────
+    // image_urls ist IMMER ein Array: 1 Bild (Recolor) oder 2 (Base + gewählter Cap).
+    const geminiImageUrls = (fall === 'A' || !capImageUrl)
+      ? [primaryUrl]
+      : [primaryUrl, capImageUrl];
     const falBody: any = {
       prompt: renderingPrompt,
-      output_format: 'jpeg',
+      image_urls: geminiImageUrls,
+      aspect_ratio: 'auto',
     };
-    if (fall === 'A' || !capImageUrl) {
-      falBody.image_url = primaryUrl;
-    } else {
-      falBody.image_urls = [primaryUrl, capImageUrl];
-    }
 
-    const falRes = await fetch(falEndpoint, {
+    const falRes = await fetch(FAL_GEMINI_EDIT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -685,12 +683,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!falRes.ok) {
       const err = await falRes.text();
-      throw new Error(`fal.ai ${tier}: ${err}`);
+      throw new Error(`fal.ai gemini-edit: ${err}`);
     }
 
-    const falData = await falRes.json() as { images?: Array<{ url: string }>; image?: { url: string } };
-    const renderingUrl = falData.images?.[0]?.url || falData.image?.url;
-    if (!renderingUrl) throw new Error('Kein Bild von Seedream zurückgekommen');
+    const falData = await falRes.json() as { images?: Array<{ url: string }> };
+    const renderingUrl = falData.images?.[0]?.url;
+    if (!renderingUrl) throw new Error('Kein Bild von Gemini zurückgekommen');
 
     // ── 6. Download + Cache in Airtable ─────────────────────────────
     const imgRes = await fetch(renderingUrl);
