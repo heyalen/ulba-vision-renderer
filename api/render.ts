@@ -36,6 +36,43 @@ async function fetchBuffer(url: string): Promise<Buffer> {
   return Buffer.from(await r.arrayBuffer());
 }
 
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const h = String(hex || '').replace('#', '').trim();
+  if (h.length < 6) return null;
+  return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
+}
+
+// Cap deterministisch in Palette einfärben: RGB × Palette (weiß→Palette, Schatten
+// bleiben proportional). Form + Highlights + Transparenz bleiben pixel-exakt.
+// Getestet. sharp.tint() geht NICHT (bewahrt Luminanz → weiß bleibt weiß).
+async function recolorCap(capBuf: Buffer, hex: string): Promise<Buffer> {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return capBuf;
+  const { data, info } = await sharp(capBuf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  for (let i = 0; i < data.length; i += info.channels) {
+    if (data[i + 3] > 0) {
+      data[i] = Math.round(data[i] * rgb.r / 255);
+      data[i + 1] = Math.round(data[i + 1] * rgb.g / 255);
+      data[i + 2] = Math.round(data[i + 2] * rgb.b / 255);
+    }
+  }
+  return sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } }).png().toBuffer();
+}
+
+// Ein Gemini-Edit-Aufruf (fal.ai) → Bild-URL.
+async function geminiEdit(imageUrls: string[], prompt: string): Promise<string> {
+  const r = await fetch(FAL_GEMINI_EDIT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
+    body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: 'auto' }),
+  });
+  if (!r.ok) throw new Error(`fal.ai gemini-edit: ${await r.text()}`);
+  const d = await r.json() as { images?: Array<{ url: string }> };
+  const url = d.images?.[0]?.url;
+  if (!url) throw new Error('Kein Bild von Gemini zurückgekommen');
+  return url;
+}
+
 async function whiteToAlpha(buffer: Buffer, threshold = 245): Promise<Buffer> {
   const { data, info } = await sharp(buffer).ensureAlpha().raw()
     .toBuffer({ resolveWithObject: true });
@@ -89,9 +126,9 @@ function collarWidth(e: Extent): number {
 async function composeHover(
   baseBuffer: Buffer,
   capBuffer: Buffer,
-  opts: { gapFrac?: number; capScale?: number | null; clampMin?: number; clampMax?: number; whiteThresh?: number } = {}
+  opts: { gapFrac?: number; capScale?: number | null; clampMin?: number; clampMax?: number; whiteThresh?: number; capTintHex?: string | null } = {}
 ): Promise<Buffer> {
-  const { gapFrac = 0.12, capScale = null, clampMin = 0.10, clampMax = 0.40, whiteThresh = 245 } = opts;
+  const { gapFrac = 0.12, capScale = null, clampMin = 0.10, clampMax = 0.40, whiteThresh = 245, capTintHex = null } = opts;
 
   const baseAlpha = await whiteToAlpha(baseBuffer, whiteThresh);
   const bE = await contentExtent(baseAlpha, whiteThresh);
@@ -110,6 +147,7 @@ async function composeHover(
     : Math.round(cw0 * (baseNeck / Math.max(1, capCollar)));
   capFinalW = Math.max(Math.round(bw * clampMin), Math.min(Math.round(bw * clampMax), capFinalW));
   capTrim = await sharp(capTrim).resize({ width: capFinalW }).png().toBuffer();
+  if (capTintHex) capTrim = await recolorCap(capTrim, capTintHex);
   const cM = await sharp(capTrim).metadata();
   const cw = cM.width!, ch = cM.height!;
 
@@ -763,65 +801,52 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!capImageUrl) throw new Error(`Cap ${capId} hat kein Bild`);
     }
 
-    // ── 4. Deterministisches Cap-Compositing (Fall C/D) ────────────
-    // Cap wird per Code auf die Base gesetzt → EIN Bild. Gemini färbt es dann
-    // nur noch um (wie Fall A) → Cap so formtreu wie die Base. Bei Fehler
-    // sicherer Fallback auf den bisherigen generativen Zwei-Bild-Aufruf.
-    let compositeDataUri: string | null = null;
-    if ((fall === 'C' || fall === 'D') && capImageUrl) {
-      try {
-        const [baseBuf, capBuf] = await Promise.all([
-          fetchBuffer(primaryUrl),
-          fetchBuffer(capImageUrl),
-        ]);
-        const composed = await composeHover(baseBuf, capBuf);
-        compositeDataUri = `data:image/jpeg;base64,${composed.toString('base64')}`;
-      } catch (e) {
-        console.error('Cap-Composite fehlgeschlagen — Fallback auf Zwei-Bild-Aufruf:', e);
-        compositeDataUri = null;
-      }
-    }
-    // Composited → Gemini bekommt EIN fertiges Bild und behandelt es als Recolor (Fall A).
-    const promptFall: RenderFall = compositeDataUri ? 'A' : fall;
+    // ── 4. Render-Strategie ─────────────────────────────────────────
+    // Fall C/D: Base und Cap NIE zusammen an Gemini geben — es zeichnet den
+    // kleinen schwebenden Cap sonst neu (ikonische Form überlebt, untypische
+    // driftet). Stattdessen: Base einzeln umfärben (formtreu wie immer bei
+    // Einzelbild), Cap deterministisch in die Palette tönen (Form pixel-exakt),
+    // beide per Code schweben-compositen. KEIN finaler generativer Pass über den
+    // Cap → er kann nicht mehr verfälscht werden.
+    const useSplitCompose = (fall === 'C' || fall === 'D') && !!capImageUrl;
+    const promptFall: RenderFall = useSplitCompose ? 'A' : fall;
 
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
       await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment);
 
-    // ── 6. Call Gemini 2.5 Flash Image (Nano Banana) via fal.ai ─────
-    const geminiImageUrls = compositeDataUri
-      ? [compositeDataUri]                              // 1 Bild: Base+Cap deterministisch zusammengesetzt
-      : (fall === 'A' || !capImageUrl)
-        ? [primaryUrl]                                  // 1 Bild: reines Recolor
-        : [primaryUrl, capImageUrl];                    // Fallback: 2 Bilder (generativ)
-    const falBody: any = {
-      prompt: renderingPrompt,
-      image_urls: geminiImageUrls,
-      aspect_ratio: 'auto',
-    };
+    // ── 6. Render ───────────────────────────────────────────────────
+    let renderingUrl: string;
+    let finalBuffer: Buffer | null = null;
 
-    const falRes = await fetch(FAL_GEMINI_EDIT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Key ${process.env.FAL_API_KEY}`,
-      },
-      body: JSON.stringify(falBody),
-    });
-
-    if (!falRes.ok) {
-      const err = await falRes.text();
-      throw new Error(`fal.ai gemini-edit: ${err}`);
+    if (useSplitCompose) {
+      try {
+        // Base allein umfärben (Gemini, formtreu). Cap bleibt echtes Bild,
+        // nur in Palette getönt (sharp) → Form exakt, kein Modell fasst ihn an.
+        const recoloredBaseUrl = await geminiEdit([primaryUrl], renderingPrompt);
+        const [baseBuf, capBuf] = await Promise.all([
+          fetchBuffer(recoloredBaseUrl),
+          fetchBuffer(capImageUrl!),
+        ]);
+        const capHex = concept.palette?.hex?.[0] || null;
+        finalBuffer = await composeHover(baseBuf, capBuf, { capTintHex: capHex });
+        renderingUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
+      } catch (e) {
+        // Fallback: generativer Zwei-Bild-Aufruf (wie bisher), falls der Split scheitert.
+        console.error('Split-Compose fehlgeschlagen — Fallback generativ:', e);
+        renderingUrl = await geminiEdit([primaryUrl, capImageUrl!], renderingPrompt);
+        finalBuffer = null;
+      }
+    } else {
+      const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
+      renderingUrl = await geminiEdit(imgs, renderingPrompt);
     }
 
-    const falData = await falRes.json() as { images?: Array<{ url: string }> };
-    const renderingUrl = falData.images?.[0]?.url;
-    if (!renderingUrl) throw new Error('Kein Bild von Gemini zurückgekommen');
-
-    // ── 6. Download + Cache in Airtable ─────────────────────────────
-    const imgRes = await fetch(renderingUrl);
-    const imgBuffer = await imgRes.arrayBuffer();
-    const base64 = Buffer.from(imgBuffer).toString('base64');
+    // ── 7. Bytes: Composite direkt nutzen, sonst herunterladen ──────
+    const imgBuffer: Buffer = finalBuffer
+      ? finalBuffer
+      : Buffer.from(await (await fetch(renderingUrl)).arrayBuffer());
+    const base64 = imgBuffer.toString('base64');
 
     const createRes = await fetch(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`,
