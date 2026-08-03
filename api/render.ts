@@ -96,10 +96,14 @@ function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; hasMul
 
   if (!bildRohBase && !bildSystem) throw new Error('Kein Bild vorhanden');
 
+  // Harmonisiertes Ganzfoto ist der formtreue Anker und gewinnt IMMER, wenn vorhanden:
+  //   keine Caps      → A (nur umfärben)
+  //   Caps vorhanden  → B (gewählten Cap auf das formtreue Ganze TAUSCHEN, nicht neu bauen)
+  // Komposition aus nacktem Base (C/D) nur noch, wenn KEIN Ganzfoto existiert.
   if (bildSystem && capCount === 0) {
     return { fall: 'A', primaryUrl: bildSystem, hasMultipleCaps: false };
   }
-  if (bildSystem && !bildRohBase && capCount > 0) {
+  if (bildSystem && capCount > 0) {
     return { fall: 'B', primaryUrl: bildSystem, hasMultipleCaps: capCount > 1 };
   }
   if (bildRohBase && capCount === 1) {
