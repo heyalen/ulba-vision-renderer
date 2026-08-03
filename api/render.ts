@@ -1,5 +1,6 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
+import sharp from 'sharp';
 
 // ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
@@ -21,6 +22,48 @@ const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
+
+// ── Deterministisches Cap-Compositing (sharp) ───────────────────────
+// Macht den Verschluss zu "behaltenen Pixeln": der echte Cap wird per Code auf
+// den Hals der Base gesetzt → EIN Bild, das Gemini nur noch umfärbt (Fall A).
+// Kein generatives Neu-Zeichnen des Caps → kein Drift, kein Form-zu-Form-Lotto.
+// Getestet in Sandbox (Pixel-Asserts). Freistellen v1 = Weiß-Schwelle (Katalog-
+// Caps auf Weiß); robustere Variante bei Bedarf: birefnet-Matte vorschalten.
+async function fetchBuffer(url: string): Promise<Buffer> {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Bild-Fetch ${r.status}`);
+  return Buffer.from(await r.arrayBuffer());
+}
+
+async function whiteToAlpha(buffer: Buffer, threshold = 245): Promise<Buffer> {
+  const { data, info } = await sharp(buffer).ensureAlpha().raw()
+    .toBuffer({ resolveWithObject: true });
+  for (let i = 0; i < data.length; i += info.channels) {
+    if (data[i] >= threshold && data[i + 1] >= threshold && data[i + 2] >= threshold) data[i + 3] = 0;
+  }
+  return sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } }).png().toBuffer();
+}
+
+// opts pro Base kalibrierbar (Default reicht für konsistent harmonisierte Bilder).
+async function composeCapOnBase(
+  baseBuffer: Buffer,
+  capBuffer: Buffer,
+  opts: { capWidthFrac?: number; neckYFrac?: number; overlapFrac?: number; whiteThresh?: number } = {}
+): Promise<Buffer> {
+  const { capWidthFrac = 0.28, neckYFrac = 0.17, overlapFrac = 0.06, whiteThresh = 245 } = opts;
+  const bMeta = await sharp(baseBuffer).metadata();
+  const baseW = bMeta.width!, baseH = bMeta.height!;
+  let cap = await whiteToAlpha(capBuffer, whiteThresh);
+  cap = await sharp(cap).trim().png().toBuffer();
+  const capW = Math.round(baseW * capWidthFrac);
+  cap = await sharp(cap).resize({ width: capW }).png().toBuffer();
+  const capH = (await sharp(cap).metadata()).height!;
+  const neckY = Math.round(baseH * neckYFrac);
+  const overlapPx = Math.round(capH * overlapFrac);
+  const left = Math.round(baseW / 2 - capW / 2);
+  const top = Math.max(0, neckY - capH + overlapPx);
+  return sharp(baseBuffer).composite([{ input: cap, left, top }]).jpeg({ quality: 95 }).toBuffer();
+}
 
 // ── Szenen-Presets (handkuratiert, kein Korpus, kein Airtable) ──────
 // Haiku wählt genau EINE ID passend zur Emotion. Nur Backdrop/Licht-Stimmung —
@@ -657,15 +700,37 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!capImageUrl) throw new Error(`Cap ${capId} hat kein Bild`);
     }
 
-    // ── 4. Assemble Rendering Prompt (Konzept-Brief) ────────────────
-    const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, fall, sys.fields, capFields, segment);
+    // ── 4. Deterministisches Cap-Compositing (Fall C/D) ────────────
+    // Cap wird per Code auf die Base gesetzt → EIN Bild. Gemini färbt es dann
+    // nur noch um (wie Fall A) → Cap so formtreu wie die Base. Bei Fehler
+    // sicherer Fallback auf den bisherigen generativen Zwei-Bild-Aufruf.
+    let compositeDataUri: string | null = null;
+    if ((fall === 'C' || fall === 'D') && capImageUrl) {
+      try {
+        const [baseBuf, capBuf] = await Promise.all([
+          fetchBuffer(primaryUrl),
+          fetchBuffer(capImageUrl),
+        ]);
+        const composed = await composeCapOnBase(baseBuf, capBuf);
+        compositeDataUri = `data:image/jpeg;base64,${composed.toString('base64')}`;
+      } catch (e) {
+        console.error('Cap-Composite fehlgeschlagen — Fallback auf Zwei-Bild-Aufruf:', e);
+        compositeDataUri = null;
+      }
+    }
+    // Composited → Gemini bekommt EIN fertiges Bild und behandelt es als Recolor (Fall A).
+    const promptFall: RenderFall = compositeDataUri ? 'A' : fall;
 
-    // ── 5. Call Gemini 2.5 Flash Image (Nano Banana) via fal.ai ─────
-    // image_urls ist IMMER ein Array: 1 Bild (Recolor) oder 2 (Base + gewählter Cap).
-    const geminiImageUrls = (fall === 'A' || !capImageUrl)
-      ? [primaryUrl]
-      : [primaryUrl, capImageUrl];
+    // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
+    const { prompt: renderingPrompt, forbidden, concept } =
+      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment);
+
+    // ── 6. Call Gemini 2.5 Flash Image (Nano Banana) via fal.ai ─────
+    const geminiImageUrls = compositeDataUri
+      ? [compositeDataUri]                              // 1 Bild: Base+Cap deterministisch zusammengesetzt
+      : (fall === 'A' || !capImageUrl)
+        ? [primaryUrl]                                  // 1 Bild: reines Recolor
+        : [primaryUrl, capImageUrl];                    // Fallback: 2 Bilder (generativ)
     const falBody: any = {
       prompt: renderingPrompt,
       image_urls: geminiImageUrls,
