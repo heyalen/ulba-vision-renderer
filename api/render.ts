@@ -49,14 +49,19 @@ async function geminiEdit(imageUrls: string[], prompt: string): Promise<string> 
 
 
 // Interim bis Design_Code Cap_Hex liefert (Regel: Cap nie in Body-Farbe).
-function contrastCapHex(bodyHex: string | null): string {
-  if (!bodyHex) return '#FFFFFF'; // Klarglas: Farbe im Inhalt, Cap neutral weiss
+function contrastCapHex(bodyHex: string | null): string | null {
+  // Interim bis Design_Code.Cap_Hex/Cap_Finish die echte Cap-Entscheidung
+  // liefert. Grundregel: den Cap NUR umfaerben, wenn es einen echten Grund gibt.
+  // Kein bodyHex (Klarglas) -> KEIN Farbwunsch -> Cap im Original belassen
+  // (silber/metallic bleibt silber, nicht gewaltsam weiss/schwarz uebermalen).
+  if (!bodyHex) return null;
   const h = bodyHex.replace('#', '');
   const r = parseInt(h.slice(0, 2), 16) || 0;
   const g = parseInt(h.slice(2, 4), 16) || 0;
   const b = parseInt(h.slice(4, 6), 16) || 0;
   const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-  return lum > 0.6 ? '#232323' : '#FFFFFF'; // helle Base -> dunkler Cap, sonst weiss
+  // Nur bei sehr heller Base einen dunklen Kontrast-Cap erzwingen; sonst original.
+  return lum > 0.75 ? '#232323' : null;
 }
 
 
@@ -727,13 +732,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
       const bodyColorable = !!sys.fields['SF_Einfaerbbar'] || isPlasticBody;
       const bodyHex = concept.palette?.hex?.[0] || null;
-      // Interim bis Design_Code Cap_Hex liefert: Kontrastton (Regel: nie mono).
+      // Interim bis Design_Code Cap_Hex liefert. null = kein Farbwunsch ->
+      // Cap im Original belassen (silber/metallic bleibt erhalten).
       const capHex = contrastCapHex(bodyHex);
       const bodyColorLine = bodyColorable && bodyHex
         ? `Recolor the bottle body to ${bodyHex} with a clean surface finish.`
         : `Keep the bottle body as clear transparent glass — do not add colour to the glass itself.`;
       const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck. Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
-      const capOnlyPrompt = `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in the reference image — change ONLY the surface colour and finish. Color the closure as ONE single solid ${capHex}${capHex === '#FFFFFF' ? ' (clean white)' : ''} tone across the whole closure in a clean matt finish. Do NOT split it into multiple colored segments and do NOT use more than this one color on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
+      const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
+      const capRecolorPrompt = `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in the reference image — change ONLY the surface colour and finish. Color the closure as ONE single solid ${capHex} tone across the whole closure in a clean matt finish. Do NOT split it into multiple colored segments and do NOT use more than this one color on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
+      const capOnlyPrompt = capHex ? capRecolorPrompt : capPreservePrompt;
 
       const [baseUrl, capUrl] = await Promise.all([
         geminiEdit([primaryUrl], baseOnlyPrompt),
