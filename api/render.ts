@@ -7,6 +7,7 @@ const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
 const CAP_TABLE = 'tblQvnXPhiKGMoqDp';
 const CACHE_TABLE = 'tblsOp1WKPGIquBKQ';
 const CACHE_IMAGE_FIELD = 'fldFd5qi64yELhKna';
+const CACHE_CAP_IMAGE_FIELD = 'fld1aoVYgaUtHsiWC'; // Cap_Bild (Anhang, symmetrisch zu Bild)
 const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
 const FARBPALETTEN_TABLE = 'tblTIeUTyVptGIpKp';
 
@@ -712,6 +713,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let renderingUrl: string;
 
     let capRenderingUrl: string | null = null;
+    let capPromptUsed: string | null = null;
 
     if (useSplitRender) {
       // ZWEI GETRENNTE EINZELBILD-RECOLORS (Architektur 04.08.):
@@ -731,7 +733,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ? `Recolor the bottle body to ${bodyHex} with a clean surface finish.`
         : `Keep the bottle body as clear transparent glass — do not add colour to the glass itself.`;
       const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck. Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
-      const capOnlyPrompt = `Recolor this closure to ${capHex}${capHex === '#FFFFFF' ? ' (clean white)' : ''} with a clean matt finish. Show ONLY the closure itself, exactly the object in the reference image, floating alone on the background. Preserve its exact shape, proportions and every part — do NOT redesign it, do NOT swap it for a different closure type, do NOT add or remove any part; change ONLY colour and surface finish. CRITICAL: do NOT add, invent or draw any bottle, jar, vial, container, glass housing, transparent sleeve, cylinder or chamber around or beneath the closure. The pump shaft / dip tube stays a bare, free-standing stem hanging in empty space exactly as in the reference — nothing is wrapped around it. If a part is clear glass in the reference, keep it clear; do not add new glass anywhere. Clean seamless white studio background, centered. No label, text or logo.`;
+      const capOnlyPrompt = `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in the reference image — change ONLY the surface colour and finish. Color the closure as ONE single solid ${capHex}${capHex === '#FFFFFF' ? ' (clean white)' : ''} tone across the whole closure in a clean matt finish. Do NOT split it into multiple colored segments and do NOT use more than this one color on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
 
       const [baseUrl, capUrl] = await Promise.all([
         geminiEdit([primaryUrl], baseOnlyPrompt),
@@ -743,6 +745,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ]);
       renderingUrl = baseUrl;
       capRenderingUrl = capUrl;
+      capPromptUsed = capOnlyPrompt;
     } else {
       const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
       renderingUrl = await geminiEdit(imgs, renderingPrompt);
@@ -765,8 +768,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             Cache_Key: key,
             System: [systemId],
             Query_Input: query, // roh, nie sanitisiert — Demand-Signal
-            Cap_Bild_URL: capRenderingUrl || '', // recolorter Cap (getrennter Render)
-            Rendering_Prompt: renderingPrompt, // reiner Seedream-Prompt
+            Rendering_Prompt: renderingPrompt, // Base-Prompt (Provenienz)
+            Cap_Prompt: capPromptUsed || '', // Cap-Prompt (Provenienz, symmetrisch)
             // Konzept als eigene, auswertbare Felder (Demand-Signal / Provenienz).
             Konzept_Name: concept.konzept_name || '',
             Konzept_Story: concept.story || '',
@@ -792,7 +795,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         console.warn(`Cache: unbekanntes Feld "${badField}" entfernt, retry.`);
         const retryBody = JSON.parse(JSON.stringify({ fields: {
           Cache_Key: key, System: [systemId], Query_Input: query,
-          Cap_Bild_URL: capRenderingUrl || '', Rendering_Prompt: renderingPrompt,
+          Rendering_Prompt: renderingPrompt, Cap_Prompt: capPromptUsed || '',
           Konzept_Name: concept.konzept_name || '', Konzept_Story: concept.story || '',
           Konzept_Rationale: concept.rationale || '', Szene_ID: concept.szene_id || '',
           Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
@@ -835,7 +838,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     );
 
     if (!uploadRes.ok) {
-      console.error('Airtable upload failed:', await uploadRes.text());
+      console.error('Airtable upload (Base) failed:', await uploadRes.text());
+    }
+
+    // Cap-Bild SYMMETRISCH zur Base als echten Anhang hochladen (Bytes, nicht
+    // die temporaere fal-URL — die verfaellt). Non-fatal: scheitert der Upload,
+    // wird der Render trotzdem ausgeliefert.
+    if (capRenderingUrl) {
+      try {
+        const capBuf = Buffer.from(await (await fetch(capRenderingUrl)).arrayBuffer());
+        const capUploadRes = await fetch(
+          `https://content.airtable.com/v0/${AIRTABLE_BASE}/${createData.id}/${CACHE_CAP_IMAGE_FIELD}/uploadAttachment`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
+            },
+            body: JSON.stringify({
+              contentType: 'image/jpeg',
+              file: capBuf.toString('base64'),
+              filename: `cap_${resolvedCapId || 'cap'}_${Date.now()}.jpg`,
+            }),
+          }
+        );
+        if (!capUploadRes.ok) console.error('Airtable upload (Cap) failed:', await capUploadRes.text());
+      } catch (e) {
+        console.error('Cap-Upload fehlgeschlagen (Render wird dennoch ausgeliefert):', e);
+      }
     }
 
     return res.status(200).json({
