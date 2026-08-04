@@ -8,7 +8,6 @@ const CAP_TABLE = 'tblQvnXPhiKGMoqDp';
 const CACHE_TABLE = 'tblsOp1WKPGIquBKQ';
 const CACHE_IMAGE_FIELD = 'fldFd5qi64yELhKna';
 const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
-const DESIGN_REGELN_TABLE = 'tblEVWQUJtf87JgOc';
 const FARBPALETTEN_TABLE = 'tblTIeUTyVptGIpKp';
 
 // Positionierungs-Welten. Harter Gate für Palettenwahl. Identisch zu
@@ -339,9 +338,12 @@ async function assemblePrompt(
   capFields: any | null,
   reqSegment: string | null = null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
-  const [produktRegeln, designRegeln, farbpalettenAll] = await Promise.all([
+  // Design_Regeln ist abgelöst (-> Design_Code). Nicht mehr laden.
+  // Die drei Verfeinerungs-Signale (Nie/Codes/Kanal) laufen dann leer =
+  // Normalzustand "keine Regel matcht". Kommt später aus Design_Code.
+  const designRegeln: any[] = [];
+  const [produktRegeln, farbpalettenAll] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
-    airtableListAll(DESIGN_REGELN_TABLE),
     airtableListAll(FARBPALETTEN_TABLE),
   ]);
   // v5: Active-Filter (Bugfix — inaktive Paletten konnten bisher matchen).
