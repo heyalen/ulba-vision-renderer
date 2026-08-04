@@ -17,6 +17,9 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 
 // Ein Modell für alles: Gemini 2.5 Flash Image (Nano Banana) via fal.ai.
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
+// Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
+// den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
+const RENDER_VERSION = 'v13-seedream-split';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
 // Modell-Wahl pro Render-Teil (A/B-Test 04.08.: Seedream hielt Detail + Matt-Haptik
@@ -91,7 +94,8 @@ function queryHash(q: string): string {
 }
 
 function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null): string {
-  return `${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}`;
+  // RENDER_VERSION zuerst: aendert sich der Render-Code, aendert sich jeder Key.
+  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}`;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -625,6 +629,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     selectedCapId = null,
     tier = 'lite',
     segment = null,
+    nocache = false,
   } = req.body as {
     systemId: string;
     query: string;
@@ -632,6 +637,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     selectedCapId?: string | null;
     tier?: Tier;
     segment?: string | null;
+    nocache?: boolean;
   };
 
   if (!systemId || !query) {
@@ -648,7 +654,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ── 1. Cache Check ──────────────────────────────────────────────
     const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment);
     let cached: any[] = [];
-    try {
+    // Dev-Bypass: nocache=true ueberspringt das Cache-Lesen -> immer frischer Render.
+    if (!nocache) try {
       cached = await airtableQuery(
         CACHE_TABLE,
         `{Cache_Key}='${key}'`,
