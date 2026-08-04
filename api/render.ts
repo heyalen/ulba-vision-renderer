@@ -782,9 +782,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     );
 
-    const createData = await createRes.json() as { id: string; error?: any };
+    let createData = await createRes.json() as { id: string; error?: any };
+    // Haertung: unbekanntes Feld kippt NICHT mehr den ganzen Record. Airtable
+    // nennt das fehlende Feld -> wir droppen es und versuchen EINMAL erneut.
+    if (!createData.id && createData.error?.type === 'UNKNOWN_FIELD_NAME') {
+      const m = String(createData.error?.message || '').match(/\"([^\"]+)\"/);
+      const badField = m?.[1];
+      if (badField) {
+        console.warn(`Cache: unbekanntes Feld "${badField}" entfernt, retry.`);
+        const retryBody = JSON.parse(JSON.stringify({ fields: {
+          Cache_Key: key, System: [systemId], Query_Input: query,
+          Cap_Bild_URL: capRenderingUrl || '', Rendering_Prompt: renderingPrompt,
+          Konzept_Name: concept.konzept_name || '', Konzept_Story: concept.story || '',
+          Konzept_Rationale: concept.rationale || '', Szene_ID: concept.szene_id || '',
+          Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
+          Board: JSON.stringify({ label: concept.label, palette: concept.palette, radar: concept.radar, zielprofil: concept.zielprofil }),
+          Tier: tier, Fall: fall, Created_At: new Date().toISOString(),
+        }}));
+        delete retryBody.fields[badField];
+        const retryRes = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
+          body: JSON.stringify(retryBody),
+        });
+        createData = await retryRes.json() as { id: string; error?: any };
+      }
+    }
     if (!createData.id) {
-      // Cachen fehlgeschlagen (z.B. Feld 'Board' fehlt) — Render trotzdem ausliefern.
+      // Cachen endgueltig fehlgeschlagen — Render trotzdem ausliefern (nie blocken).
       console.error('Cache-Record Fehler (Render wird dennoch ausgeliefert):', JSON.stringify(createData.error || createData));
       return res.status(200).json({
         renderingUrl, capRenderingUrl, renderingPrompt, briefUsed: effectiveBrief,
