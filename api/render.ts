@@ -1,6 +1,5 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
-import sharp from 'sharp';
 
 // ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
@@ -23,41 +22,16 @@ const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
 
-// ── Deterministisches Cap-Compositing (sharp) ───────────────────────
 // Der Cap SCHWEBT über der Base — kein Aufsetzen (Hals-Innengeometrie unbekannt),
 // keine erfundene Passung, echte Proportionen: Cap-Kragen wird auf Base-Hals
 // skaliert (in Wirklichkeit gleicher Durchmesser → Proportion by construction).
 // Base bleibt voll sichtbar. Beide sind "behaltene Pixel" → Gemini färbt nur um.
 // Getestet in Sandbox (Pixel-Asserts: Hals/Kragen-Messung, Schwebe-Lücke, Proportion).
 // Freistellen v1 = Weiß-Schwelle (Katalog-Caps auf Weiß); robuster: birefnet vorschalten.
-async function fetchBuffer(url: string): Promise<Buffer> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Bild-Fetch ${r.status}`);
-  return Buffer.from(await r.arrayBuffer());
-}
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const h = String(hex || '').replace('#', '').trim();
-  if (h.length < 6) return null;
-  return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
-}
 
 // Cap deterministisch in Palette einfärben: RGB × Palette (weiß→Palette, Schatten
 // bleiben proportional). Form + Highlights + Transparenz bleiben pixel-exakt.
-// Getestet. sharp.tint() geht NICHT (bewahrt Luminanz → weiß bleibt weiß).
-async function recolorCap(capBuf: Buffer, hex: string): Promise<Buffer> {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return capBuf;
-  const { data, info } = await sharp(capBuf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  for (let i = 0; i < data.length; i += info.channels) {
-    if (data[i + 3] > 0) {
-      data[i] = Math.round(data[i] * rgb.r / 255);
-      data[i + 1] = Math.round(data[i + 1] * rgb.g / 255);
-      data[i + 2] = Math.round(data[i + 2] * rgb.b / 255);
-    }
-  }
-  return sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } }).png().toBuffer();
-}
 
 // Ein Gemini-Edit-Aufruf (fal.ai) → Bild-URL.
 async function geminiEdit(imageUrls: string[], prompt: string): Promise<string> {
@@ -73,44 +47,8 @@ async function geminiEdit(imageUrls: string[], prompt: string): Promise<string> 
   return url;
 }
 
-async function whiteToAlpha(buffer: Buffer, threshold = 245): Promise<Buffer> {
-  const { data, info } = await sharp(buffer).ensureAlpha().raw()
-    .toBuffer({ resolveWithObject: true });
-  for (let i = 0; i < data.length; i += info.channels) {
-    if (data[i] >= threshold && data[i + 1] >= threshold && data[i + 2] >= threshold) data[i + 3] = 0;
-  }
-  return sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } }).png().toBuffer();
-}
 
-type Extent = { w: number; h: number; minX: number; maxX: number; minY: number; maxY: number; rowMinX: Int32Array; rowMaxX: Int32Array };
-
-async function contentExtent(buffer: Buffer, whiteThresh = 245): Promise<Extent> {
-  const { data, info } = await sharp(buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  const w = info.width, h = info.height, c = info.channels;
-  const rowMinX = new Int32Array(h).fill(w);
-  const rowMaxX = new Int32Array(h).fill(-1);
-  let minX = w, maxX = -1, minY = h, maxY = -1;
-  for (let y = 0; y < h; y++) {
-    const rowBase = y * w * c;
-    for (let x = 0; x < w; x++) {
-      const i = rowBase + x * c;
-      const opaque = data[i + 3] > 10 && !(data[i] >= whiteThresh && data[i + 1] >= whiteThresh && data[i + 2] >= whiteThresh);
-      if (opaque) {
-        if (x < rowMinX[y]) rowMinX[y] = x;
-        if (x > rowMaxX[y]) rowMaxX[y] = x;
-        if (x < minX) minX = x; if (x > maxX) maxX = x;
-        if (y < minY) minY = y; if (y > maxY) maxY = y;
-      }
-    }
-  }
-  return { w, h, minX, maxX, minY, maxY, rowMinX, rowMaxX };
-}
-
-const rowW = (e: Extent, y: number) => (e.rowMaxX[y] >= 0 ? e.rowMaxX[y] - e.rowMinX[y] + 1 : 0);
-
-// Interim-Kontrast bis zum Design-Code: Cap darf NIE die Body-Farbe tragen
-// (Regel 1: Cap kontrastiert immer mit Body). Der Design-Code liefert spaeter
-// Cap_Relation und ersetzt diese Heuristik.
+// Interim bis Design_Code Cap_Hex liefert (Regel: Cap nie in Body-Farbe).
 function contrastCapHex(bodyHex: string | null): string {
   if (!bodyHex) return '#FFFFFF'; // Klarglas: Farbe im Inhalt, Cap neutral weiss
   const h = bodyHex.replace('#', '');
@@ -121,69 +59,6 @@ function contrastCapHex(bodyHex: string | null): string {
   return lum > 0.6 ? '#232323' : '#FFFFFF'; // helle Base -> dunkler Cap, sonst weiss
 }
 
-function neckWidth(e: Extent): number {
-  const band = Math.max(2, Math.round((e.maxY - e.minY) * 0.20));
-  let min = Infinity;
-  for (let y = e.minY; y <= e.minY + band; y++) { const w = rowW(e, y); if (w > 0 && w < min) min = w; }
-  return isFinite(min) ? min : rowW(e, e.minY);
-}
-
-function collarWidth(e: Extent): number {
-  // Kragen = breiteste Stelle im unteren Band, aber OHNE die Dip-Tube.
-  // Bug: das unterste 15%-Band traf bei Pump/Dropper die duenne Dip-Tube
-  // statt den Kragen -> Cap wurde zu klein skaliert. Fix: unterste ~18%
-  // (Dip-Tube) ausschliessen, Kragen im Band 35-82% der Hoehe messen.
-  const h = e.maxY - e.minY;
-  const top = e.minY + Math.round(h * 0.35);
-  const bottom = e.maxY - Math.round(h * 0.18);
-  let max = 0;
-  for (let y = top; y <= bottom; y++) { const w = rowW(e, y); if (w > max) max = w; }
-  return max || rowW(e, Math.round((e.minY + e.maxY) / 2));
-}
-
-// opts.capScale pro Base überschreibbar; sonst Hals-Matching. Getestet.
-async function composeHover(
-  baseBuffer: Buffer,
-  capBuffer: Buffer,
-  opts: { gapFrac?: number; capScale?: number | null; clampMin?: number; clampMax?: number; whiteThresh?: number; capTintHex?: string | null } = {}
-): Promise<Buffer> {
-  const { gapFrac = 0.07, capScale = null, clampMin = 0.10, clampMax = 0.55, whiteThresh = 245, capTintHex = null } = opts;
-
-  const baseAlpha = await whiteToAlpha(baseBuffer, whiteThresh);
-  const bE = await contentExtent(baseAlpha, whiteThresh);
-  const bw = bE.maxX - bE.minX + 1, bh = bE.maxY - bE.minY + 1;
-  const baseTrim = await sharp(baseAlpha).extract({ left: bE.minX, top: bE.minY, width: bw, height: bh }).png().toBuffer();
-  const baseNeck = neckWidth(bE);
-
-  const capAlpha = await whiteToAlpha(capBuffer, whiteThresh);
-  const cE = await contentExtent(capAlpha, whiteThresh);
-  const cw0 = cE.maxX - cE.minX + 1, ch0 = cE.maxY - cE.minY + 1;
-  let capTrim = await sharp(capAlpha).extract({ left: cE.minX, top: cE.minY, width: cw0, height: ch0 }).png().toBuffer();
-  const capCollar = collarWidth(cE);
-
-  let capFinalW = capScale != null
-    ? Math.round(bw * capScale)
-    : Math.round(cw0 * (baseNeck / Math.max(1, capCollar)));
-  capFinalW = Math.max(Math.round(bw * clampMin), Math.min(Math.round(bw * clampMax), capFinalW));
-  capTrim = await sharp(capTrim).resize({ width: capFinalW }).png().toBuffer();
-  if (capTintHex) capTrim = await recolorCap(capTrim, capTintHex);
-  const cM = await sharp(capTrim).metadata();
-  const cw = cM.width!, ch = cM.height!;
-
-  const gap = Math.round(bh * gapFrac);
-  const sideM = Math.round(Math.max(bw, cw) * 0.18);
-  const canvasW = Math.max(bw, cw) + sideM * 2;
-  const vM = Math.round((ch + gap + bh) * 0.07);
-  const canvasH = vM + ch + gap + bh + vM;
-
-  return sharp({ create: { width: canvasW, height: canvasH, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
-    .composite([
-      { input: capTrim, left: Math.round(canvasW / 2 - cw / 2), top: vM },
-      { input: baseTrim, left: Math.round(canvasW / 2 - bw / 2), top: vM + ch + gap },
-    ])
-    .jpeg({ quality: 95 })
-    .toBuffer();
-}
 
 // ── Szenen-Presets (handkuratiert, kein Korpus, kein Airtable) ──────
 // Haiku wählt genau EINE ID passend zur Emotion. Nur Backdrop/Licht-Stimmung —
@@ -822,13 +697,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 4. Render-Strategie ─────────────────────────────────────────
     // Fall C/D: Base und Cap NIE zusammen an Gemini geben — es zeichnet den
-    // kleinen schwebenden Cap sonst neu (ikonische Form überlebt, untypische
-    // driftet). Stattdessen: Base einzeln umfärben (formtreu wie immer bei
-    // Einzelbild), Cap deterministisch in die Palette tönen (Form pixel-exakt),
-    // beide per Code schweben-compositen. KEIN finaler generativer Pass über den
-    // Cap → er kann nicht mehr verfälscht werden.
-    const useSplitCompose = (fall === 'C' || fall === 'D') && !!capImageUrl;
-    const promptFall: RenderFall = useSplitCompose ? 'A' : fall;
+    // Fall C/D: Base und Cap werden GETRENNT recolort und GETRENNT angezeigt.
+    // Nie zusammen an ein Modell (Drift), kein Compositing (Positionierung entfaellt).
+    const useSplitRender = (fall === 'C' || fall === 'D') && !!capImageUrl;
+    const promptFall: RenderFall = useSplitRender ? 'A' : fall;
 
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
@@ -836,50 +708,46 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 6. Render ───────────────────────────────────────────────────
     let renderingUrl: string;
-    let finalBuffer: Buffer | null = null;
 
-    if (useSplitCompose) {
-      try {
-        // Base allein umfärben — mit EIGENEM Prompt, der KEINEN Cap erlaubt.
-        // Der Standard-Prompt erwähnt "closure/cap" → Gemini malt sonst einen
-        // Cap auf die nackte Base (Doppel-Cap). Der echte Cap kommt separat rein.
-        const matRaw = sys.fields['Material'];
-        const primaryMat = String(Array.isArray(matRaw) ? matRaw[0] : (matRaw || '')).toLowerCase();
-        const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
-        const bodyColorable = !!sys.fields['SF_Einfaerbbar'] || isPlasticBody;
-        const bodyHex = concept.palette?.hex?.[0] || null;
-        const bodyColorLine = bodyColorable && bodyHex
-          ? `Recolor the bottle body to ${bodyHex} with a clean surface finish.`
-          : `Keep the bottle body as clear transparent glass — do not add colour to the glass itself.`;
-        const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck. Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
+    let capRenderingUrl: string | null = null;
 
-        const recoloredBaseUrl = await geminiEdit([primaryUrl], baseOnlyPrompt);
-        const [baseBuf, capBuf] = await Promise.all([
-          fetchBuffer(recoloredBaseUrl),
-          fetchBuffer(capImageUrl!),
-        ]);
-        const capHex = contrastCapHex(bodyHex); // Kontrast statt Body-Farbe (kein Mono mehr)
-        // Cap_Scale (Bruchteil der Base-Breite) pro Cap-record ueberschreibt die
-        // fragile Auto-Kragen-Vermessung. Leer -> Hals-Matching-Fallback.
-        const rawCapScale = capFields?.['Cap_Scale'];
-        const capScale = typeof rawCapScale === 'number' && rawCapScale > 0 ? rawCapScale : null;
-        finalBuffer = await composeHover(baseBuf, capBuf, { capTintHex: capHex, capScale });
-        renderingUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-      } catch (e) {
-        // Fallback: generativer Zwei-Bild-Aufruf (wie bisher), falls der Split scheitert.
-        console.error('Split-Compose fehlgeschlagen — Fallback generativ:', e);
-        renderingUrl = await geminiEdit([primaryUrl, capImageUrl!], renderingPrompt);
-        finalBuffer = null;
-      }
+    if (useSplitRender) {
+      // ZWEI GETRENNTE EINZELBILD-RECOLORS (Architektur 04.08.):
+      // Einzelbild-Edit ist formtreu (bewiesen: Base App355, Cap Pipette+Gold).
+      // Zwei Bilder zusammen an ein Modell = Drift (bewiesen, 2x reproduziert).
+      // Base allein + Cap allein, parallel; beide Prompts zitieren DIESELBEN
+      // Konzept-Werte -> Kohaerenz per Konstruktion. Kein Compositing, keine
+      // Positionierung — Frontend zeigt den Cap in der eigenen Cap-Buehne.
+      const matRaw = sys.fields['Material'];
+      const primaryMat = String(Array.isArray(matRaw) ? matRaw[0] : (matRaw || '')).toLowerCase();
+      const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
+      const bodyColorable = !!sys.fields['SF_Einfaerbbar'] || isPlasticBody;
+      const bodyHex = concept.palette?.hex?.[0] || null;
+      // Interim bis Design_Code Cap_Hex liefert: Kontrastton (Regel: nie mono).
+      const capHex = contrastCapHex(bodyHex);
+      const bodyColorLine = bodyColorable && bodyHex
+        ? `Recolor the bottle body to ${bodyHex} with a clean surface finish.`
+        : `Keep the bottle body as clear transparent glass — do not add colour to the glass itself.`;
+      const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck. Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
+      const capOnlyPrompt = `Recolor this closure to ${capHex}${capHex === '#FFFFFF' ? ' (clean white)' : ''} with a clean matt finish. If the closure has a clear glass pipette or tube, keep that part clear transparent glass. Preserve the exact shape, proportions and every part of the closure exactly as in the reference image — do NOT redesign it, do NOT swap it for a different closure type, do NOT add or remove any part; change ONLY colour and surface finish. Clean seamless white studio background, centered. No label, text or logo.`;
+
+      const [baseUrl, capUrl] = await Promise.all([
+        geminiEdit([primaryUrl], baseOnlyPrompt),
+        geminiEdit([capImageUrl!], capOnlyPrompt).catch((e) => {
+          // Cap-Recolor darf nie den Gesamt-Render killen: Fallback = Roh-Cap.
+          console.error('Cap-Recolor fehlgeschlagen — zeige Roh-Cap:', e);
+          return capImageUrl!;
+        }),
+      ]);
+      renderingUrl = baseUrl;
+      capRenderingUrl = capUrl;
     } else {
       const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
       renderingUrl = await geminiEdit(imgs, renderingPrompt);
     }
 
     // ── 7. Bytes: Composite direkt nutzen, sonst herunterladen ──────
-    const imgBuffer: Buffer = finalBuffer
-      ? finalBuffer
-      : Buffer.from(await (await fetch(renderingUrl)).arrayBuffer());
+    const imgBuffer: Buffer = Buffer.from(await (await fetch(renderingUrl)).arrayBuffer());
     const base64 = imgBuffer.toString('base64');
 
     const createRes = await fetch(
@@ -895,6 +763,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             Cache_Key: key,
             System: [systemId],
             Query_Input: query, // roh, nie sanitisiert — Demand-Signal
+            Cap_Bild_URL: capRenderingUrl || '', // recolorter Cap (getrennter Render)
             Rendering_Prompt: renderingPrompt, // reiner Seedream-Prompt
             // Konzept als eigene, auswertbare Felder (Demand-Signal / Provenienz).
             Konzept_Name: concept.konzept_name || '',
@@ -916,7 +785,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Cachen fehlgeschlagen (z.B. Feld 'Board' fehlt) — Render trotzdem ausliefern.
       console.error('Cache-Record Fehler (Render wird dennoch ausgeliefert):', JSON.stringify(createData.error || createData));
       return res.status(200).json({
-        renderingUrl, renderingPrompt, briefUsed: effectiveBrief,
+        renderingUrl, capRenderingUrl, renderingPrompt, briefUsed: effectiveBrief,
         rejected: forbidden, capId: resolvedCapId, cacheId: null,
         cached: false, fall, tier, concept,
       });
@@ -944,6 +813,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json({
       renderingUrl,
+      capRenderingUrl,
       renderingPrompt,
       briefUsed: effectiveBrief,
       rejected: forbidden,
