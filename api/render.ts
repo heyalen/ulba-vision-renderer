@@ -108,6 +108,19 @@ async function contentExtent(buffer: Buffer, whiteThresh = 245): Promise<Extent>
 
 const rowW = (e: Extent, y: number) => (e.rowMaxX[y] >= 0 ? e.rowMaxX[y] - e.rowMinX[y] + 1 : 0);
 
+// Interim-Kontrast bis zum Design-Code: Cap darf NIE die Body-Farbe tragen
+// (Regel 1: Cap kontrastiert immer mit Body). Der Design-Code liefert spaeter
+// Cap_Relation und ersetzt diese Heuristik.
+function contrastCapHex(bodyHex: string | null): string {
+  if (!bodyHex) return '#FFFFFF'; // Klarglas: Farbe im Inhalt, Cap neutral weiss
+  const h = bodyHex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16) || 0;
+  const g = parseInt(h.slice(2, 4), 16) || 0;
+  const b = parseInt(h.slice(4, 6), 16) || 0;
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return lum > 0.6 ? '#232323' : '#FFFFFF'; // helle Base -> dunkler Cap, sonst weiss
+}
+
 function neckWidth(e: Extent): number {
   const band = Math.max(2, Math.round((e.maxY - e.minY) * 0.20));
   let min = Infinity;
@@ -116,10 +129,16 @@ function neckWidth(e: Extent): number {
 }
 
 function collarWidth(e: Extent): number {
-  const band = Math.max(2, Math.round((e.maxY - e.minY) * 0.15));
+  // Kragen = breiteste Stelle im unteren Band, aber OHNE die Dip-Tube.
+  // Bug: das unterste 15%-Band traf bei Pump/Dropper die duenne Dip-Tube
+  // statt den Kragen -> Cap wurde zu klein skaliert. Fix: unterste ~18%
+  // (Dip-Tube) ausschliessen, Kragen im Band 35-82% der Hoehe messen.
+  const h = e.maxY - e.minY;
+  const top = e.minY + Math.round(h * 0.35);
+  const bottom = e.maxY - Math.round(h * 0.18);
   let max = 0;
-  for (let y = e.maxY - band; y <= e.maxY; y++) { const w = rowW(e, y); if (w > max) max = w; }
-  return max || rowW(e, e.maxY);
+  for (let y = top; y <= bottom; y++) { const w = rowW(e, y); if (w > max) max = w; }
+  return max || rowW(e, Math.round((e.minY + e.maxY) / 2));
 }
 
 // opts.capScale pro Base überschreibbar; sonst Hals-Matching. Getestet.
@@ -128,7 +147,7 @@ async function composeHover(
   capBuffer: Buffer,
   opts: { gapFrac?: number; capScale?: number | null; clampMin?: number; clampMax?: number; whiteThresh?: number; capTintHex?: string | null } = {}
 ): Promise<Buffer> {
-  const { gapFrac = 0.12, capScale = null, clampMin = 0.10, clampMax = 0.40, whiteThresh = 245, capTintHex = null } = opts;
+  const { gapFrac = 0.07, capScale = null, clampMin = 0.10, clampMax = 0.55, whiteThresh = 245, capTintHex = null } = opts;
 
   const baseAlpha = await whiteToAlpha(baseBuffer, whiteThresh);
   const bE = await contentExtent(baseAlpha, whiteThresh);
@@ -832,14 +851,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const bodyColorLine = bodyColorable && bodyHex
           ? `Recolor the bottle body to ${bodyHex} with a clean surface finish.`
           : `Keep the bottle body as clear transparent glass — do not add colour to the glass itself.`;
-        const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. This image shows ONLY the open bottle body with a bare, empty neck opening — do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere; the neck stays open and empty. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
+        const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck. Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
 
         const recoloredBaseUrl = await geminiEdit([primaryUrl], baseOnlyPrompt);
         const [baseBuf, capBuf] = await Promise.all([
           fetchBuffer(recoloredBaseUrl),
           fetchBuffer(capImageUrl!),
         ]);
-        const capHex = concept.palette?.hex?.[0] || null;
+        const capHex = contrastCapHex(bodyHex); // Kontrast statt Body-Farbe (kein Mono mehr)
         finalBuffer = await composeHover(baseBuf, capBuf, { capTintHex: capHex });
         renderingUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
       } catch (e) {
