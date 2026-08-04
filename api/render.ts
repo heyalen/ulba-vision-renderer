@@ -859,7 +859,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           fetchBuffer(capImageUrl!),
         ]);
         const capHex = contrastCapHex(bodyHex); // Kontrast statt Body-Farbe (kein Mono mehr)
-        finalBuffer = await composeHover(baseBuf, capBuf, { capTintHex: capHex });
+        // Cap_Scale (Bruchteil der Base-Breite) pro Cap-record ueberschreibt die
+        // fragile Auto-Kragen-Vermessung. Leer -> Hals-Matching-Fallback.
+        const rawCapScale = capFields?.['Cap_Scale'];
+        const capScale = typeof rawCapScale === 'number' && rawCapScale > 0 ? rawCapScale : null;
+        finalBuffer = await composeHover(baseBuf, capBuf, { capTintHex: capHex, capScale });
         renderingUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
       } catch (e) {
         // Fallback: generativer Zwei-Bild-Aufruf (wie bisher), falls der Split scheitert.
