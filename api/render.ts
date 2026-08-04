@@ -18,6 +18,12 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Ein Modell für alles: Gemini 2.5 Flash Image (Nano Banana) via fal.ai.
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
+const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
+// Modell-Wahl pro Render-Teil (A/B-Test 04.08.: Seedream hielt Detail + Matt-Haptik
+// besser als Gemini). Beide nutzen bei fal dasselbe I/O-Schema -> nur Endpoint tauschen.
+// Zum Zurückschalten einzeln auf FAL_GEMINI_EDIT setzen.
+const FAL_BASE_ENDPOINT = FAL_SEEDREAM_EDIT;
+const FAL_CAP_ENDPOINT = FAL_SEEDREAM_EDIT;
 
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
@@ -34,18 +40,20 @@ type RenderFall = 'A' | 'B' | 'C' | 'D';
 // bleiben proportional). Form + Highlights + Transparenz bleiben pixel-exakt.
 
 // Ein Gemini-Edit-Aufruf (fal.ai) → Bild-URL.
-async function geminiEdit(imageUrls: string[], prompt: string): Promise<string> {
-  const r = await fetch(FAL_GEMINI_EDIT, {
+async function falEdit(imageUrls: string[], prompt: string, endpoint: string = FAL_GEMINI_EDIT): Promise<string> {
+  const r = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
     body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: 'auto' }),
   });
-  if (!r.ok) throw new Error(`fal.ai gemini-edit: ${await r.text()}`);
+  if (!r.ok) throw new Error(`fal.ai edit (${endpoint}): ${await r.text()}`);
   const d = await r.json() as { images?: Array<{ url: string }> };
   const url = d.images?.[0]?.url;
-  if (!url) throw new Error('Kein Bild von Gemini zurückgekommen');
+  if (!url) throw new Error('Kein Bild von fal zurückgekommen');
   return url;
 }
+// Rueckwaerts-kompatibler Alias (Fall A/B nutzen weiter geminiEdit ohne Endpoint-Arg).
+const geminiEdit = (imageUrls: string[], prompt: string) => falEdit(imageUrls, prompt, FAL_GEMINI_EDIT);
 
 
 // Interim bis Design_Code Cap_Hex liefert (Regel: Cap nie in Body-Farbe).
@@ -744,8 +752,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const capOnlyPrompt = capHex ? capRecolorPrompt : capPreservePrompt;
 
       const [baseUrl, capUrl] = await Promise.all([
-        geminiEdit([primaryUrl], baseOnlyPrompt),
-        geminiEdit([capImageUrl!], capOnlyPrompt).catch((e) => {
+        falEdit([primaryUrl], baseOnlyPrompt, FAL_BASE_ENDPOINT),
+        falEdit([capImageUrl!], capOnlyPrompt, FAL_CAP_ENDPOINT).catch((e) => {
           // Cap-Recolor darf nie den Gesamt-Render killen: Fallback = Roh-Cap.
           console.error('Cap-Recolor fehlgeschlagen — zeige Roh-Cap:', e);
           return capImageUrl!;
