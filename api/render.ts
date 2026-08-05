@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v15-design-code';
+const RENDER_VERSION = 'v15-design-code-2';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -577,7 +577,7 @@ DESIGN CODES:
 ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
-STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why palette + finish follow from the ziel_profil — mention ONLY the chosen palette name and the chosen finish, NEVER materials, metal, chrome or techniques that were not selected).
+STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected).
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
@@ -638,6 +638,18 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const palName = String(pal.fields['Name'] || '');
   const hex = parseJsonArray(pal.fields['Hex_Codes']).slice(0, 3);
   const pantone = parseJsonArray(pal.fields['Pantone_Nearest']).slice(0, 3);
+
+  // v15-Kohaerenz (Fix 05.08.): die ANGEZEIGTE Palette (SpecSheet-Chips +
+  // farbkonzept) kommt aus dem GEWAEHLTEN CODE — Body/Cap/Akzent-Hex —, nie
+  // aus der separat von Haiku gewaehlten Farbpalette. Sonst zeigen die Chips
+  // andere Farben als der Render (gruene Flasche, braune Chips). Die Farbpalette
+  // bleibt Haikus Reasoning-Grundlage fuer ziel_profil/tags, ist aber nicht
+  // mehr die Farbwahrheit. Pantone entfaellt beim Code-Pfad (Code hat keins);
+  // spaeter liefert der Palette-LINK des Codes Pantone + Emotion_Tags mit.
+  const codeHexes = [code.bodyHex, code.capHex, code.akzentHex].filter(Boolean) as string[];
+  const displayHex = codeHexes.length ? codeHexes.slice(0, 3) : hex;
+  const displayPalName = code.name || palName;
+  const displayPantone = codeHexes.length ? [] : pantone;
 
   // ── Deterministische Prompt-Assembly — RECOLOR-ONLY ───────────────
   // Bewiesener Modus: Seedream ändert NUR Farbe/Finish auf der exakten
@@ -719,7 +731,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     grafik_label: brandname
       ? `Wortmarke "${brandname}" + "${kategorie}", reduzierte Typo`
       : `Wortmarke (Platzhalter) + "${kategorie}", reduzierte Typo`,
-    farbkonzept: `${palName} — Hex: ${hex.join(', ')}${pantone.length ? ` · Pantone: ${pantone.join(', ')}` : ''}`,
+    farbkonzept: `${displayPalName} — Hex: ${displayHex.join(', ')}${displayPantone.length ? ` · Pantone: ${displayPantone.join(', ')}` : ''}`,
     // Demand-Signal code-gruppierbar ("Ocean Clean 47x auf Serumflaschen").
     design_code: code.name,
     design_code_id: code.id,
@@ -729,7 +741,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const herleitung = String(parsed?.herleitung || '').trim();
   const rationale = [
     zielProfil.length ? `Zielprofil: ${zielProfil.join(' · ')}` : '',
-    herleitung || `Palette ${palName} und ${FINISH_DE[finish]} folgen aus dem Brief.`,
+    herleitung || `Die Farbwelt ${displayPalName} und ${FINISH_DE[finish]} folgen aus dem Brief.`,
   ].filter(Boolean).join(' — ');
 
   const rawRadar = parsed?.radar || {};
@@ -747,7 +759,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     produzierbar,
     szene_id: szeneId,
     label: labelData,
-    palette: { name: palName, hex, pantone },
+    palette: { name: displayPalName, hex: displayHex, pantone: displayPantone },
     radar,
     zielprofil: zielProfil,
     segment: effectiveSegment,
