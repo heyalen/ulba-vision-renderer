@@ -207,7 +207,7 @@ function extractProduct(rec: any): ProductData {
 }
 
 // Caps für gegebene Cap-Record-IDs auflösen (Batch, ein Load der Cap-Tabelle).
-// Baut Map capId → {url, name}. Caps werden nie harmonisiert → Rohbild aus Cap_Bild.
+// Baut Map capId → {url, name}. Bevorzugt harmonisiertes Bild, Fallback Rohbild.
 async function resolveCaps(capIds: string[]): Promise<Map<string, { url: string; name: string }>> {
   const map = new Map<string, { url: string; name: string }>();
   if (capIds.length === 0) return map;
@@ -215,7 +215,7 @@ async function resolveCaps(capIds: string[]): Promise<Map<string, { url: string;
   // solange die Cap-Tabelle < einige hundert Records ist (aktuell der Fall).
   const capRecords = await airtableListAll(CAP_TABLE);
   for (const rec of capRecords) {
-    const url = imgUrl(rec.fields['Cap_Bild']);
+    const url = imgUrl(rec.fields['Cap_Bild_Harmonisiert']) || imgUrl(rec.fields['Cap_Bild']);
     const name = rec.fields['Cap_Name'] || rec.fields['Artikelnummer'] || '';
     if (url) map.set(rec.id, { url, name });
   }
