@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v13-seedream-split';
+const RENDER_VERSION = 'v14-cap-finish-haiku';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
 // Modell-Wahl pro Render-Teil (A/B-Test 04.08.: Seedream hielt Detail + Matt-Haptik
@@ -57,23 +57,6 @@ async function falEdit(imageUrls: string[], prompt: string, endpoint: string = F
 }
 // Rueckwaerts-kompatibler Alias (Fall A/B nutzen weiter geminiEdit ohne Endpoint-Arg).
 const geminiEdit = (imageUrls: string[], prompt: string) => falEdit(imageUrls, prompt, FAL_GEMINI_EDIT);
-
-
-// Interim bis Design_Code Cap_Hex liefert (Regel: Cap nie in Body-Farbe).
-function contrastCapHex(bodyHex: string | null): string | null {
-  // Interim bis Design_Code.Cap_Hex/Cap_Finish die echte Cap-Entscheidung
-  // liefert. Grundregel: den Cap NUR umfaerben, wenn es einen echten Grund gibt.
-  // Kein bodyHex (Klarglas) -> KEIN Farbwunsch -> Cap im Original belassen
-  // (silber/metallic bleibt silber, nicht gewaltsam weiss/schwarz uebermalen).
-  if (!bodyHex) return null;
-  const h = bodyHex.replace('#', '');
-  const r = parseInt(h.slice(0, 2), 16) || 0;
-  const g = parseInt(h.slice(2, 4), 16) || 0;
-  const b = parseInt(h.slice(4, 6), 16) || 0;
-  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-  // Nur bei sehr heller Base einen dunklen Kontrast-Cap erzwingen; sonst original.
-  return lum > 0.75 ? '#232323' : null;
-}
 
 
 // ── Szenen-Presets (handkuratiert, kein Korpus, kein Airtable) ──────
@@ -288,6 +271,7 @@ type Concept = {
   radar?: Record<string, number>;
   zielprofil?: string[];
   segment?: string | null;
+  cap?: { hex: string | null; finishEn: string; key: string };
 };
 
 // ── Prompt Assembly v5 — Constrained Selection ──────────────────────
@@ -330,6 +314,22 @@ const AKZENT_DE: Record<string, string> = {
   hot_foil_detail: 'Hot-Foil-Akzent',
   silkscreen_graphic: 'Siebdruck-Grafik',
 };
+
+// Cap-Finish-Enum → deterministische Recolor-Entscheidung.
+// 'original'/'klar' = PRESERVE (Cap bleibt exakt wie im Referenzbild — silber/
+// metallic/schwarz bleibt erhalten). Alle anderen = gezielter Recolor auf EINE
+// Farbe im genannten Finish. Haiku waehlt aus diesem Enum (Default 'original');
+// der Hex kommt IMMER aus dieser Tabelle, nie frei von Haiku. Nie Body-Farbe.
+const CAP_FINISH_MAP: Record<string, { hex: string | null; finishEn: string }> = {
+  original:        { hex: null,      finishEn: '' },
+  klar:            { hex: null,      finishEn: '' },
+  metallic_silber: { hex: '#C7CBD1', finishEn: 'a polished metallic silver finish' },
+  metallic_gold:   { hex: '#C9A24B', finishEn: 'a warm polished metallic gold finish' },
+  matt_schwarz:    { hex: '#1E1E1E', finishEn: 'a deep matt black soft-touch finish' },
+  glanz_schwarz:   { hex: '#111111', finishEn: 'a high-gloss piano-black finish' },
+  weiss:           { hex: '#F2F2F0', finishEn: 'a clean matt white finish' },
+};
+const CAP_FINISH_KEYS = Object.keys(CAP_FINISH_MAP);
 
 function parseJsonArray(raw: any): string[] {
   if (!raw) return [];
@@ -468,13 +468,14 @@ PALETTES:
 ${paletteList}
 STEP 3 — finish: one of [${finishes.join(', ')}].
 STEP 4 — akzent: one of [${akzente.join(', ')}].
+STEP 4b — cap_finish: the closure's finish, ONE of [${CAP_FINISH_KEYS.join(', ')}]. DEFAULT to 'original' — keep the existing closure exactly as it is. Only choose a different value when the concept clearly calls for a specifically colored cap (e.g. 'weiss' for a clinical clear bottle, 'metallic_gold' for a rich prestige story, 'matt_schwarz' for a bold masculine statement AND only if the existing cap is not already dark). When in doubt, choose 'original'. NEVER put the body colour on the cap.
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why palette + finish follow from the ziel_profil — mention ONLY the chosen palette name and the chosen finish, NEVER materials, metal, chrome or techniques that were not selected).
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
-{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
+{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","cap_finish":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -512,6 +513,8 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const pal = pool.find(p => p.id === parsed?.palette_id) || pool[0];
   const finish = finishes.includes(parsed?.finish) ? parsed.finish : finishes[finishes.length - 1];
   const akzent = akzente.includes(parsed?.akzent) ? parsed.akzent : 'none';
+  const capFinishKey = CAP_FINISH_KEYS.includes(parsed?.cap_finish) ? parsed.cap_finish : 'original';
+  const capDecision = CAP_FINISH_MAP[capFinishKey];
   const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id) ? parsed.szene_id : 'studio_soft';
   const szene = SCENE_PRESETS.find(s => s.id === szeneId)!;
   const brandname = sanitizeBrandname(parsed?.brandname, brief);
@@ -602,6 +605,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     radar,
     zielprofil: zielProfil,
     segment: effectiveSegment,
+    cap: { hex: capDecision.hex, finishEn: capDecision.finishEn, key: capFinishKey },
   };
 
   return {
@@ -659,7 +663,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       cached = await airtableQuery(
         CACHE_TABLE,
         `{Cache_Key}='${key}'`,
-        ['Cache_Key', 'Bild', 'Rendering_Prompt', 'Konzept_Name', 'Konzept_Story', 'Konzept_Rationale', 'Szene_ID', 'Produzierbar', 'Board'],
+        ['Cache_Key', 'Bild', 'Cap_Bild', 'Rendering_Prompt', 'Konzept_Name', 'Konzept_Story', 'Konzept_Rationale', 'Szene_ID', 'Produzierbar', 'Board'],
         1
       );
     } catch {
@@ -690,6 +694,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         return res.status(200).json({
           renderingUrl: cachedImg,
+          capRenderingUrl: imgUrl(cf['Cap_Bild']) || null,
           renderingPrompt: cf['Rendering_Prompt'] || '',
           briefUsed: effectiveBrief,
           cacheId: cached[0].id,
@@ -747,15 +752,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
       const bodyColorable = !!sys.fields['SF_Einfaerbbar'] || isPlasticBody;
       const bodyHex = concept.palette?.hex?.[0] || null;
-      // Interim bis Design_Code Cap_Hex liefert. null = kein Farbwunsch ->
-      // Cap im Original belassen (silber/metallic bleibt erhalten).
-      const capHex = contrastCapHex(bodyHex);
+      // Cap-Entscheidung kommt aus Haikus Konzept-Brief (cap_finish-Enum),
+      // NICHT aus Body-Luminanz. null = preserve (Original-Cap bleibt exakt,
+      // silber/metallic/schwarz erhalten). Hex/Finish deterministisch aus
+      // CAP_FINISH_MAP — Haiku waehlt nur den Enum-Schluessel.
+      const capDec = concept.cap || { hex: null, finishEn: '' };
+      const capHex = capDec.hex;
+      const capFinishEn = capDec.finishEn || 'a clean matt finish';
       const bodyColorLine = bodyColorable && bodyHex
         ? `Recolor the bottle body to ${bodyHex} with a clean surface finish.`
         : `Keep the bottle body as clear transparent glass — do not add colour to the glass itself.`;
       const baseOnlyPrompt = `${bodyColorLine} Keep the exact same body shape, silhouette and proportions as the reference image. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck. Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
       const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
-      const capRecolorPrompt = `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in the reference image — change ONLY the surface colour and finish. Color the closure as ONE single solid ${capHex} tone across the whole closure in a clean matt finish. Do NOT split it into multiple colored segments and do NOT use more than this one color on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
+      const capRecolorPrompt = `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in the reference image — change ONLY the surface colour and finish. Color the closure as ONE single solid ${capHex} tone across the whole closure with ${capFinishEn}. Do NOT split it into multiple colored segments and do NOT use more than this one color on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
       const capOnlyPrompt = capHex ? capRecolorPrompt : capPreservePrompt;
 
       const [baseUrl, capUrl] = await Promise.all([
