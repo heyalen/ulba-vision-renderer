@@ -719,7 +719,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       resolvedCapId = capId;
       const capRec = await airtableFetch(CAP_TABLE, capId);
       capFields = capRec.fields;
-      capImageUrl = imgUrl(capRec.fields['Cap_Bild']);
+      capImageUrl = imgUrl(capRec.fields['Cap_Bild_Harmonisiert']) || imgUrl(capRec.fields['Cap_Bild']);
       if (!capImageUrl) throw new Error(`Cap ${capId} hat kein Bild`);
     }
 
