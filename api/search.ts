@@ -185,51 +185,56 @@ function parseFormula(query: string): Formel[] {
 }
 
 interface FormulaWall {
-  forbidMaterial: string[];   // reale Material-Options
-  forbidType: string[];       // reale Type-Options
-  forbidClosure: string[];    // reale Closure-Options
+  forbidMaterial: string[];   // reale Material-Options (Base-Ebene)
+  forbidType: string[];       // reale Type-Options (Base-Ebene)
   forceTintIfGlass: boolean;  // Klarglas nicht erlaubt → Render muss tönen (SF-Gate)
-  preferOpaque: boolean;      // Identität "laut" muss über Opak/Vollfarbe laufen (Typ-B)
+  preferOpaque: boolean;      // Identität "laut" läuft über Opak/Vollfarbe (Typ-B)
+  // CAP-EBENE (nicht Base!): Verschluss-Wahl. Pipette ist ein Cap, kein Base-
+  // Attribut → offene Klar-Pipette wird im Cap-Panel DEPRIORISIERT, nicht das
+  // Base gefiltert. produkt-truth: der Pipetten-Cap existiert real; bei
+  // getöntem Glas ist er legitim (Skin1004/Dr.-Althea-Amber-Pipette).
+  deprioritizeOpenDropper: boolean;
   notes: string[];            // Transparenz für UI/Log: WARUM etwas gesperrt ist
 }
 
 function buildFormulaWall(formeln: Formel[]): FormulaWall {
   const w: FormulaWall = {
-    forbidMaterial: [], forbidType: [], forbidClosure: [],
-    forceTintIfGlass: false, preferOpaque: false, notes: [],
+    forbidMaterial: [], forbidType: [],
+    forceTintIfGlass: false, preferOpaque: false, deprioritizeOpenDropper: false, notes: [],
   };
   const addMat = (v: string) => { if (!w.forbidMaterial.includes(v)) w.forbidMaterial.push(v); };
   const addType = (v: string) => { if (!w.forbidType.includes(v)) w.forbidType.push(v); };
-  const addClo = (v: string) => { if (!w.forbidClosure.includes(v)) w.forbidClosure.push(v); };
 
   for (const f of formeln) {
     switch (f) {
       case 'oxidationsempfindlich':
-        // Luft+Licht zersetzen → offene Klar-Pipette raus; Glas nur getönt.
-        addClo('Pipette');
+        // Luft+Licht zersetzen. Base wird NICHT wegen Pipette gefiltert (Pipette
+        // = Cap). Base-Wirkung: Klarglas → tönen. Cap-Wirkung: offene Pipette
+        // depriorisieren. "laut" → opak/getönt tragen.
         w.forceTintIfGlass = true;
         w.preferOpaque = true;
-        w.notes.push('oxidationsempfindlich → offene Pipette gesperrt; Glas nur getönt/opak (kein Klarglas)');
+        w.deprioritizeOpenDropper = true;
+        w.notes.push('oxidationsempfindlich → Glas nur getönt/opak (kein Klarglas); offene Pipette im Cap-Panel depriorisiert');
         break;
       case 'niedrigviskos':
-        // fließt frei → Tiegel unpraktisch.
+        // fließt frei → Tiegel unpraktisch (Base-Format, echte Wand).
         addType('Tiegel');
         w.notes.push('niedrigviskos (Serum/Toner) → Tiegel gesperrt');
         break;
       case 'hochviskos':
-        // fließt nicht → Pipette/dünne Pumpe unbrauchbar.
-        addClo('Pipette');
-        w.notes.push('hochviskos (Creme/Balm) → Pipette gesperrt');
+        // fließt nicht → Pipette-Cap unbrauchbar (Cap-Ebene, depriorisieren).
+        w.deprioritizeOpenDropper = true;
+        w.notes.push('hochviskos (Creme/Balm) → Pipetten-Cap depriorisiert');
         break;
       case 'oelhaltig':
-        // greift PET-Familie chemisch an.
+        // greift PET-Familie chemisch an (Base-Material, echte Wand).
         addMat('PET'); addMat('R-PET'); addMat('PETG');
         w.notes.push('ölhaltig → PET/R-PET/PETG gesperrt');
         break;
       case 'schaeumend':
-        // Menge + nasse Hände → Präzisionsformate unpraktisch.
-        addType('Tiegel'); addClo('Pipette');
-        w.notes.push('schäumend/Volumen → Tiegel + Pipette gesperrt');
+        // Menge + nasse Hände → Tiegel raus (Base), Pipette-Cap depriorisiert.
+        addType('Tiegel'); w.deprioritizeOpenDropper = true;
+        w.notes.push('schäumend/Volumen → Tiegel gesperrt; Pipetten-Cap depriorisiert');
         break;
       case 'lichtstabil':
         // keine Chemie-Wand → Ebene 2 übernimmt komplett.
@@ -237,6 +242,14 @@ function buildFormulaWall(formeln: Formel[]): FormulaWall {
     }
   }
   return w;
+}
+
+// Opak/einfärbbar = kann "laut/bunt" tragen (Typ-B-Träger). produkt-truth:
+// belegte Einfärbbarkeit ODER von Natur opakes Material.
+const OPAQUE_MATERIALS = ['PP', 'HDPE', 'HDPE/LDPE', 'Aluminium', 'Keramik'];
+function canCarryLoudColor(p: ProductData): boolean {
+  if (p.capabilities.includes('einfaerbbar') || p.capabilities.includes('lackierbar')) return true;
+  return p.material.some(m => OPAQUE_MATERIALS.includes(m));
 }
 
 // ── Identität (Ebene 2) — weiche Schicht für Ranking + Segment-Hint.
@@ -433,10 +446,11 @@ function hardFilter(
       }
     }
 
-    // ── FORMEL-WAND (Ebene 1) — gewinnt immer, subtrahiert zuletzt ──
+    // ── FORMEL-WAND (Ebene 1, Base) — gewinnt immer, subtrahiert zuletzt ──
+    // Nur Base-Attribute (Material/Type). Verschluss NICHT hier — Pipette ist
+    // ein Cap und wird im Cap-Panel depriorisiert, nicht das Base gefiltert.
     if (wall.forbidMaterial.some(fm => p.material.some(pm => inc(pm, fm)))) return false;
     if (wall.forbidType.some(ft => inc(p.type, ft))) return false;
-    if (wall.forbidClosure.some(fc => inc(p.closure, fc))) return false;
 
     return true;
   });
@@ -482,33 +496,64 @@ Antworte NUR mit JSON-Array, kein anderer Text:
 [{"index":0,"score":85,"reasoning":"kurz"}]
 Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter <30.`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY || '',
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5',
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: `Brief: "${query}"\n\nProdukte:\n${productList}` }],
-    }),
-  });
+  // prefer_opaque-Boost (Typ-B als Score-Regel, nicht nur als Prompt-Text):
+  // bei "laut" steigen opak/einfärbbare Bases, klares Glas fällt. Deterministisch
+  // NACH dem Ranking angewandt — verlässt sich nicht darauf, dass Haiku es tut.
+  const applyOpaqueBoost = (ranked: RankedProduct[]): RankedProduct[] => {
+    if (!wall.preferOpaque) return ranked;
+    return ranked.map(r => {
+      let s = r.score;
+      let why = '';
+      if (canCarryLoudColor(r)) { s = Math.min(100, s + 20); why = ' [+opak/einfärbbar: kann laut/bunt tragen]'; }
+      else if (r.material.includes('Glas')) { s = Math.max(0, s - 15); why = ' [-Klarglas: trägt "laut" nur begrenzt]'; }
+      return { ...r, score: s, reasoning: r.reasoning + why };
+    }).sort((a, b) => b.score - a.score);
+  };
 
-  const data = await res.json() as { content: Array<{ text: string }> };
-  const text = (data.content?.[0]?.text || '').trim();
-
+  let rawText = '';
   try {
-    const cleaned = text.replace(/```json\s?|```/g, '').trim();
-    const rankings = JSON.parse(cleaned) as Array<{ index: number; score: number; reasoning: string }>;
-    return rankings
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 1500,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: `Brief: "${query}"\n\nProdukte:\n${productList}` }],
+      }),
+    });
+
+    const data = await res.json() as any;
+    // Shape-sicher: den Text-Block finden statt [0] anzunehmen.
+    if (data?.error) throw new Error(`Anthropic API: ${data.error?.message || JSON.stringify(data.error)}`);
+    const textBlock = Array.isArray(data?.content)
+      ? data.content.find((b: any) => b?.type === 'text' || typeof b?.text === 'string')
+      : null;
+    rawText = (textBlock?.text || '').trim();
+    if (!rawText) throw new Error(`kein Text-Block (stop_reason=${data?.stop_reason || '?'})`);
+
+    // JSON-Array aus evtl. Fließtext extrahieren ("hier ist dein Ranking: [...]").
+    const cleaned = rawText.replace(/```json\s?|```/g, '').trim();
+    const m = cleaned.match(/\[[\s\S]*\]/);
+    if (!m) throw new Error(`kein JSON-Array in Antwort`);
+    const rankings = JSON.parse(m[0]) as Array<{ index: number; score: number; reasoning: string }>;
+
+    const ranked = rankings
+      .filter(r => products[r.index])
       .map(r => ({ ...products[r.index], score: r.score, reasoning: r.reasoning }))
       .filter(r => r.id)
       .sort((a, b) => b.score - a.score);
-  } catch {
-    return products.map(p => ({ ...p, score: 50, reasoning: 'Ranking unavailable' }));
+
+    return applyOpaqueBoost(ranked);
+  } catch (e) {
+    // Fehler SICHTBAR machen (im UI statt in Logs): Grund + Rohtext-Anfang.
+    const grund = e instanceof Error ? e.message : String(e);
+    const snippet = rawText ? ` | raw: ${rawText.slice(0, 80)}` : '';
+    return products.map(p => ({ ...p, score: 50, reasoning: `Ranking-Fehler: ${grund}${snippet}` }));
   }
 }
 
@@ -621,8 +666,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         force_tint_if_glass: wall.forceTintIfGlass,
         prefer_opaque: wall.preferOpaque,
         forbidden: {
-          material: wall.forbidMaterial, type: wall.forbidType, closure: wall.forbidClosure,
+          material: wall.forbidMaterial, type: wall.forbidType, // Base-Ebene
         },
+      },
+      // Cap-Wand — Verschluss-Ebene fürs "Verschluss wählen"-Panel.
+      // deprioritize_open_dropper: Pipetten-Cap nach hinten sortieren + Hinweis,
+      // NICHT entfernen (bei getöntem Glas legitim).
+      cap_wall: {
+        deprioritize_open_dropper: wall.deprioritizeOpenDropper,
       },
       // §8.2 Freiheitsgrade — pre-seed Pill-State vor erstem Render
       free_hints: {
