@@ -39,80 +39,249 @@ async function airtableListAll(table: string, formula?: string): Promise<any[]> 
   return data.records || [];
 }
 
-// ── Query Parsing ───────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════
+//  SPUR B — explizite Physik-Specs aus dem Freitext ("1000ml, Glas,
+//  rund, Pipette"). Deklaration, keine Ableitung. Werte gegen die REALEN
+//  Airtable-Options (deutsch!) gemappt — vorher liefen Bottle/Jar/Dropper
+//  ins Leere.
+// ════════════════════════════════════════════════════════════════════
 interface ParsedQuery {
   raw: string;
-  sizeMentions: string[];     // e.g. ["50ml", "100ml"]
-  materialMentions: string[]; // e.g. ["Glass"]
-  typeMentions: string[];     // e.g. ["Bottle"]
-  closureMentions: string[];  // e.g. ["Pump"]
+  sizeMentions: string[];     // ["50ml"]
+  materialMentions: string[]; // ["Glas"]  (real options)
+  typeMentions: string[];     // ["Flasche"]
+  closureMentions: string[];  // ["Pipette"]
+  formMentions: string[];     // ["rund"]  — Geometrie ist hart (Produkt-Eigenschaft)
 }
 
-function parseQuery(query: string): ParsedQuery {
+// §8.2-Freiheitsgrade: getippt = Nutzer hat eine Pill VORAB gesetzt.
+// KEIN Hard Filter — ein Produkt kann in jedem Finish gerendert werden.
+// Diese Hints pre-seeden nur den Pill-State vor dem ersten Render.
+interface FreeHints {
+  finish: string | null;      // matt|glossy|frosted|soft_touch|metallic
+  baseWeight: string | null;  // heavy_base
+}
+
+// Kunststoff-Familie (kein generisches "Kunststoff"-Option vorhanden)
+const PLASTICS = ['PET', 'R-PET', 'HDPE', 'PP', 'PETG', 'HDPE/LDPE'];
+
+function parseQuery(query: string): ParsedQuery & { freeHints: FreeHints } {
   const q = query.toLowerCase();
 
-  // Size: extract patterns like "50ml", "100 ml", "250ML"
+  // Größe: "50ml", "100 ml", "1000ML"
   const sizeMatches = query.match(/\d+\s*ml/gi) || [];
   const sizeMentions = sizeMatches.map(s => s.replace(/\s/g, '').toLowerCase());
 
-  // Material keywords → Airtable option names
-  const materialMap: Record<string, string> = {
-    'glass': 'Glas', 'glas': 'Glas', 'gläser': 'Glas',
-    'plastic': 'Kunststoff', 'kunststoff': 'Kunststoff',
-    'pp': 'PP', 'hdpe': 'HDPE', 'pet': 'PET', 'petg': 'PETG',
-    'aluminium': 'Aluminium', 'aluminum': 'Aluminium', 'alu': 'Aluminium',
-    'pcr': 'Glas PCR',
-  };
-  const materialMentions = Object.entries(materialMap)
-    .filter(([kw]) => q.includes(kw))
-    .map(([, val]) => val)
+  // Material → REALE Options
+  const materialMentions: string[] = [];
+  const addMat = (v: string) => { if (!materialMentions.includes(v)) materialMentions.push(v); };
+  if (/\bglas\b|glass|gläser|glaeser/.test(q)) addMat('Glas');
+  if (/\bpcr\b|recycl|rezyklat|r-pet|rpet/.test(q)) { addMat('Glas PCR 100 %'); addMat('R-PET'); }
+  if (/\bpet\b/.test(q)) addMat('PET');
+  if (/petg/.test(q)) addMat('PETG');
+  if (/hdpe/.test(q)) addMat('HDPE');
+  if (/\bpp\b|polypropylen/.test(q)) addMat('PP');
+  if (/alumini|\balu\b/.test(q)) addMat('Aluminium');
+  if (/keramik|ceramic/.test(q)) addMat('Keramik');
+  if (/plastik|plastic|kunststoff/.test(q)) PLASTICS.forEach(addMat);
+
+  // Type → REALE Options (deutsch)
+  const typeMap: Array<[RegExp, string]> = [
+    [/flasche|flaschen|bottle/, 'Flasche'],
+    [/tiegel|jar/, 'Tiegel'],
+    [/\bdose\b/, 'Dose'],
+    [/tube|tuben/, 'Tube'],
+    [/airless/, 'Airless'],
+    [/\bpump(e|en)?\b/, 'Pump'],
+    [/spray|sprüh|spruh/, 'Spray'],
+    [/\bstick\b/, 'Stick'],
+  ];
+  const typeMentions = typeMap.filter(([re]) => re.test(q)).map(([, v]) => v)
     .filter((v, i, a) => a.indexOf(v) === i);
 
-  // Type keywords
-  const typeMap: Record<string, string> = {
-    'bottle': 'Bottle', 'flasche': 'Bottle', 'flaschen': 'Bottle',
-    'jar': 'Jar', 'tiegel': 'Jar', 'dose': 'Jar',
-    'tube': 'Tube', 'tuben': 'Tube',
-    'airless': 'Airless',
-  };
-  const typeMentions = Object.entries(typeMap)
-    .filter(([kw]) => q.includes(kw))
-    .map(([, val]) => val)
+  // Closure → REALE Options
+  const closureMap: Array<[RegExp, string]> = [
+    [/pipette|dropper|tropfer/, 'Pipette'],
+    [/schraub|screw/, 'Schraubverschluss'],
+    [/flip[-\s]?top|flip[-\s]?cap/, 'Flip-top'],
+    [/\bpump(e|en)?\b/, 'Pump'],
+    [/spray|sprüh|spruh/, 'Spray'],
+    [/airless/, 'Airless'],
+    [/stopfen|stopper/, 'Stopfen'],
+    [/snap[-\s]?on/, 'Snap-On'],
+  ];
+  const closureMentions = closureMap.filter(([re]) => re.test(q)).map(([, v]) => v)
     .filter((v, i, a) => a.indexOf(v) === i);
 
-  // Closure keywords
-  const closureMap: Record<string, string> = {
-    'pump': 'Pump', 'pumpe': 'Pump',
-    'spray': 'Spray', 'sprüh': 'Spray',
-    'dropper': 'Dropper', 'pipette': 'Dropper', 'tropfer': 'Dropper',
-    'flip': 'Flip Top', 'flip-top': 'Flip Top',
-    'screw': 'Screw Cap', 'schraub': 'Screw Cap',
-    'disc': 'Disc Top', 'disc-top': 'Disc Top',
-  };
-  const closureMentions = Object.entries(closureMap)
-    .filter(([kw]) => q.includes(kw))
-    .map(([, val]) => val)
+  // Form/Geometrie → REALE Options (hart: reale Produkt-Eigenschaft)
+  const formMap: Array<[RegExp, string]> = [
+    [/\brund\b|round/, 'rund'],
+    [/\boval\b/, 'oval'],
+    [/eckig|square|kantig/, 'eckig'],
+    [/quadrat/, 'quadratisch'],
+    [/schlank|slim|schmal|tall|hoch/, 'schlank'],
+    [/\bbreit\b|wide/, 'breit'],
+    [/freeform|organisch/, 'freeform'],
+  ];
+  const formMentions = formMap.filter(([re]) => re.test(q)).map(([, v]) => v)
     .filter((v, i, a) => a.indexOf(v) === i);
 
-  return { raw: query, sizeMentions, materialMentions, typeMentions, closureMentions };
+  // Freiheitsgrade (§8.2) → pre-seed Pills, KEIN Filter
+  let finish: string | null = null;
+  if (/soft[-\s]?touch/.test(q)) finish = 'soft_touch';
+  else if (/frosted|gefrostet|satiniert|frost/.test(q)) finish = 'frosted';
+  else if (/matt/.test(q)) finish = 'matt';
+  else if (/glossy|glänzend|glaenzend|glanz|hochglanz/.test(q)) finish = 'glossy';
+  else if (/metallic|metallisch/.test(q)) finish = 'metallic';
+  const baseWeight = /schwerer boden|dickboden|heavy base|schwerem boden|dicker boden/.test(q) ? 'heavy_base' : null;
+
+  return {
+    raw: query, sizeMentions, materialMentions, typeMentions, closureMentions, formMentions,
+    freeHints: { finish, baseWeight },
+  };
 }
 
-// active_filters vom Client anwenden: erlaubt gezieltes Entfernen einzelner
-// geparster Filter (X-Klick auf Chip). Client sendet die reduzierte Menge zurück.
-// Nur bekannte Keys werden übernommen — kein Injizieren neuer Constraints.
-function applyActiveFilters(parsed: ParsedQuery, override: any): ParsedQuery {
+// active_filters vom Client: erlaubt gezieltes Entfernen einzelner Filter
+// (X-Klick auf Chip). Nur bekannte Keys — kein Injizieren neuer Constraints.
+function applyActiveFilters<T extends ParsedQuery>(parsed: T, override: any): T {
   if (!override || typeof override !== 'object') return parsed;
   const arr = (v: any): string[] => Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
   return {
-    raw: parsed.raw,
+    ...parsed,
     sizeMentions: 'sizes' in override ? arr(override.sizes) : parsed.sizeMentions,
     materialMentions: 'materials' in override ? arr(override.materials) : parsed.materialMentions,
     typeMentions: 'types' in override ? arr(override.types) : parsed.typeMentions,
     closureMentions: 'closures' in override ? arr(override.closures) : parsed.closureMentions,
+    formMentions: 'forms' in override ? arr(override.forms) : parsed.formMentions,
   };
 }
 
-// ── Produkt_Regeln Matching ─────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════
+//  SPUR A — Ableitung. EBENE 1 Formel-Wand (Spec §5.1).
+//  DETERMINISTISCH: Wirkstoff/Produkt → Physik → gesperrte Formate.
+//  Nie Haiku-geraten. Die Wand gibt eine ERLAUBTE MENGE aus, kein Format:
+//  sie sperrt Unmögliches (Klar-Pipette, Tiegel für Serum, PET für Öl)
+//  und flaggt, was nur der Render-Gate lösen kann (Klarglas → tönen).
+// ════════════════════════════════════════════════════════════════════
+type Formel =
+  | 'oxidationsempfindlich' | 'niedrigviskos' | 'hochviskos'
+  | 'schaeumend' | 'oelhaltig' | 'lichtstabil';
+
+interface FormulaSignal { re: RegExp; formel: Formel; }
+const FORMULA_SIGNALS: FormulaSignal[] = [
+  { re: /vitamin\s?c|vit[-\s]?c|\bvitc\b|ascorb|retinol|retinal|retinald|peptid|bakuchiol|ferulic/, formel: 'oxidationsempfindlich' },
+  { re: /\böl\b|\boel\b|facial oil|gesichtsöl|gesichtsoel|\boil\b|squalan/, formel: 'oelhaltig' },
+  { re: /serum|toner|essence|essenz|ampoule|ampulle|\bmist\b|drops|tropfen|lotion|fluid/, formel: 'niedrigviskos' },
+  { re: /creme|crème|cream|\bbalm\b|balsam|butter|salbe|paste/, formel: 'hochviskos' },
+  { re: /cleanser|reinig|foam|schaum|shampoo|duschgel|body wash|gel wash/, formel: 'schaeumend' },
+];
+
+function parseFormula(query: string): Formel[] {
+  const q = query.toLowerCase();
+  const hits = new Set<Formel>();
+  for (const s of FORMULA_SIGNALS) if (s.re.test(q)) hits.add(s.formel);
+  if (hits.size === 0) hits.add('lichtstabil');
+  return [...hits];
+}
+
+interface FormulaWall {
+  forbidMaterial: string[];   // reale Material-Options
+  forbidType: string[];       // reale Type-Options
+  forbidClosure: string[];    // reale Closure-Options
+  forceTintIfGlass: boolean;  // Klarglas nicht erlaubt → Render muss tönen (SF-Gate)
+  preferOpaque: boolean;      // Identität "laut" muss über Opak/Vollfarbe laufen (Typ-B)
+  notes: string[];            // Transparenz für UI/Log: WARUM etwas gesperrt ist
+}
+
+function buildFormulaWall(formeln: Formel[]): FormulaWall {
+  const w: FormulaWall = {
+    forbidMaterial: [], forbidType: [], forbidClosure: [],
+    forceTintIfGlass: false, preferOpaque: false, notes: [],
+  };
+  const addMat = (v: string) => { if (!w.forbidMaterial.includes(v)) w.forbidMaterial.push(v); };
+  const addType = (v: string) => { if (!w.forbidType.includes(v)) w.forbidType.push(v); };
+  const addClo = (v: string) => { if (!w.forbidClosure.includes(v)) w.forbidClosure.push(v); };
+
+  for (const f of formeln) {
+    switch (f) {
+      case 'oxidationsempfindlich':
+        // Luft+Licht zersetzen → offene Klar-Pipette raus; Glas nur getönt.
+        addClo('Pipette');
+        w.forceTintIfGlass = true;
+        w.preferOpaque = true;
+        w.notes.push('oxidationsempfindlich → offene Pipette gesperrt; Glas nur getönt/opak (kein Klarglas)');
+        break;
+      case 'niedrigviskos':
+        // fließt frei → Tiegel unpraktisch.
+        addType('Tiegel');
+        w.notes.push('niedrigviskos (Serum/Toner) → Tiegel gesperrt');
+        break;
+      case 'hochviskos':
+        // fließt nicht → Pipette/dünne Pumpe unbrauchbar.
+        addClo('Pipette');
+        w.notes.push('hochviskos (Creme/Balm) → Pipette gesperrt');
+        break;
+      case 'oelhaltig':
+        // greift PET-Familie chemisch an.
+        addMat('PET'); addMat('R-PET'); addMat('PETG');
+        w.notes.push('ölhaltig → PET/R-PET/PETG gesperrt');
+        break;
+      case 'schaeumend':
+        // Menge + nasse Hände → Präzisionsformate unpraktisch.
+        addType('Tiegel'); addClo('Pipette');
+        w.notes.push('schäumend/Volumen → Tiegel + Pipette gesperrt');
+        break;
+      case 'lichtstabil':
+        // keine Chemie-Wand → Ebene 2 übernimmt komplett.
+        break;
+    }
+  }
+  return w;
+}
+
+// ── Identität (Ebene 2) — weiche Schicht für Ranking + Segment-Hint.
+//    Haiku, optional, non-fatal. Register/Temperatur haben KEINE Physik-
+//    Wahrheit → hier darf ein Modell schätzen. Segment-Routing bleibt
+//    vorbereitet (Hint), aktiviert erst mit Code-Profilen.
+interface Identity {
+  register: string | null;
+  temperatur_laut: string | null; // leise|laut
+  temperatur_ton: string | null;  // serioes|verspielt
+  hero_ingredient: string | null;
+}
+async function parseIdentity(query: string): Promise<Identity | null> {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  const system = `Du liest einen Beauty-Marken-Brief und gibst NUR die weiche Identitäts-Ebene zurück. Keine Physik.
+Antworte NUR mit JSON:
+{"register":"pharma-klinisch|tech-premium|clean-minimal|natur-erdig|luxus-ritual|masse-funktional|null","temperatur_laut":"leise|laut|null","temperatur_ton":"serioes|verspielt|null","hero_ingredient":"<zutat oder null>"}
+Regeln: temperatur_laut ist ORTHOGONAL zum Register (natur kann laut sein). Nur setzen, was der Brief hergibt, sonst null.`;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5', max_tokens: 200, system,
+        messages: [{ role: 'user', content: `Brief: "${query}"` }],
+      }),
+    });
+    const data = await res.json() as { content: Array<{ text: string }> };
+    const raw = (data.content?.[0]?.text || '').replace(/```json\s?|```/g, '').trim();
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const p = JSON.parse(m[0]);
+    const nn = (v: any) => (v && v !== 'null') ? String(v) : null;
+    return {
+      register: nn(p.register), temperatur_laut: nn(p.temperatur_laut),
+      temperatur_ton: nn(p.temperatur_ton), hero_ingredient: nn(p.hero_ingredient),
+    };
+  } catch { return null; }
+}
+
+// ── Produkt_Regeln Matching (Kategorie-Constraints, bestehend) ─────────
 interface CategoryConstraints {
   category: string;
   bevorzugtMaterial: string[];
@@ -148,7 +317,7 @@ function matchCategory(query: string, regeln: any[]): CategoryConstraints | null
   return null;
 }
 
-// ── Hard Filter ─────────────────────────────────────────────────────
+// ── Produkt-Extraktion ──────────────────────────────────────────────
 interface CapRef { id: string; name: string; imageUrl: string }
 
 interface ProductData {
@@ -160,28 +329,23 @@ interface ProductData {
   closure: string;
   description: string;
   imageUrl: string | null;
-  capabilities: string[];
+  capabilities: string[];   // SF_Bestätigt (Tristate — nur BELEGTE Fähigkeiten)
+  excluded: string[];       // SF_Ausgeschlossen (intern für Ranking-Hinweis)
   availableSizes: string[];
   availableMaterials: string[];
   capCount: number;
-  capIds: string[];        // verlinkte Cap-Record-IDs (intern für Auflösung, wird gestrippt)
-  caps: CapRef[];          // {id,name,imageUrl} — an Client geliefert (id+name für Anfrage, url für Anzeige)
-  capImages: string[];     // nur URLs — Rückwärtskompatibilität, aus caps abgeleitet
-  supplier: string;        // Lieferant (Link-Feld → Name), an Client geliefert
+  capIds: string[];
+  caps: CapRef[];
+  capImages: string[];
+  supplier: string;
 }
 
 function extractProduct(rec: any): ProductData {
   const f = rec.fields;
 
-  const caps: string[] = [];
-  if (f['SF_Einfaerbbar']) caps.push('Einfärbbar');
-  if (f['SF_Mattierbar']) caps.push('Mattierbar');
-  if (f['SF_HotFoil']) caps.push('Hot Foil');
-  if (f['SF_Embossing']) caps.push('Embossing');
-  if (f['SF_Siebdruck']) caps.push('Siebdruck');
-  if (f['SF_PCR']) caps.push('PCR');
-  if (f['SF_Refillable']) caps.push('Refillable');
-  if (f['SF_Airless']) caps.push('Airless');
+  // NEU: SF-Tristate statt alter Booleans. Nur BELEGTE Fähigkeiten.
+  const capabilities = multiSelectNames(f['SF_Bestätigt']);
+  const excluded = multiSelectNames(f['SF_Ausgeschlossen']);
 
   const capIds = (f['Caps'] as string[] | undefined || []).filter(Boolean);
 
@@ -194,25 +358,21 @@ function extractProduct(rec: any): ProductData {
     closure: selectName(f['Closure']),
     description: f['Kurzbeschreibung'] || '',
     imageUrl: imgUrl(f['Bild_Harmonisiert']),
-    capabilities: caps,
+    capabilities,
+    excluded,
     availableSizes: multiSelectNames(f['Available_Sizes']),
     availableMaterials: multiSelectNames(f['Available_Materials']),
     capCount: capIds.length,
     capIds,
-    caps: [],        // wird nach dem Ranking für die Top-Ergebnisse aufgelöst
-    capImages: [],   // s.o., abgeleitet aus caps
-    // Lieferant ist ein Link-Feld → [{id, name}]. Ersten Namen als String übernehmen.
+    caps: [],
+    capImages: [],
     supplier: multiSelectNames(f['Lieferant'])[0] || '',
   };
 }
 
-// Caps für gegebene Cap-Record-IDs auflösen (Batch, ein Load der Cap-Tabelle).
-// Baut Map capId → {url, name}. Bevorzugt harmonisiertes Bild, Fallback Rohbild.
 async function resolveCaps(capIds: string[]): Promise<Map<string, { url: string; name: string }>> {
   const map = new Map<string, { url: string; name: string }>();
   if (capIds.length === 0) return map;
-  // Ganze (kleine) Cap-Tabelle laden und lokal mappen — günstiger als N ID-Lookups,
-  // solange die Cap-Tabelle < einige hundert Records ist (aktuell der Fall).
   const capRecords = await airtableListAll(CAP_TABLE);
   for (const rec of capRecords) {
     const url = imgUrl(rec.fields['Cap_Bild_Harmonisiert']) || imgUrl(rec.fields['Cap_Bild']);
@@ -222,84 +382,67 @@ async function resolveCaps(capIds: string[]): Promise<Map<string, { url: string;
   return map;
 }
 
+// ── Hard Filter — Merge beider Spuren. Reihenfolge = производ-truth:
+//    1) Nutzer-Spec (Spur B, positiv)  2) Produkt_Regeln  3) FORMEL-WAND.
+//    Die Formel-Wand subtrahiert IMMER zuletzt → Wand gewinnt gegen
+//    Nutzerwunsch (getippte Pipette für Vit-C wird entfernt).
+// ─────────────────────────────────────────────────────────────────────
 function hardFilter(
   products: ProductData[],
   parsed: ParsedQuery,
-  category: CategoryConstraints | null
+  category: CategoryConstraints | null,
+  wall: FormulaWall
 ): ProductData[] {
+  const inc = (hay: string, needle: string) => hay.toLowerCase().includes(needle.toLowerCase());
+
   return products.filter(p => {
-    // User-explicit material filter
+    // ── Spur B: Nutzer-explizite Filter (positiv) ──────────────────
     if (parsed.materialMentions.length > 0) {
-      const hasMatch = parsed.materialMentions.some(m =>
-        p.material.some(pm => pm.toLowerCase().includes(m.toLowerCase())) ||
-        p.availableMaterials.some(am => am.toLowerCase().includes(m.toLowerCase()))
-      );
-      if (!hasMatch) return false;
+      const hit = parsed.materialMentions.some(m =>
+        p.material.some(pm => inc(pm, m)) || p.availableMaterials.some(am => inc(am, m)));
+      if (!hit) return false;
     }
-    // User-explicit type filter
     if (parsed.typeMentions.length > 0) {
-      if (!parsed.typeMentions.some(t => p.type.toLowerCase().includes(t.toLowerCase()))) return false;
+      if (!parsed.typeMentions.some(t => inc(p.type, t))) return false;
     }
-    // User-explicit closure filter
     if (parsed.closureMentions.length > 0) {
-      if (!parsed.closureMentions.some(c => p.closure.toLowerCase().includes(c.toLowerCase()))) return false;
+      if (!parsed.closureMentions.some(c => inc(p.closure, c))) return false;
     }
-    // User-explicit size filter
-    if (parsed.sizeMentions.length > 0) {
-      if (p.availableSizes.length > 0) {
-        const hasSize = parsed.sizeMentions.some(s =>
-          p.availableSizes.some(as => as.toLowerCase().includes(s))
-        );
-        if (!hasSize) return false;
-      }
-      // If product has no size data, don't exclude (data gap)
+    if (parsed.formMentions.length > 0) {
+      if (p.form.length > 0 && !parsed.formMentions.some(fm => p.form.some(pf => inc(pf, fm)))) return false;
+      // Kein Form-Datum am Produkt → nicht ausschließen (Data Gap).
     }
-    // Category constraints from Produkt_Regeln
+    if (parsed.sizeMentions.length > 0 && p.availableSizes.length > 0) {
+      const hasSize = parsed.sizeMentions.some(s => p.availableSizes.some(as => inc(as, s)));
+      if (!hasSize) return false;
+    }
+
+    // ── Produkt_Regeln (Kategorie-Constraints) ─────────────────────
     if (category) {
-      // Exclude forbidden materials
-      if (category.nichtMaterial.length > 0) {
-        const forbidden = category.nichtMaterial.some(nm =>
-          p.material.some(pm => pm.toLowerCase().includes(nm.toLowerCase()))
-        );
-        if (forbidden) return false;
-      }
-      // Exclude forbidden closures
-      if (category.nichtClosure.length > 0) {
-        const forbidden = category.nichtClosure.some(nc =>
-          p.closure.toLowerCase().includes(nc.toLowerCase())
-        );
-        if (forbidden) return false;
-      }
-      // Exclude forbidden types
-      if (category.nichtType.length > 0) {
-        const forbidden = category.nichtType.some(nt =>
-          p.type.toLowerCase().includes(nt.toLowerCase())
-        );
-        if (forbidden) return false;
-      }
-      // Volume range check from Produkt_Regeln
+      if (category.nichtMaterial.some(nm => p.material.some(pm => inc(pm, nm)))) return false;
+      if (category.nichtClosure.some(nc => inc(p.closure, nc))) return false;
+      if (category.nichtType.some(nt => inc(p.type, nt))) return false;
       if ((category.volumeMin !== null || category.volumeMax !== null) && p.availableSizes.length > 0) {
-        // Parse ml values from Available_Sizes (e.g. "50ml" → 50)
-        const productMls = p.availableSizes
-          .map(s => parseInt(s.replace(/[^0-9]/g, ''), 10))
-          .filter(n => !isNaN(n));
-        if (productMls.length > 0) {
-          // Product must have at least one size within the allowed range
-          const hasValidSize = productMls.some(ml => {
-            if (category.volumeMin !== null && ml < category.volumeMin) return false;
-            if (category.volumeMax !== null && ml > category.volumeMax) return false;
-            return true;
-          });
-          if (!hasValidSize) return false;
+        const mls = p.availableSizes.map(s => parseInt(s.replace(/[^0-9]/g, ''), 10)).filter(n => !isNaN(n));
+        if (mls.length > 0) {
+          const ok = mls.some(ml =>
+            !(category.volumeMin !== null && ml < category.volumeMin) &&
+            !(category.volumeMax !== null && ml > category.volumeMax));
+          if (!ok) return false;
         }
-        // If no parseable sizes, don't exclude (data gap)
       }
     }
+
+    // ── FORMEL-WAND (Ebene 1) — gewinnt immer, subtrahiert zuletzt ──
+    if (wall.forbidMaterial.some(fm => p.material.some(pm => inc(pm, fm)))) return false;
+    if (wall.forbidType.some(ft => inc(p.type, ft))) return false;
+    if (wall.forbidClosure.some(fc => inc(p.closure, fc))) return false;
+
     return true;
   });
 }
 
-// ── Claude Ranking ──────────────────────────────────────────────────
+// ── Claude Ranking (Ebene 2 — wählt innerhalb der erlaubten Menge) ────
 interface RankedProduct extends ProductData {
   score: number;
   reasoning: string;
@@ -308,27 +451,36 @@ interface RankedProduct extends ProductData {
 async function claudeRank(
   query: string,
   products: ProductData[],
-  category: CategoryConstraints | null
+  category: CategoryConstraints | null,
+  identity: Identity | null,
+  wall: FormulaWall
 ): Promise<RankedProduct[]> {
   if (products.length === 0) return [];
 
   const productList = products.map((p, i) =>
-    `[${i}] ${p.name} | Type: ${p.type} | Material: ${p.material.join(',')} | Form: ${p.form.join(',')} | Closure: ${p.closure} | Capabilities: ${p.capabilities.join(',')} | Sizes: ${p.availableSizes.join(',')} | ${p.description}`
+    `[${i}] ${p.name} | Type: ${p.type} | Material: ${p.material.join(',')} | Form: ${p.form.join(',')} | Closure: ${p.closure} | Fähigkeiten: ${p.capabilities.join(',') || '—'} | Sizes: ${p.availableSizes.join(',')} | ${p.description}`
   ).join('\n');
 
   let categoryContext = '';
   if (category) {
-    categoryContext = `\nCategory "${category.category}" matched. Preferred materials: ${category.bevorzugtMaterial.join(', ')}. Preferred closure: ${category.bevorzugtClosure.join(', ')}. Preferred type: ${category.bevorzugtType.join(', ')}.`;
+    categoryContext = `\nKategorie "${category.category}". Bevorzugt: Material ${category.bevorzugtMaterial.join(', ')}; Closure ${category.bevorzugtClosure.join(', ')}; Type ${category.bevorzugtType.join(', ')}.`;
+  }
+  let identityContext = '';
+  if (identity) {
+    identityContext = `\nAbgeleitete Identität — Register: ${identity.register || '?'}; Lautstärke: ${identity.temperatur_laut || '?'}; Ton: ${identity.temperatur_ton || '?'}; Hero: ${identity.hero_ingredient || '?'}. Lautstärke ist orthogonal zum Register.`;
+  }
+  let wallContext = '';
+  if (wall.notes.length > 0) {
+    wallContext = `\nFormel-Wand aktiv (bereits gefiltert): ${wall.notes.join(' | ')}.${wall.preferOpaque ? ' "Laut" muss über gesättigte Vollfarbe auf opaker/getönter Hülle laufen (kein Klarglas).' : ''}`;
   }
 
-  const systemPrompt = `You are a beauty packaging sourcing expert.
-A brand searches for packaging with this query. Rank how well each product fits the query emotionally and functionally.
-Consider: brand vibe, target audience, product category fit, material appropriateness, form language.
-Products that match category preferences (preferred material, closure, type) should score higher.
-${categoryContext}
-Respond ONLY with a JSON array, no other text. Format:
-[{"index":0,"score":85,"reasoning":"Brief reason"},{"index":1,"score":42,"reasoning":"Brief reason"}]
-Score 0-100. Be decisive — spread scores widely. Best fit near 90+, poor fit below 30.`;
+  const systemPrompt = `Du bist Sourcing-Experte für Beauty-Packaging.
+Ranke, wie gut jedes Produkt zum Brief passt — emotional UND funktional.
+Die harten physikalischen Wände sind bereits angewandt; ranke innerhalb der erlaubten Menge.
+Berücksichtige: Register, Lautstärke/Ton (Q6, orthogonal), Zielgruppe, Material-Sprache, Formsprache.${categoryContext}${identityContext}${wallContext}
+Antworte NUR mit JSON-Array, kein anderer Text:
+[{"index":0,"score":85,"reasoning":"kurz"}]
+Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter <30.`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -341,26 +493,21 @@ Score 0-100. Be decisive — spread scores widely. Best fit near 90+, poor fit b
       model: 'claude-haiku-4-5',
       max_tokens: 2000,
       system: systemPrompt,
-      messages: [{ role: 'user', content: `Query: "${query}"\n\nProducts:\n${productList}` }],
+      messages: [{ role: 'user', content: `Brief: "${query}"\n\nProdukte:\n${productList}` }],
     }),
   });
 
   const data = await res.json() as { content: Array<{ text: string }> };
-  const text = data.content[0].text.trim();
+  const text = (data.content?.[0]?.text || '').trim();
 
   try {
     const cleaned = text.replace(/```json\s?|```/g, '').trim();
     const rankings = JSON.parse(cleaned) as Array<{ index: number; score: number; reasoning: string }>;
     return rankings
-      .map(r => ({
-        ...products[r.index],
-        score: r.score,
-        reasoning: r.reasoning,
-      }))
-      .filter(r => r.id) // safety: skip invalid indices
+      .map(r => ({ ...products[r.index], score: r.score, reasoning: r.reasoning }))
+      .filter(r => r.id)
       .sort((a, b) => b.score - a.score);
-  } catch (e) {
-    // Fallback: return all products unranked
+  } catch {
     return products.map(p => ({ ...p, score: 50, reasoning: 'Ranking unavailable' }));
   }
 }
@@ -379,62 +526,59 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY env var fehlt' });
 
   try {
-    // 1. Load products + rules in parallel
-    const [allProducts, produktRegeln] = await Promise.all([
+    // 1. Produkte + Regeln parallel laden; Identität parallel ableiten
+    const [allProducts, produktRegeln, identity] = await Promise.all([
       airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
       airtableListAll(PRODUKT_REGELN_TABLE),
+      parseIdentity(query),
     ]);
 
-    // 2. Parse query, then apply client-side filter overrides (Chip-Removal)
+    // 2. Spur B parsen + Client-Overrides (Chip-Removal)
     const parsedBase = parseQuery(query);
     const parsed = applyActiveFilters(parsedBase, active_filters);
+    const freeHints = parsedBase.freeHints;
 
-    // 3. Match category
+    // 3. Spur A: Formel → Wand (deterministisch)
+    const formeln = parseFormula(query);
+    const wall = buildFormulaWall(formeln);
+
+    // 4. Kategorie (Produkt_Regeln)
     const category = matchCategory(query, produktRegeln);
 
-    // 4. Extract product data
+    // 5. Extraktion
     const products = allProducts.map(extractProduct);
 
-    // 5. Hard filter
-    const filtered = hardFilter(products, parsed, category);
+    // 6. Hard Filter (Spur B + Regeln + Formel-Wand)
+    const filtered = hardFilter(products, parsed, category, wall);
 
-    // 6. Claude ranking
-    const ranked = await claudeRank(query, filtered, category);
+    // 7. Ranking (Ebene 2)
+    const ranked = await claudeRank(query, filtered, category, identity, wall);
 
-    // 6b. Caps nur für Top-Ergebnisse auflösen (Detail-Slider).
-    //     caps = [{id, name, imageUrl}] — id+name für die Anfrage, url für die Anzeige.
-    //     WICHTIG: nur Caps MIT Bild aufnehmen — id/name/url bleiben so immer gepaart.
+    // 7b. Caps für Top-Ergebnisse auflösen
     const TOP_N_FOR_CAPS = 30;
-    const neededCapIds = Array.from(new Set(
-      ranked.slice(0, TOP_N_FOR_CAPS).flatMap(r => r.capIds)
-    ));
+    const neededCapIds = Array.from(new Set(ranked.slice(0, TOP_N_FOR_CAPS).flatMap(r => r.capIds)));
     if (neededCapIds.length > 0) {
       try {
         const capMap = await resolveCaps(neededCapIds);
         for (const r of ranked) {
-          r.caps = r.capIds
-            .map(id => {
-              const c = capMap.get(id);
-              return c ? { id, name: c.name, imageUrl: c.url } : null;
-            })
-            .filter((c): c is CapRef => c !== null);
+          r.caps = r.capIds.map(id => {
+            const c = capMap.get(id);
+            return c ? { id, name: c.name, imageUrl: c.url } : null;
+          }).filter((c): c is CapRef => c !== null);
           r.capImages = r.caps.map(c => c.imageUrl);
           r.capCount = r.caps.length;
         }
-      } catch { /* Cap-Daten optional — Suche darf daran nie scheitern */ }
+      } catch { /* Cap-Daten optional */ }
     }
 
-    // Interne Felder (capIds) nicht an Client leaken — caps/capImages bleiben.
-    const publicResults = ranked.map(({ capIds, ...rest }) => rest);
+    // Interne Felder nicht an Client leaken (capIds, excluded)
+    const publicResults = ranked.map(({ capIds, excluded, ...rest }) => rest);
 
-    // 7. Log search (fire-and-forget, don't block response)
+    // 8. Log (fire-and-forget)
     const SEARCH_LOG_TABLE = 'tbljh9GowT7JkJcn4';
     fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${SEARCH_LOG_TABLE}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
       body: JSON.stringify({
         fields: {
           Query: query,
@@ -442,23 +586,49 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           Total_Products: products.length,
           After_Filter: filtered.length,
           Top_Results: JSON.stringify(ranked.slice(0, 5).map(r => ({ id: r.id, name: r.name, score: r.score }))),
-          Parsed_Filters: JSON.stringify({ sizes: parsed.sizeMentions, materials: parsed.materialMentions, types: parsed.typeMentions, closures: parsed.closureMentions }),
+          Parsed_Filters: JSON.stringify({
+            sizes: parsed.sizeMentions, materials: parsed.materialMentions,
+            types: parsed.typeMentions, closures: parsed.closureMentions, forms: parsed.formMentions,
+            formeln, wall: wall.notes,
+          }),
           Timestamp: new Date().toISOString(),
         },
       }),
-    }).catch(() => {}); // silent fail — logging must never break search
+    }).catch(() => {});
 
     return res.status(200).json({
       results: publicResults,
-      query: query,
+      query,
       totalProducts: products.length,
       afterFilter: filtered.length,
       categoryMatch: category?.category || null,
+      // Spur B — Chips (unverändertes Frontend-Kontrakt + neu: forms)
       parsedFilters: {
-        sizes: parsed.sizeMentions,
-        materials: parsed.materialMentions,
-        types: parsed.typeMentions,
-        closures: parsed.closureMentions,
+        sizes: parsed.sizeMentions, materials: parsed.materialMentions,
+        types: parsed.typeMentions, closures: parsed.closureMentions, forms: parsed.formMentions,
+      },
+      // Spur A — abgeleitete Ebenen (Transparenz + Segment-Prep)
+      engine: {
+        formel_eigenschaften: formeln,
+        register: identity?.register || null,
+        temperatur_laut: identity?.temperatur_laut || null,
+        temperatur_ton: identity?.temperatur_ton || null,
+        hero_ingredient: identity?.hero_ingredient || null,
+      },
+      // Wand — was gesperrt wurde + Render-Direktiven (SF-Gate liest force_tint)
+      wall: {
+        notes: wall.notes,
+        force_tint_if_glass: wall.forceTintIfGlass,
+        prefer_opaque: wall.preferOpaque,
+        forbidden: {
+          material: wall.forbidMaterial, type: wall.forbidType, closure: wall.forbidClosure,
+        },
+      },
+      // §8.2 Freiheitsgrade — pre-seed Pill-State vor erstem Render
+      free_hints: {
+        finish: freeHints.finish,
+        base_weight: freeHints.baseWeight,
+        form: parsed.formMentions[0] || null,
       },
     });
   } catch (err) {
