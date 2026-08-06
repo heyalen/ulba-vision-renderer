@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v15-design-code-2';
+const RENDER_VERSION = 'v16-sf-tristate';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -431,17 +431,39 @@ async function assemblePrompt(
   const isGlassBody = /glas|glass/.test(matGate);
   const isPlasticGate = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(matGate);
   const hasCap = !!capFields || fall !== 'A';
-  const canFrost = !!sysFields['SF_Mattierbar'] || isGlassBody || isPlasticGate;
-  const canColor = !!sysFields['SF_Einfaerbbar'] || isPlasticGate;
-  const checkAnforderung = (a: string): boolean => {
+
+  // ── Dreistufiges Fähigkeits-Modell (05.08.) ──────────────────────────
+  // производ-truth: eine Fähigkeit ist bestätigt / unbekannt / ausgeschlossen.
+  // Quelle sind die belegpflichtig getaggten SF_-Felder (SF-Beleg-Pass ueber
+  // Screenshot_Rohtext) — NICHT mehr aus dem Material geraten. Ausnahme:
+  // Kunststoff-Einfaerbung ist industriell universell (Masterbatch) -> gilt
+  // ohne Textbeleg als bestaetigt. Glas-Einfaerbung/-Lackierung/-Mattierung
+  // dagegen ist lieferantenspezifisch: ohne Beleg = unbekannt (nie geraten).
+  const confirmed = new Set(multiSelectNames(sysFields['SF_Bestätigt']).map(s => s.toLowerCase()));
+  const excluded  = new Set(multiSelectNames(sysFields['SF_Ausgeschlossen']).map(s => s.toLowerCase()));
+  type CapState = 'ok' | 'unknown' | 'excluded';
+  // Fasst Einfaerben + Lackieren zu "Koerper faerbbar" zusammen (zwei Wege,
+  // ein Ziel: farbiger Koerper). Plastik = immer ok.
+  const koerperFarbe = (): CapState => {
+    if (isPlasticGate) return 'ok';
+    if (confirmed.has('einfaerbbar') || confirmed.has('lackierbar')) return 'ok';
+    if (excluded.has('einfaerbbar') && excluded.has('lackierbar')) return 'excluded';
+    return 'unknown';
+  };
+  const capState = (cap: string): CapState => {
+    if (confirmed.has(cap)) return 'ok';
+    if (excluded.has(cap)) return 'excluded';
+    return 'unknown';
+  };
+  const checkAnforderung = (a: string): CapState => {
     switch (a) {
-      case 'braucht_einfaerbbar': return canColor;
-      case 'braucht_frostbar':    return canFrost;
-      case 'braucht_klarglas':    return isGlassBody;
-      case 'braucht_opak':        return canColor || !isGlassBody;
+      case 'braucht_einfaerbbar': return koerperFarbe();
+      case 'braucht_opak':        return isGlassBody ? koerperFarbe() : 'ok';
+      case 'braucht_frostbar':    return isPlasticGate ? 'ok' : capState('mattierbar');
+      case 'braucht_klarglas':    return isGlassBody ? 'ok' : 'excluded';
       case 'braucht_cap_weiss':
-      case 'braucht_metallcap':   return hasCap;
-      default: return true; // unbekannte Anforderung blockt nie (fail-open, geloggt via umleitung=null)
+      case 'braucht_metallcap':   return hasCap ? 'ok' : 'excluded';
+      default: return 'ok';
     }
   };
   const TRANSPARENT_BEHANDLUNG = ['klar', 'frosted', 'getönt', 'getoent', 'klar_liquid_farbe'];
@@ -450,22 +472,33 @@ async function assemblePrompt(
     .map(r => {
       const f = r.fields;
       const anford = multiSelectNames(f['Anforderungen']);
-      const failed = anford.filter(a => !checkAnforderung(a));
+      const states = anford.map(a => ({ a, s: checkAnforderung(a) }));
       let bodyBehandlung = (selectName(f['Body_Behandlung']) || 'opak_recolor').toLowerCase();
       let farbort = (selectName(f['Farbort']) || 'koerper').toLowerCase();
       let umleitung: string | null = null;
-      // Konfliktregel Typ B: transparente Behandlung unmoeglich (kein Glas)
-      // -> Umleitung auf vollfarbe_opak, Farbe wandert auf den Koerper.
-      // Loest die Transparenz-Anforderungen; Code bleibt waehlbar.
-      const TRANSPARENZ_ANFORDERUNGEN = ['braucht_klarglas', 'braucht_frostbar'];
-      let remaining = failed;
-      if (failed.some(a => TRANSPARENZ_ANFORDERUNGEN.includes(a))
-          && TRANSPARENT_BEHANDLUNG.includes(bodyBehandlung) && !isGlassBody && canColor) {
-        bodyBehandlung = 'opak_recolor';
-        farbort = 'koerper';
-        umleitung = `Typ B: ${failed.filter(a => TRANSPARENZ_ANFORDERUNGEN.includes(a)).join(',')} nicht erfuellbar -> Ausdruck ueber Vollfarbe opak umgeleitet`;
-        remaining = failed.filter(a => !TRANSPARENZ_ANFORDERUNGEN.includes(a));
+
+      // AUSGESCHLOSSEN gewinnt immer: der Lieferant sagt explizit "geht nicht"
+      // -> Code fuer dieses System nicht waehlbar. Keine Umleitung.
+      const hardExcluded = states.filter(x => x.s === 'excluded').map(x => x.a);
+
+      // UNBEKANNT bei Koerper-Farbe: Fähigkeit weder bestaetigt noch verneint.
+      // производ-safe umleiten statt behaupten:
+      //  - Koerper-Faerbung faellt auf die universell mögliche Ausdrucksform
+      //    zurueck: Farbe in die FLUESSIGKEIT (klar_liquid_farbe / Farbort liquid).
+      //    Klares Gebinde kann jeder liefern; die Fluessigkeitsfarbe ist die
+      //    Formel der Marke, kein Verpackungs-Feature. -> Grün überlebt, ehrlich.
+      const unknown = states.filter(x => x.s === 'unknown').map(x => x.a);
+      const wantsBodyColor = ['getönt', 'getoent', 'opak_recolor'].includes(bodyBehandlung)
+        || farbort === 'koerper';
+      if (unknown.some(a => a === 'braucht_einfaerbbar' || a === 'braucht_opak') && wantsBodyColor) {
+        bodyBehandlung = 'klar_liquid_farbe';
+        farbort = 'liquid';
+        umleitung = `Typ B: Koerper-Faerbbarkeit unbestaetigt (${unknown.join(',')}) -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar (Machbarkeit per Muster bestaetigen)`;
       }
+      // UNBEKANNT bei Frost/Mattierung: keine sichere Ausweichform -> Code fuer
+      // dieses System nicht anbieten (lieber nichts als falsch versprechen).
+      const blockingUnknown = unknown.filter(a => a === 'braucht_frostbar');
+      const remaining = [...hardExcluded, ...blockingUnknown];
       return {
         id: r.id,
         name: String(f['Name'] || ''),
@@ -524,13 +557,13 @@ async function assemblePrompt(
   const primaryMatEarly = (multiSelectNames(sysFields['Material'])[0] || '').toLowerCase();
   const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMatEarly);
   const finishes: string[] = ['gloss'];
-  if (sysFields['SF_Mattierbar'] || isPlasticBody) finishes.push('matt', 'soft_touch');
+  if (capState('mattierbar') === 'ok' || isPlasticBody) finishes.push('matt', 'soft_touch');
   const akzente: string[] = ['none'];
-  if (sysFields['SF_HotFoil']) akzente.push('hot_foil_detail');
-  if (sysFields['SF_Siebdruck']) akzente.push('silkscreen_graphic');
+  if (confirmed.has('hotfoil')) akzente.push('hot_foil_detail');
+  if (confirmed.has('siebdruck')) akzente.push('silkscreen_graphic');
   // Leere Checkbox = ungetaggt, nicht "nein". Kunststoff ist industriell immer
   // einfärbbar (Masterbatch) → default true; Glas/Metall nur bei explizitem Tag.
-  const colorable = !!sysFields['SF_Einfaerbbar'] || isPlasticBody;
+  const colorable = koerperFarbe() === 'ok';
   const decoProfile = String(sysFields['Decoration_Profile'] || '').trim();
 
   // Emotions-Label-Set = Union der Emotion_Tags der Kandidaten-Paletten.
