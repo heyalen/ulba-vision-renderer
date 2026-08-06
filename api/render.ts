@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v16-sf-tristate';
+const RENDER_VERSION = 'v16-sf-tristate-2';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -481,19 +481,26 @@ async function assemblePrompt(
       // -> Code fuer dieses System nicht waehlbar. Keine Umleitung.
       const hardExcluded = states.filter(x => x.s === 'excluded').map(x => x.a);
 
-      // UNBEKANNT bei Koerper-Farbe: Fähigkeit weder bestaetigt noch verneint.
-      // производ-safe umleiten statt behaupten:
-      //  - Koerper-Faerbung faellt auf die universell mögliche Ausdrucksform
-      //    zurueck: Farbe in die FLUESSIGKEIT (klar_liquid_farbe / Farbort liquid).
-      //    Klares Gebinde kann jeder liefern; die Fluessigkeitsfarbe ist die
-      //    Formel der Marke, kein Verpackungs-Feature. -> Grün überlebt, ehrlich.
+      // UNBEKANNT bei Koerper-Farbe: производ-safe umleiten statt behaupten.
+      // WICHTIG: Trigger ist, was der Code TUT (Koerper toenen/faerben), nicht
+      // ob eine 'braucht_einfaerbbar'-Anforderung gesetzt ist — ein getoenter
+      // Glaskoerper braucht Koerper-Faerbbarkeit unabhaengig von der Anford.-Liste.
       const unknown = states.filter(x => x.s === 'unknown').map(x => x.a);
       const wantsBodyColor = ['getönt', 'getoent', 'opak_recolor'].includes(bodyBehandlung)
-        || farbort === 'koerper';
-      if (unknown.some(a => a === 'braucht_einfaerbbar' || a === 'braucht_opak') && wantsBodyColor) {
+        && farbort === 'koerper';
+      const bodyColorState = koerperFarbe();
+      if (wantsBodyColor && bodyColorState === 'unknown') {
+        // Farbe in die FLUESSIGKEIT: klares Gebinde kann jeder liefern, die
+        // Fluessigkeitsfarbe ist die Formel der Marke. Grün überlebt, ehrlich.
         bodyBehandlung = 'klar_liquid_farbe';
         farbort = 'liquid';
-        umleitung = `Typ B: Koerper-Faerbbarkeit unbestaetigt (${unknown.join(',')}) -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar (Machbarkeit per Muster bestaetigen)`;
+        umleitung = `Typ B: Koerper-Faerbbarkeit unbestaetigt -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar (Machbarkeit per Muster bestaetigen)`;
+      } else if (wantsBodyColor && bodyColorState === 'excluded') {
+        // Lieferant sagt explizit "nicht faerbbar" -> auch Fluessigkeits-Umleitung
+        // ist ehrlich (klares Gebinde), aber als harte Info kennzeichnen.
+        bodyBehandlung = 'klar_liquid_farbe';
+        farbort = 'liquid';
+        umleitung = `Typ B: Koerper NICHT faerbbar (Lieferant) -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar`;
       }
       // UNBEKANNT bei Frost/Mattierung: keine sichere Ausweichform -> Code fuer
       // dieses System nicht anbieten (lieber nichts als falsch versprechen).
