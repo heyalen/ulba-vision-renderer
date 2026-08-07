@@ -5,6 +5,7 @@ const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
 const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
 const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
 const CAP_TABLE = 'tblQvnXPhiKGMoqDp'; // Cap-Tabelle — 1 Record = 1 Verschluss
+const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ'; // Design-Look-Rezepte (nur Status=Aktiv)
 
 export const config = { api: { bodyParser: true } };
 
@@ -557,6 +558,194 @@ Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter 
   }
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  DESIGN-CODE-ENGINE — löst "gleiche Query → nur 1 Look".
+//  Ein Design_Code ist ein LOOK-REZEPT (Register+Temp-Achsen, Farben,
+//  Body-Behandlung, Gate-Anforderungen), losgelöst vom Base. Die Suche
+//  matcht Query-Achsen ↔ Code-Zone-0 und JOINT dann Code.Anforderungen
+//  ↔ reale Base-Fähigkeiten. Ein Code, der kein reales Base findet, das
+//  ihn tragen kann, wird gedroppt (Gate = Integrität). Ergebnis: mehrere
+//  Looks pro Query — DE-Code (laut/GenZ) UND F've-Code (getönt/klinisch)
+//  für dieselbe "laut bunt Vitamin C"-Query.
+// ════════════════════════════════════════════════════════════════════
+interface DesignCode {
+  id: string;
+  name: string;
+  segment: string[];
+  // Zone 0 — Achsen (steuern Match + später Nudge)
+  register: string;
+  tempLaut: number | null;
+  tempTon: number | null;
+  farbtemp: number | null;
+  dekoDichte: number | null;
+  // Zone 1 — Render-Rezept
+  bodyBehandlung: string;
+  farbort: string;
+  farbTraeger: string;
+  bodyHex: string;
+  bodyHex2: string;
+  farbverlauf: string;
+  akzentHex: string;
+  finishBody: string;
+  capFinish: string;
+  capHex: string;
+  capDetail: string;
+  typoHaltung: string;
+  // Zone 3 — Brief (reist mit Musteranfrage)
+  briefGrafik: string;
+  briefBadgeDichte: string;
+  // Gate + Identität
+  anforderungen: string[]; // braucht_klarglas/einfaerbbar/cap_weiss/frostbar/opak/metallcap
+  brand: string;
+  produkt: string;
+}
+
+function num(v: any): number | null {
+  return typeof v === 'number' && !isNaN(v) ? v : null;
+}
+
+function extractDesignCode(rec: any): DesignCode {
+  const f = rec.fields;
+  return {
+    id: rec.id,
+    name: f['Name'] || rec.id,
+    segment: multiSelectNames(f['Segment']),
+    register: selectName(f['Register']),
+    tempLaut: num(f['Temp_Laut']),
+    tempTon: num(f['Temp_Ton']),
+    farbtemp: num(f['Farbtemp']),
+    dekoDichte: num(f['Deko_Dichte']),
+    bodyBehandlung: selectName(f['Body_Behandlung']),
+    farbort: selectName(f['Farbort']),
+    farbTraeger: selectName(f['Farb_Traeger']),
+    bodyHex: f['Body_Hex'] || '',
+    bodyHex2: f['Body_Hex_2'] || '',
+    farbverlauf: selectName(f['Farbverlauf']),
+    akzentHex: f['Akzent_Hex'] || '',
+    finishBody: selectName(f['Finish_Body']),
+    capFinish: selectName(f['Cap_Finish']),
+    capHex: f['Cap_Hex'] || '',
+    capDetail: selectName(f['Cap_Detail']),
+    typoHaltung: selectName(f['Typo_Haltung']),
+    briefGrafik: f['Brief_Grafik'] || '',
+    briefBadgeDichte: ((v: any) => v == null ? '' : typeof v === 'object' ? selectName(v) : String(v))(f['Brief_Badge_Dichte']),
+    anforderungen: multiSelectNames(f['Anforderungen']),
+    brand: f['Brand'] || '',
+    produkt: f['Produkt'] || '',
+  };
+}
+
+// Query-Identität ist kategorial (leise|laut), Code-Achse ist 0–10.
+// Kategorie → Pol-Wert, damit beide auf derselben Skala landen.
+function lautToNum(v: string | null | undefined): number | null {
+  if (v === 'laut') return 8; if (v === 'leise') return 2; return null;
+}
+function tonToNum(v: string | null | undefined): number | null {
+  if (v === 'verspielt') return 8; if (v === 'serioes') return 2; return null;
+}
+const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
+
+// Register → weicher Segment-Hint (NUR Boost, kein Filter — siehe Handoff-
+// Abweichung: hartes Segment-Gate würde den Payoff killen).
+const REGISTER_SEGMENT: Record<string, string> = {
+  'pharma-klinisch': 'Klinisch_Derma', 'tech-premium': 'Klinisch_Derma',
+  'clean-minimal': 'Clean_Botanical', 'natur-erdig': 'Clean_Botanical',
+  'luxus-ritual': 'Quiet_Luxury', 'masse-funktional': 'GenZ_DTC',
+};
+
+// Achsen-Distanz Query ↔ Code-Zone-0 → Fit-Score 0–100.
+function axisMatchScore(code: DesignCode, identity: Identity | null): { score: number; why: string } {
+  let s = 50; const notes: string[] = [];
+  // Register: exakter Treffer stark, Mismatch mild (nicht droppen).
+  if (identity?.register && code.register) {
+    if (identity.register === code.register) { s += 25; notes.push('register✓'); }
+    else s -= 8;
+  }
+  // Lautstärke (Q6, orthogonal) — der Kern-Payoff-Hebel.
+  const ql = lautToNum(identity?.temperatur_laut);
+  if (ql !== null && code.tempLaut !== null) {
+    const d = Math.abs(code.tempLaut - ql);
+    s += (1 - d / 10) * 20 - 10; notes.push(`laut·Δ${d}`);
+  }
+  // Ton
+  const qt = tonToNum(identity?.temperatur_ton);
+  if (qt !== null && code.tempTon !== null) {
+    const d = Math.abs(code.tempTon - qt);
+    s += (1 - d / 10) * 14 - 7;
+  }
+  // Segment-Boost (weich)
+  const segHint = identity?.register ? REGISTER_SEGMENT[identity.register] : null;
+  if (segHint && code.segment.includes(segHint)) { s += 6; notes.push('seg+'); }
+  return { score: clamp(s), why: notes.join(' ') };
+}
+
+// ── GATE-JOIN — Code.Anforderungen ↔ reale Base-Fähigkeit ────────────
+// Tolerant/normalisiert (Muster deiner Guardrails), nicht enum-hart.
+// Body-Level-Anforderungen sind bindend (droppen), Cap-Level sind soft.
+function baseSatisfies(base: ProductData, anforderung: string): boolean {
+  const a = anforderung.toLowerCase();
+  const capHas = (t: string) => base.capabilities.some(c => c.toLowerCase().includes(t));
+  const isGlas = base.material.some(m => m.toLowerCase().includes('glas'));
+  if (a.includes('klarglas')) return isGlas;
+  if (a.includes('einfaerb') || a.includes('einfärb'))
+    return capHas('einfaerb') || capHas('einfärb') || base.material.some(m => OPAQUE_MATERIALS.includes(m));
+  if (a.includes('frost')) return capHas('frost') || isGlas; // Glas ist frostbar
+  if (a.includes('opak')) return canCarryLoudColor(base);
+  if (a.includes('cap_weiss') || a.includes('metallcap')) return true; // Cap-Level: soft
+  return true; // unbekannte Anforderung blockiert nicht
+}
+function baseRealizesCode(base: ProductData, code: DesignCode): boolean {
+  return code.anforderungen.every(a => baseSatisfies(base, a));
+}
+
+// Ein Look = Code-Rezept + bestes reales Base, das den Gate erfüllt.
+interface DesignLook {
+  code_id: string; code_name: string; brand: string; produkt: string;
+  register: string; temp_laut: number | null; temp_ton: number | null;
+  farbtemp: number | null; deko_dichte: number | null;
+  body_behandlung: string; farbort: string; farb_traeger: string;
+  body_hex: string; body_hex_2: string; farbverlauf: string; akzent_hex: string;
+  finish_body: string; cap_finish: string; cap_hex: string; cap_detail: string;
+  typo_haltung: string; brief_grafik: string; brief_badge_dichte: string;
+  anforderungen: string[]; segment: string[];
+  axis_score: number; axis_why: string;
+  matched_base: {
+    id: string; name: string; type: string; material: string[];
+    form: string[]; closure: string; image_url: string | null; supplier: string;
+  };
+}
+
+function buildDesignLooks(
+  codes: DesignCode[],
+  rankedBases: RankedProduct[],
+  identity: Identity | null,
+): DesignLook[] {
+  const looks: DesignLook[] = [];
+  for (const code of codes) {
+    // rankedBases ist score-sortiert → .find nimmt das query-beste Gate-Base.
+    const base = rankedBases.find(b => baseRealizesCode(b, code));
+    if (!base) continue; // kein reales Base trägt diesen Look → Gate-Integrität
+    const { score, why } = axisMatchScore(code, identity);
+    looks.push({
+      code_id: code.id, code_name: code.name, brand: code.brand, produkt: code.produkt,
+      register: code.register, temp_laut: code.tempLaut, temp_ton: code.tempTon,
+      farbtemp: code.farbtemp, deko_dichte: code.dekoDichte,
+      body_behandlung: code.bodyBehandlung, farbort: code.farbort, farb_traeger: code.farbTraeger,
+      body_hex: code.bodyHex, body_hex_2: code.bodyHex2, farbverlauf: code.farbverlauf,
+      akzent_hex: code.akzentHex, finish_body: code.finishBody, cap_finish: code.capFinish,
+      cap_hex: code.capHex, cap_detail: code.capDetail, typo_haltung: code.typoHaltung,
+      brief_grafik: code.briefGrafik, brief_badge_dichte: code.briefBadgeDichte,
+      anforderungen: code.anforderungen, segment: code.segment,
+      axis_score: score, axis_why: why,
+      matched_base: {
+        id: base.id, name: base.name, type: base.type, material: base.material,
+        form: base.form, closure: base.closure, image_url: base.imageUrl, supplier: base.supplier,
+      },
+    });
+  }
+  return looks.sort((a, b) => b.axis_score - a.axis_score);
+}
+
 // ── Main Handler ────────────────────────────────────────────────────
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -571,11 +760,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY env var fehlt' });
 
   try {
-    // 1. Produkte + Regeln parallel laden; Identität parallel ableiten
-    const [allProducts, produktRegeln, identity] = await Promise.all([
+    // 1. Produkte + Regeln + Aktiv-Codes parallel laden; Identität parallel
+    //    ableiten. Code-Laden non-fatal: fällt es aus, laufen results normal
+    //    weiter, nur design_looks bleibt leer (wie Cache-Prinzip).
+    const [allProducts, produktRegeln, identity, activeCodes] = await Promise.all([
       airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
       airtableListAll(PRODUKT_REGELN_TABLE),
       parseIdentity(query),
+      airtableListAll(DESIGN_CODE_TABLE, "{Status}='Aktiv'").catch(() => [] as any[]),
     ]);
 
     // 2. Spur B parsen + Client-Overrides (Chip-Removal)
@@ -616,6 +808,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       } catch { /* Cap-Daten optional */ }
     }
 
+    // 7c. Design-Looks bauen: Aktiv-Codes × gerankte Bases (Gate-Join).
+    //     Löst "gleiche Query → nur 1 Look" — mehrere Codes ⇒ mehrere Looks.
+    let designLooks: DesignLook[] = [];
+    try {
+      const codes = activeCodes.map(extractDesignCode);
+      designLooks = buildDesignLooks(codes, ranked, identity);
+    } catch { /* Looks optional — results shippen immer */ }
+
     // Interne Felder nicht an Client leaken (capIds, excluded)
     const publicResults = ranked.map(({ capIds, excluded, ...rest }) => rest);
 
@@ -643,9 +843,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json({
       results: publicResults,
+      // NEU: Look-zentrierte Ebene — jeder Eintrag = Design-Rezept + reales
+      // Gate-Base. Frontend rendert daraus die Style-Frames (Grid-Vielfalt).
+      design_looks: designLooks,
       query,
       totalProducts: products.length,
       afterFilter: filtered.length,
+      activeCodes: activeCodes.length,
+      designLooks: designLooks.length,
       categoryMatch: category?.category || null,
       // Spur B — Chips (unverändertes Frontend-Kontrakt + neu: forms)
       parsedFilters: {
