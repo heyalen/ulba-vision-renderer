@@ -278,7 +278,7 @@ Regeln: temperatur_laut ist ORTHOGONAL zum Register (natur kann laut sein). Nur 
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5', max_tokens: 200, system,
+        model: 'claude-haiku-4-5', max_tokens: 200, temperature: 0, system,
         messages: [{ role: 'user', content: `Brief: "${query}"` }],
       }),
     });
@@ -523,6 +523,7 @@ Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter 
       body: JSON.stringify({
         model: 'claude-haiku-4-5',
         max_tokens: 1500,
+        temperature: 0,
         system: systemPrompt,
         messages: [{ role: 'user', content: `Brief: "${query}"\n\nProdukte:\n${productList}` }],
       }),
