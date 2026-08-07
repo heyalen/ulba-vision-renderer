@@ -719,18 +719,34 @@ function buildDesignLooks(
   codes: DesignCode[],
   rankedBases: RankedProduct[],
   identity: Identity | null,
+  wall: FormulaWall,
 ): DesignLook[] {
   const looks: DesignLook[] = [];
   for (const code of codes) {
     // rankedBases ist score-sortiert → .find nimmt das query-beste Gate-Base.
     const base = rankedBases.find(b => baseRealizesCode(b, code));
     if (!base) continue; // kein reales Base trägt diesen Look → Gate-Integrität
-    const { score, why } = axisMatchScore(code, identity);
+    let { score, why } = axisMatchScore(code, identity);
+
+    // ── Look × Formel-Wand koppeln ──────────────────────────────────
+    // Die Wand gilt für die QUERY, nicht für den Ursprungs-Look. Ein
+    // "klar"-Look auf Glas widerspricht force_tint (z.B. Vit-C-Query:
+    // Klarglas schützt lichtempfindlichen Wirkstoff nicht). Semantik wie
+    // im Render-Gate: TÖNEN, nicht entfernen — Look bleibt, wird konform.
+    let bodyBeh = code.bodyBehandlung;
+    const isKlar = /klar/i.test(bodyBeh);
+    const baseIsGlas = base.material.some(m => m.toLowerCase().includes('glas'));
+    if (wall.forceTintIfGlass && isKlar && baseIsGlas) {
+      bodyBeh = 'getoent'; why += ' [wand→getönt]';
+    }
+    // "laut" trägt über opak/getönt — klar-Look dämpfen (spiegelt Base-Boost).
+    if (wall.preferOpaque && isKlar) { score = Math.max(0, score - 15); why += ' [-klar@laut]'; }
+
     looks.push({
       code_id: code.id, code_name: code.name, brand: code.brand, produkt: code.produkt,
       register: code.register, temp_laut: code.tempLaut, temp_ton: code.tempTon,
       farbtemp: code.farbtemp, deko_dichte: code.dekoDichte,
-      body_behandlung: code.bodyBehandlung, farbort: code.farbort, farb_traeger: code.farbTraeger,
+      body_behandlung: bodyBeh, farbort: code.farbort, farb_traeger: code.farbTraeger,
       body_hex: code.bodyHex, body_hex_2: code.bodyHex2, farbverlauf: code.farbverlauf,
       akzent_hex: code.akzentHex, finish_body: code.finishBody, cap_finish: code.capFinish,
       cap_hex: code.capHex, cap_detail: code.capDetail, typo_haltung: code.typoHaltung,
@@ -813,7 +829,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let designLooks: DesignLook[] = [];
     try {
       const codes = activeCodes.map(extractDesignCode);
-      designLooks = buildDesignLooks(codes, ranked, identity);
+      designLooks = buildDesignLooks(codes, ranked, identity, wall);
     } catch { /* Looks optional — results shippen immer */ }
 
     // Interne Felder nicht an Client leaken (capIds, excluded)
