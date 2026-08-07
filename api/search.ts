@@ -657,22 +657,23 @@ const REGISTER_SEGMENT: Record<string, string> = {
 // Achsen-Distanz Query ↔ Code-Zone-0 → Fit-Score 0–100.
 function axisMatchScore(code: DesignCode, identity: Identity | null): { score: number; why: string } {
   let s = 50; const notes: string[] = [];
-  // Register: exakter Treffer stark, Mismatch mild (nicht droppen).
+  // Register: schwaches Signal (kategorial + Haiku-Register schwankt) → kleiner
+  // Boost. Die kontinuierlichen Temp-Achsen tragen die Selektion, nicht Register.
   if (identity?.register && code.register) {
-    if (identity.register === code.register) { s += 25; notes.push('register✓'); }
-    else s -= 8;
+    if (identity.register === code.register) { s += 12; notes.push('register✓'); }
+    else s -= 4;
   }
-  // Lautstärke (Q6, orthogonal) — der Kern-Payoff-Hebel.
+  // Lautstärke (Q6, orthogonal) — PRIMÄRACHSE für "laut bunt".
   const ql = lautToNum(identity?.temperatur_laut);
   if (ql !== null && code.tempLaut !== null) {
     const d = Math.abs(code.tempLaut - ql);
-    s += (1 - d / 10) * 20 - 10; notes.push(`laut·Δ${d}`);
+    s += (1 - d / 10) * 30 - 12; notes.push(`laut·Δ${d}`);
   }
   // Ton
   const qt = tonToNum(identity?.temperatur_ton);
   if (qt !== null && code.tempTon !== null) {
     const d = Math.abs(code.tempTon - qt);
-    s += (1 - d / 10) * 14 - 7;
+    s += (1 - d / 10) * 16 - 8;
   }
   // Segment-Boost (weich)
   const segHint = identity?.register ? REGISTER_SEGMENT[identity.register] : null;
