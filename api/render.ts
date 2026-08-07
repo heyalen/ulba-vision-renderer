@@ -77,9 +77,11 @@ function queryHash(q: string): string {
   return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
 }
 
-function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null): string {
+function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null, codeId: string | null = null): string {
   // RENDER_VERSION zuerst: aendert sich der Render-Code, aendert sich jeder Key.
-  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}`;
+  // codeId trennt verschiedene Looks auf DEMSELBEN Base+Query (sonst kollidiert
+  // der Cache und liefert allen Looks denselben Render).
+  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}${codeId ? `_c${codeId.slice(-6)}` : ''}`;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -394,7 +396,8 @@ async function assemblePrompt(
   fall: RenderFall,
   sysFields: any,
   capFields: any | null,
-  reqSegment: string | null = null
+  reqSegment: string | null = null,
+  forceCodeId: string | null = null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
   const [produktRegeln, farbpalettenAll, designCodesAll] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
@@ -665,7 +668,11 @@ OUTPUT ONLY this JSON, no fences, no prose:
     ? codeCandidates.filter(c => c.segments.includes(effectiveSegment))
     : codeCandidates;
   const codePool = codeWorldPool.length ? codeWorldPool : codeCandidates;
-  const code = codePool.find(c => c.id === parsed?.code_id) || codePool[0];
+  // forceCodeId (Frontend: der geklickte Look) schlaegt Haikus Wahl — sofern
+  // der Code fuer dieses Base ueberhaupt kompatibel ist (aus codeCandidates,
+  // NICHT segment-gefiltert, damit ein bewusst gewaehlter Look nie wegfaellt).
+  const forcedCode = forceCodeId ? codeCandidates.find(c => c.id === forceCodeId) : null;
+  const code = forcedCode || codePool.find(c => c.id === parsed?.code_id) || codePool[0];
   const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id)
     ? parsed.szene_id
     : (SCENE_PRESETS.some(s => s.id === code.szeneId) ? code.szeneId : 'studio_soft');
@@ -837,6 +844,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     selectedCapId = null,
     tier = 'lite',
     segment = null,
+    forceCodeId = null,
     nocache = false,
   } = req.body as {
     systemId: string;
@@ -845,6 +853,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     selectedCapId?: string | null;
     tier?: Tier;
     segment?: string | null;
+    forceCodeId?: string | null;
     nocache?: boolean;
   };
 
@@ -860,7 +869,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment);
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment, forceCodeId);
     let cached: any[] = [];
     // Dev-Bypass: nocache=true ueberspringt das Cache-Lesen -> immer frischer Render.
     if (!nocache) try {
@@ -936,7 +945,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment);
+      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId);
 
     // ── 6. Render ───────────────────────────────────────────────────
     let renderingUrl: string;
