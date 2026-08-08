@@ -691,7 +691,13 @@ function baseSatisfies(base: ProductData, anforderung: string): boolean {
   if (a.includes('klarglas')) return isGlas;
   if (a.includes('einfaerb') || a.includes('einfärb'))
     return capHas('einfaerb') || capHas('einfärb') || base.material.some(m => OPAQUE_MATERIALS.includes(m));
-  if (a.includes('frost')) return capHas('frost') || isGlas; // Glas ist frostbar
+  if (a.includes('frost')) {
+    // Angleich an render.ts-Tristate: Plastik ist industriell mattierbar;
+    // Glas-Mattierung NUR bei belegtem 'mattierbar' — "Glas ist frostbar"
+    // war zu tolerant und bot Looks an, die der Render korrekt verweigert.
+    const isPlastic = base.material.some(m => /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/i.test(m));
+    return isPlastic || capHas('mattierbar');
+  }
   if (a.includes('opak')) return canCarryLoudColor(base);
   if (a.includes('cap_weiss') || a.includes('metallcap')) return true; // Cap-Level: soft
   return true; // unbekannte Anforderung blockiert nicht
