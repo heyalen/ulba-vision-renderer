@@ -669,9 +669,15 @@ OUTPUT ONLY this JSON, no fences, no prose:
     : codeCandidates;
   const codePool = codeWorldPool.length ? codeWorldPool : codeCandidates;
   // forceCodeId (Frontend: der geklickte Look) schlaegt Haikus Wahl — sofern
-  // der Code fuer dieses Base ueberhaupt kompatibel ist (aus codeCandidates,
-  // NICHT segment-gefiltert, damit ein bewusst gewaehlter Look nie wegfaellt).
+  // der Code fuer dieses Base ueberhaupt kompatibel ist. Ist er es NICHT,
+  // brechen wir sichtbar ab statt still auf einen anderen Look zu kippen
+  // (der "immer Pink"-Bug): der Nutzer hat einen bestimmten Look gewaehlt,
+  // ein anderer Look waere eine Luege.
   const forcedCode = forceCodeId ? codeCandidates.find(c => c.id === forceCodeId) : null;
+  if (forceCodeId && !forcedCode) {
+    const wanted = designCodes.find(c => c.id === forceCodeId);
+    throw new Error(`Look "${wanted?.name || forceCodeId}" ist auf diesem Teil nicht produzierbar (Anforderung unbestätigt/ausgeschlossen)`);
+  }
   const code = forcedCode || codePool.find(c => c.id === parsed?.code_id) || codePool[0];
   const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id)
     ? parsed.szene_id
