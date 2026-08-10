@@ -144,16 +144,28 @@ function parseQuery(query: string): ParsedQuery & { freeHints: FreeHints } {
 
 // active_filters vom Client: erlaubt gezieltes Entfernen einzelner Filter
 // (X-Klick auf Chip). Nur bekannte Keys — kein Injizieren neuer Constraints.
-function applyActiveFilters<T extends ParsedQuery>(parsed: T, override: any): T {
-  if (!override || typeof override !== 'object') return parsed;
+// FIX (Chat-Verfeinerung): Override ist jetzt UNION mit den frisch aus der
+// Query geparsten Mentions statt Replace. Vorher hat der mitgeschickte alte
+// Chip-State ('sizes' in override → []) ein frisch getipptes "200ml" GELÖSCHT
+// → Volumen-Verfeinerung im Chat wirkte nie. Entfernen läuft jetzt über die
+// explizite removed-Liste (Client schickt sie beim Chip-X mit), damit ein X
+// nicht durch Re-Parsen der rootQuery sofort wieder rückgängig gemacht wird.
+function applyActiveFilters<T extends ParsedQuery>(parsed: T, override: any, removed?: any): T {
   const arr = (v: any): string[] => Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
+  const uniq = (a: string[]) => [...new Set(a)];
+  const rm = (a: string[], r: string[]) =>
+    a.filter(x => !r.some(y => y.toLowerCase() === x.toLowerCase()));
+  const o = (override && typeof override === 'object') ? override : {};
+  const r = (removed && typeof removed === 'object') ? removed : {};
+  const merge = (fromQuery: string[], key: string) =>
+    rm(uniq([...fromQuery, ...(key in o ? arr(o[key]) : [])]), arr(r[key]));
   return {
     ...parsed,
-    sizeMentions: 'sizes' in override ? arr(override.sizes) : parsed.sizeMentions,
-    materialMentions: 'materials' in override ? arr(override.materials) : parsed.materialMentions,
-    typeMentions: 'types' in override ? arr(override.types) : parsed.typeMentions,
-    closureMentions: 'closures' in override ? arr(override.closures) : parsed.closureMentions,
-    formMentions: 'forms' in override ? arr(override.forms) : parsed.formMentions,
+    sizeMentions: merge(parsed.sizeMentions, 'sizes'),
+    materialMentions: merge(parsed.materialMentions, 'materials'),
+    typeMentions: merge(parsed.typeMentions, 'types'),
+    closureMentions: merge(parsed.closureMentions, 'closures'),
+    formMentions: merge(parsed.formMentions, 'forms'),
   };
 }
 
@@ -408,12 +420,25 @@ function hardFilter(
   wall: FormulaWall
 ): ProductData[] {
   const inc = (hay: string, needle: string) => hay.toLowerCase().includes(needle.toLowerCase());
+  // FIX (PETG≠PET): Material braucht Token-Grenzen statt Substring.
+  // "PETG".includes("PET") war true → Glas-Tiegel mit Available_Materials
+  // [PETG] rutschte durch den PET-Filter. Jetzt: Treffer nur, wenn vor/nach
+  // dem Begriff kein Buchstabe/keine Ziffer steht. "Glas PCR 100 %" matcht
+  // weiter "Glas" (Grenze = Space), "R-PET" matcht "PET" (Grenze = "-",
+  // gewollt: rezykliertes PET IST PET), "PETG" matcht "PET" NICHT mehr.
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matchMat = (hay: string, needle: string) =>
+    new RegExp(`(^|[^a-z0-9])${esc(needle)}($|[^a-z0-9])`, 'i').test(hay);
+  // FIX (200ml≠1200ml + Kartenwahrheit): ml-Vergleich numerisch statt
+  // Substring — "1200ml".includes("200ml") war true.
+  const mlOf = (s: string) => { const m = s.match(/(\d+)\s*ml/i); return m ? parseInt(m[1], 10) : NaN; };
+  const sizeEq = (a: string, b: string) => { const x = mlOf(a), y = mlOf(b); return !isNaN(x) && x === y; };
 
   return products.filter(p => {
     // ── Spur B: Nutzer-explizite Filter (positiv) ──────────────────
     if (parsed.materialMentions.length > 0) {
       const hit = parsed.materialMentions.some(m =>
-        p.material.some(pm => inc(pm, m)) || p.availableMaterials.some(am => inc(am, m)));
+        p.material.some(pm => matchMat(pm, m)) || p.availableMaterials.some(am => matchMat(am, m)));
       if (!hit) return false;
     }
     if (parsed.typeMentions.length > 0) {
@@ -427,13 +452,13 @@ function hardFilter(
       // Kein Form-Datum am Produkt → nicht ausschließen (Data Gap).
     }
     if (parsed.sizeMentions.length > 0 && p.availableSizes.length > 0) {
-      const hasSize = parsed.sizeMentions.some(s => p.availableSizes.some(as => inc(as, s)));
+      const hasSize = parsed.sizeMentions.some(s => p.availableSizes.some(as => sizeEq(as, s)));
       if (!hasSize) return false;
     }
 
     // ── Produkt_Regeln (Kategorie-Constraints) ─────────────────────
     if (category) {
-      if (category.nichtMaterial.some(nm => p.material.some(pm => inc(pm, nm)))) return false;
+      if (category.nichtMaterial.some(nm => p.material.some(pm => matchMat(pm, nm)))) return false;
       if (category.nichtClosure.some(nc => inc(p.closure, nc))) return false;
       if (category.nichtType.some(nt => inc(p.type, nt))) return false;
       if ((category.volumeMin !== null || category.volumeMax !== null) && p.availableSizes.length > 0) {
@@ -450,7 +475,7 @@ function hardFilter(
     // ── FORMEL-WAND (Ebene 1, Base) — gewinnt immer, subtrahiert zuletzt ──
     // Nur Base-Attribute (Material/Type). Verschluss NICHT hier — Pipette ist
     // ein Cap und wird im Cap-Panel depriorisiert, nicht das Base gefiltert.
-    if (wall.forbidMaterial.some(fm => p.material.some(pm => inc(pm, fm)))) return false;
+    if (wall.forbidMaterial.some(fm => p.material.some(pm => matchMat(pm, fm)))) return false;
     if (wall.forbidType.some(ft => inc(p.type, ft))) return false;
 
     return true;
@@ -778,7 +803,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { query, active_filters } = req.body as { query: string; active_filters?: any };
+  const { query, active_filters, removed_filters } = req.body as { query: string; active_filters?: any; removed_filters?: any };
   if (!query) return res.status(400).json({ error: 'query ist erforderlich' });
   if (!process.env.AIRTABLE_PAT) return res.status(500).json({ error: 'AIRTABLE_PAT env var fehlt' });
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY env var fehlt' });
@@ -796,7 +821,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // 2. Spur B parsen + Client-Overrides (Chip-Removal)
     const parsedBase = parseQuery(query);
-    const parsed = applyActiveFilters(parsedBase, active_filters);
+    const parsed = applyActiveFilters(parsedBase, active_filters, removed_filters);
     const freeHints = parsedBase.freeHints;
 
     // 3. Spur A: Formel → Wand (deterministisch)
