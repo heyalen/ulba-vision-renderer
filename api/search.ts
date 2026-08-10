@@ -142,6 +142,28 @@ function parseQuery(query: string): ParsedQuery & { freeHints: FreeHints } {
   };
 }
 
+// ── Verschluss-Normalisierung ────────────────────────────────────────
+// Ein Term (getippt "dropper", Client-Pill "ScrewCap", parseQuery "Flip-top",
+// deutscher Choice "Schraubverschluss") → ein kanonischer SUBSTRING, der in
+// den realen Airtable-Choices matcht (Base-Closure UND Cap-Verschlussart,
+// beide deutsch: Schraubverschluss/Pump/Airless/Pipette/Flip-Top/Disc-Top/
+// Snap-On/Spray/Dosierpumpe). Ohne das matchte "ScrewCap"≠"Schraubverschluss",
+// "Dropper"≠"Pipette", "FlipTop"≠"Flip-Top".
+const CLOSURE_ALIAS: Array<[RegExp, string]> = [
+  [/pump|pumpe|dosierpump/i, 'Pump'],   // Substring von "Pump" UND "Dosierpumpe"
+  [/pipette|dropper|tropf/i, 'Pipette'],
+  [/schraub|screw/i, 'Schraub'],        // Substring von "Schraubverschluss"
+  [/flip/i, 'Flip'],                    // Substring von "Flip-Top"
+  [/spray|sprüh|spruh/i, 'Spray'],
+  [/airless/i, 'Airless'],
+  [/snap/i, 'Snap'],                    // Substring von "Snap-On"
+  [/disc/i, 'Disc'],                    // Substring von "Disc-Top"
+];
+function normalizeClosure(term: string): string {
+  for (const [re, v] of CLOSURE_ALIAS) if (re.test(term)) return v;
+  return term;
+}
+
 // active_filters vom Client: erlaubt gezieltes Entfernen einzelner Filter
 // (X-Klick auf Chip). Nur bekannte Keys — kein Injizieren neuer Constraints.
 // FIX (Chat-Verfeinerung): Override ist jetzt UNION mit den frisch aus der
@@ -164,7 +186,7 @@ function applyActiveFilters<T extends ParsedQuery>(parsed: T, override: any, rem
     sizeMentions: merge(parsed.sizeMentions, 'sizes'),
     materialMentions: merge(parsed.materialMentions, 'materials'),
     typeMentions: merge(parsed.typeMentions, 'types'),
-    closureMentions: merge(parsed.closureMentions, 'closures'),
+    closureMentions: merge(parsed.closureMentions, 'closures').map(normalizeClosure),
     formMentions: merge(parsed.formMentions, 'forms'),
   };
 }
@@ -408,6 +430,36 @@ async function resolveCaps(capIds: string[]): Promise<Map<string, { url: string;
   return map;
 }
 
+// Cap-Verschlussart je Cap-Record → Map capId → "Pump"|"Pipette"|… .
+// Nötig, weil der Verschluss am CAP hängt, nicht am Base (UNIQUE-Base =
+// "Schraubverschluss", trägt aber Pump-Caps). Zugriff per Feld-ID
+// (fldVxgwWH9Bi0OWzn = Cap-Verschlussart) → stabil gegen Umbenennung.
+// Paginiert (airtableListAll zieht nur 1 Seite): bei >100 Caps würde sonst
+// ein Teil des Inventars durch den Verschluss-Filter fallen.
+const CAP_CLOSURE_FIELD = 'fldVxgwWH9Bi0OWzn';
+async function loadCapClosureMap(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  let offset: string | undefined;
+  do {
+    const params = new URLSearchParams({ pageSize: '100', returnFieldsByFieldId: 'true' });
+    params.set('fields[]', CAP_CLOSURE_FIELD);
+    if (offset) params.set('offset', offset);
+    const res = await fetch(
+      `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CAP_TABLE}?${params}`,
+      { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+    );
+    if (!res.ok) return map; // non-fatal: Filter fällt auf Base-Closure zurück
+    const data = await res.json();
+    for (const rec of (data.records || [])) {
+      const c = rec.fields?.[CAP_CLOSURE_FIELD];
+      const name = c && typeof c === 'object' ? c.name : (typeof c === 'string' ? c : '');
+      if (name) map.set(rec.id, name);
+    }
+    offset = data.offset;
+  } while (offset);
+  return map;
+}
+
 // ── Hard Filter — Merge beider Spuren. Reihenfolge = производ-truth:
 //    1) Nutzer-Spec (Spur B, positiv)  2) Produkt_Regeln  3) FORMEL-WAND.
 //    Die Formel-Wand subtrahiert IMMER zuletzt → Wand gewinnt gegen
@@ -417,7 +469,8 @@ function hardFilter(
   products: ProductData[],
   parsed: ParsedQuery,
   category: CategoryConstraints | null,
-  wall: FormulaWall
+  wall: FormulaWall,
+  capClosures: Map<string, string>
 ): ProductData[] {
   const inc = (hay: string, needle: string) => hay.toLowerCase().includes(needle.toLowerCase());
   // FIX (PETG≠PET): Material braucht Token-Grenzen statt Substring.
@@ -445,7 +498,14 @@ function hardFilter(
       if (!parsed.typeMentions.some(t => inc(p.type, t))) return false;
     }
     if (parsed.closureMentions.length > 0) {
-      if (!parsed.closureMentions.some(c => inc(p.closure, c))) return false;
+      // Verschluss sitzt am Base ODER an einem Cap. UNIQUE-Base ist
+      // "Schraubverschluss", trägt aber Pump-Caps → früher fälschlich
+      // rausgefiltert. Jetzt: Treffer, wenn Base-Closure ODER irgendeine
+      // Cap-Verschlussart matcht (c ist bereits normalisiert, s. normalizeClosure).
+      const hit = parsed.closureMentions.some(c =>
+        inc(p.closure, c) ||
+        p.capIds.some(cid => { const cc = capClosures.get(cid); return cc ? inc(cc, c) : false; }));
+      if (!hit) return false;
     }
     if (parsed.formMentions.length > 0) {
       if (p.form.length > 0 && !parsed.formMentions.some(fm => p.form.some(pf => inc(pf, fm)))) return false;
@@ -834,8 +894,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 5. Extraktion
     const products = allProducts.map(extractProduct);
 
+    // 5b. Cap-Verschlussarten nur laden, wenn ein Verschluss-Filter aktiv ist
+    //     (spart den Extra-Call im Normalfall). Der Verschluss hängt am Cap,
+    //     nicht am Base → ohne diese Map filtert "Pump" alle Bases weg.
+    const capClosures = parsed.closureMentions.length > 0
+      ? await loadCapClosureMap()
+      : new Map<string, string>();
+
     // 6. Hard Filter (Spur B + Regeln + Formel-Wand)
-    const filtered = hardFilter(products, parsed, category, wall);
+    const filtered = hardFilter(products, parsed, category, wall, capClosures);
 
     // 7. Ranking (Ebene 2)
     const ranked = await claudeRank(query, filtered, category, identity, wall);
