@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v19-laut-register-hood';
+const RENDER_VERSION = 'v20-klar-liquid-farbe';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -360,6 +360,11 @@ type DesignCodeRec = {
   id: string;
   name: string;
   segments: string[];
+  // v19 hat register + tempLaut in Extraktion und Nudge-Logik ergaenzt, aber
+  // NICHT in diesem Type-Alias — Vercel transpiliert api/*.ts ohne Typcheck,
+  // deshalb lief es trotzdem. Ein echter `tsc`/`next build` waere gebrochen.
+  register: string | null;
+  tempLaut: number | null;
   bodyBehandlung: string;
   farbort: string;
   bodyHex: string | null;
@@ -788,10 +793,30 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // (Kohaerenz-Kern: Body_Behandlung + Farbort + Body_Hex aus dem Record.)
   const codeBodyHex = code.bodyHex || hex[0] || '#EDEDED';
   const bodyFinishEn = BODY_FINISH_EN[code.finishBody] || BODY_FINISH_EN.matt;
+  // Fuellfarbe fuer Farbort 'liquid': Body_Hex ist dort haeufig #FFFFFF (das
+  // ist das GLAS, nicht das Serum) — dann traegt Akzent/Cap die echte Farbe.
+  const istFarblos = (h: string | null) => {
+    const m = /^#?([0-9a-f]{6})$/i.exec((h || '').trim());
+    if (!m) return true;
+    const n = parseInt(m[1], 16);
+    const rr = (n >> 16) / 255, gg = ((n >> 8) & 255) / 255, bb = (n & 255) / 255;
+    const mx = Math.max(rr, gg, bb), mn = Math.min(rr, gg, bb);
+    return mx === 0 ? true : (mx - mn) / mx < 0.15;
+  };
+  const codeBodyHexFuellung = istFarblos(code.bodyHex)
+    ? (code.akzentHex && !istFarblos(code.akzentHex) ? code.akzentHex
+       : code.capHex && !istFarblos(code.capHex) ? code.capHex : codeBodyHex)
+    : codeBodyHex;
   let bodyLineEn: string;
   switch (code.bodyBehandlung) {
     case 'klar':
-      bodyLineEn = `Keep the body as clear transparent material exactly as in the reference image — do not tint or recolor it.`;
+      // Farbort MUSS hier gelesen werden. Ein 'klar'-Code mit Farbort 'liquid'
+      // (z.B. Pink Liquid: Body #FFFFFF, Cap+Akzent #FF007F, Farbe im Serum)
+      // hat seine gesamte Lautstaerke in der Fluessigkeit — ohne diese Abfrage
+      // fiel sie lautlos weg und der lauteste Code rendert als leere Flasche.
+      bodyLineEn = code.farbort === 'liquid'
+        ? `Keep the body as clear transparent material exactly as in the reference image — do not tint or recolor the material itself. The bottle is filled with liquid in a saturated ${codeBodyHexFuellung}; the colour comes entirely from the contents and reads clearly through the clear wall, with a visible fill line near the shoulder.`
+        : `Keep the body as clear transparent material exactly as in the reference image — do not tint or recolor it.`;
       break;
     case 'frosted':
       bodyLineEn = code.farbort === 'liquid'
