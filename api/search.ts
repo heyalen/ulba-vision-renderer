@@ -611,7 +611,8 @@ Die harten physikalischen Wände sind bereits angewandt; ranke innerhalb der erl
 Berücksichtige: Register, Lautstärke/Ton (Q6, orthogonal), Zielgruppe, Material-Sprache, Formsprache.${categoryContext}${identityContext}${wallContext}
 Antworte NUR mit JSON-Array, kein anderer Text:
 [{"index":0,"score":85,"reasoning":"kurz"}]
-Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter <30.`;
+Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter <30.
+reasoning: MAXIMAL 6 Wörter. Laenger sprengt das Antwortlimit und das Ranking faellt komplett aus.`;
 
   // prefer_opaque-Boost (Typ-B als Score-Regel, nicht nur als Prompt-Text):
   // bei "laut" steigen opak/einfärbbare Bases, klares Glas fällt. Deterministisch
@@ -638,7 +639,10 @@ Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter 
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5',
-        max_tokens: 1500,
+        // 1500 reichten bei ~40 Produkten nicht: das JSON-Array brach mitten
+        // im letzten Objekt ab, JSON.parse warf, und der Fallback setzte ALLE
+        // Treffer auf flat 50 (Symptom: jede Karte zeigt "50 MATCH").
+        max_tokens: 4000,
         temperature: 0,
         system: systemPrompt,
         messages: [{ role: 'user', content: `Brief: "${query}"\n\nProdukte:\n${productList}` }],
@@ -658,7 +662,19 @@ Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter 
     const cleaned = rawText.replace(/```json\s?|```/g, '').trim();
     const m = cleaned.match(/\[[\s\S]*\]/);
     if (!m) throw new Error(`kein JSON-Array in Antwort`);
-    const rankings = JSON.parse(m[0]) as Array<{ index: number; score: number; reasoning: string }>;
+    // Tolerantes Parsing: bricht das Array ab (Token-Limit), waren bisher ALLE
+    // Scores verloren. Jetzt werden die vollstaendig uebertragenen Objekte
+    // einzeln gerettet — ein abgeschnittener Schwanz kostet nur den Schwanz.
+    type Ranking = { index: number; score: number; reasoning: string };
+    let rankings: Ranking[];
+    try {
+      rankings = JSON.parse(m[0]) as Ranking[];
+    } catch {
+      rankings = (m[0].match(/\{[^{}]*\}/g) || [])
+        .map(o => { try { return JSON.parse(o) as Ranking; } catch { return null; } })
+        .filter((o): o is Ranking => !!o && typeof o.index === 'number' && typeof o.score === 'number');
+      if (rankings.length === 0) throw new Error('JSON-Array unlesbar (auch teilweise nicht)');
+    }
 
     const ranked = rankings
       .filter(r => products[r.index])
@@ -671,7 +687,15 @@ Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter 
     // Fehler SICHTBAR machen (im UI statt in Logs): Grund + Rohtext-Anfang.
     const grund = e instanceof Error ? e.message : String(e);
     const snippet = rawText ? ` | raw: ${rawText.slice(0, 80)}` : '';
-    return products.map(p => ({ ...p, score: 50, reasoning: `Ranking-Fehler: ${grund}${snippet}` }));
+    // Fallback: NICHT flat 50. Ein identischer Score auf jeder Karte sieht aus
+    // wie ein kaputtes Produkt und verschweigt, dass gar nicht gerankt wurde.
+    // Stattdessen gestaffelt nach Eingangsreihenfolge (= Hardfilter-Ordnung),
+    // damit die Liste lesbar bleibt und der Ausfall am Score sichtbar ist.
+    return products.map((p, i) => ({
+      ...p,
+      score: Math.max(35, 72 - i * 2),
+      reasoning: `Ranking-Fehler (ungerankt): ${grund}${snippet}`,
+    }));
   }
 }
 
