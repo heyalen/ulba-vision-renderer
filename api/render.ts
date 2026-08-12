@@ -945,6 +945,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               palette: board.palette,
               radar: board.radar,
               zielprofil: board.zielprofil,
+              design_code: board.design_code,
             }
           : null;
 
@@ -1056,7 +1057,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             Konzept_Rationale: concept.rationale || '',
             Szene_ID: concept.szene_id || '',
             Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
-            Board: JSON.stringify({ label: concept.label, palette: concept.palette, radar: concept.radar, zielprofil: concept.zielprofil }),
+            Board: JSON.stringify({ label: concept.label, palette: concept.palette, radar: concept.radar, zielprofil: concept.zielprofil, design_code: concept.design_code }),
             Tier: tier,
             Fall: fall,
             Created_At: new Date().toISOString(),
