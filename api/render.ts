@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v17-laut-cursor';
+const RENDER_VERSION = 'v18-laut-cursor-worldfix';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -671,10 +671,6 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const akzent = akzente.includes(parsed?.akzent) ? parsed.akzent : 'none';
   // Code-Wahl HART validieren: nur Kandidaten; Segment-Fehlwahl schnappt zurueck
   // auf einen Code der effektiven Welt; letzter Fallback = erster Kandidat.
-  const codeWorldPool = effectiveSegment
-    ? codeCandidates.filter(c => c.segments.includes(effectiveSegment))
-    : codeCandidates;
-  const codePool = codeWorldPool.length ? codeWorldPool : codeCandidates;
   // forceCodeId (Frontend: der geklickte Look) schlaegt Haikus Wahl — sofern
   // der Code fuer dieses Base ueberhaupt kompatibel ist. Ist er es NICHT,
   // brechen wir sichtbar ab statt still auf einen anderen Look zu kippen
@@ -685,6 +681,17 @@ OUTPUT ONLY this JSON, no fences, no prose:
     const wanted = designCodes.find(c => c.id === forceCodeId);
     throw new Error(`Look "${wanted?.name || forceCodeId}" ist auf diesem Teil nicht produzierbar (Anforderung unbestätigt/ausgeschlossen)`);
   }
+
+  // ── Anker-Welt fuer Pool + Cursor + Nachbarschaft ─────────────────
+  // BUGFIX: Ist ein Code gepinnt/geforced (Direction-Chip ODER Nudge), definiert
+  // DESSEN Welt die navigierbare Nachbarschaft — NICHT Haikus pro Call neu
+  // gewuerfelte Welt-Wahl. Sonst sucht der Nudge den leiseren Nachbarn im
+  // falschen Weltpool ("leiser tut nichts") und graut die Chips falsch aus.
+  const navWorld = (forcedCode?.segments[0]) || effectiveSegment;
+  const codeWorldPool = navWorld
+    ? codeCandidates.filter(c => c.segments.includes(navWorld))
+    : codeCandidates;
+  const codePool = codeWorldPool.length ? codeWorldPool : codeCandidates;
 
   // ── Achsen-Cursor · Prototyp Temp_Laut (WITHIN-WORLD) ─────────────
   // Ein Nudge verschiebt den Cursor NICHT um einen festen Betrag (bei duenner
