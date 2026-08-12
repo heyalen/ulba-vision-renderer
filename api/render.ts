@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v16-sf-tristate-2';
+const RENDER_VERSION = 'v17-laut-cursor';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -77,11 +77,14 @@ function queryHash(q: string): string {
   return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
 }
 
-function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null, codeId: string | null = null): string {
+function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null, codeId: string | null = null, lautNudge: string | null = null): string {
   // RENDER_VERSION zuerst: aendert sich der Render-Code, aendert sich jeder Key.
   // codeId trennt verschiedene Looks auf DEMSELBEN Base+Query (sonst kollidiert
   // der Cache und liefert allen Looks denselben Render).
-  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}${codeId ? `_c${codeId.slice(-6)}` : ''}`;
+  // lautNudge: der Nudge leitet einen ANDEREN Code ab als forceCodeId (der
+  // Cursor haengt am alten Code). Ohne den Nudge im Key kollidiert der
+  // Vor-Nudge-Render mit dem Nach-Nudge-Render unter demselben forceCodeId.
+  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}${codeId ? `_c${codeId.slice(-6)}` : ''}${lautNudge ? `_n${lautNudge[0]}` : ''}`;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -276,7 +279,7 @@ type Concept = {
   segment?: string | null;
   // Design_Code-Provenienz + deterministische Render-Werte (Base & Cap
   // zitieren dieselbe Quelle -> Kohaerenz per Konstruktion).
-  design_code?: { id: string; name: string; umleitung: string | null };
+  design_code?: { id: string; name: string; umleitung: string | null; laut?: number | null; can_quieter?: boolean; can_louder?: boolean };
   render?: { bodyLineEn: string; capHex: string | null; capFinishEn: string; akzentEn: string };
 };
 
@@ -397,7 +400,8 @@ async function assemblePrompt(
   sysFields: any,
   capFields: any | null,
   reqSegment: string | null = null,
-  forceCodeId: string | null = null
+  forceCodeId: string | null = null,
+  lautNudge: string | null = null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
   const [produktRegeln, farbpalettenAll, designCodesAll] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
@@ -524,6 +528,9 @@ async function assemblePrompt(
         ausdrucksweg: (selectName(f['Ausdrucksweg']) || '').toLowerCase(),
         typoHaltung: (selectName(f['Typo_Haltung']) || '').toLowerCase(),
         szeneId: String(f['Szene_ID'] || '').trim(),
+        // Achsen-Cursor: Temp_Laut als numerische Koordinate. null = ungetaggt
+        // -> nimmt an keiner Nudge-Wahl teil (rastet nie versehentlich ein).
+        tempLaut: (f['Temp_Laut'] != null && f['Temp_Laut'] !== '') ? Number(f['Temp_Laut']) : null,
         anforderungen: anford,
         compatible: remaining.length === 0,
         umleitung,
@@ -678,7 +685,35 @@ OUTPUT ONLY this JSON, no fences, no prose:
     const wanted = designCodes.find(c => c.id === forceCodeId);
     throw new Error(`Look "${wanted?.name || forceCodeId}" ist auf diesem Teil nicht produzierbar (Anforderung unbestätigt/ausgeschlossen)`);
   }
-  const code = forcedCode || codePool.find(c => c.id === parsed?.code_id) || codePool[0];
+
+  // ── Achsen-Cursor · Prototyp Temp_Laut (WITHIN-WORLD) ─────────────
+  // Ein Nudge verschiebt den Cursor NICHT um einen festen Betrag (bei duenner
+  // Code-Dichte tut "−1" oft nichts, weil der eigene Punkt der naechste bleibt).
+  // Stattdessen: Sprung auf den NAECHSTEN kuratierten Code IN Richtung
+  // leiser/lauter — Punkt-zu-Punkt, nie Interpolation (der Zwischenraum ist
+  // ungetesteter KI-Matsch, s. Konzept §3). Der Pool ist codePool: gleiche Welt,
+  // kompatibel zur Base -> gleiche Flasche, ruhigerer/lauterer Look. Kein
+  // Nachbar in Richtung -> No-Op (Chip ist frontendseitig ohnehin disabled).
+  let cursorCode = forcedCode;
+  if (forcedCode && forcedCode.tempLaut != null && (lautNudge === 'quieter' || lautNudge === 'louder')) {
+    const cur = forcedCode.tempLaut;
+    const cands = codePool.filter(c =>
+      c.tempLaut != null && (lautNudge === 'quieter' ? c.tempLaut < cur : c.tempLaut > cur)
+    );
+    cands.sort((a, b) =>
+      lautNudge === 'quieter' ? (b.tempLaut! - a.tempLaut!) : (a.tempLaut! - b.tempLaut!)
+    );
+    if (cands[0]) cursorCode = cands[0];
+  }
+
+  const code = cursorCode || codePool.find(c => c.id === parsed?.code_id) || codePool[0];
+
+  // Nachbar-Verfuegbarkeit fuer die Nudge-Chips: existiert im Pool ueberhaupt
+  // ein leiserer / lauterer Code als der aktuell gewaehlte? Steuert enabled/
+  // disabled der Chips im Frontend (kein toter Klick).
+  const codeLaut = code.tempLaut;
+  const canQuieter = codeLaut != null && codePool.some(c => c.tempLaut != null && c.tempLaut < codeLaut);
+  const canLouder  = codeLaut != null && codePool.some(c => c.tempLaut != null && c.tempLaut > codeLaut);
   const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id)
     ? parsed.szene_id
     : (SCENE_PRESETS.some(s => s.id === code.szeneId) ? code.szeneId : 'studio_soft');
@@ -816,7 +851,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     radar,
     zielprofil: zielProfil,
     segment: effectiveSegment,
-    design_code: { id: code.id, name: code.name, umleitung: code.umleitung },
+    design_code: { id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut, can_quieter: canQuieter, can_louder: canLouder },
     render: {
       bodyLineEn,
       capHex: code.capHex,
@@ -851,6 +886,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     tier = 'lite',
     segment = null,
     forceCodeId = null,
+    lautNudge = null,
     nocache = false,
   } = req.body as {
     systemId: string;
@@ -860,6 +896,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     tier?: Tier;
     segment?: string | null;
     forceCodeId?: string | null;
+    lautNudge?: string | null;
     nocache?: boolean;
   };
 
@@ -875,7 +912,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment, forceCodeId);
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment, forceCodeId, lautNudge);
     let cached: any[] = [];
     // Dev-Bypass: nocache=true ueberspringt das Cache-Lesen -> immer frischer Render.
     if (!nocache) try {
@@ -951,7 +988,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId);
+      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge);
 
     // ── 6. Render ───────────────────────────────────────────────────
     let renderingUrl: string;
