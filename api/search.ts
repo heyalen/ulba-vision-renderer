@@ -293,16 +293,33 @@ function canCarryLoudColor(p: ProductData): boolean {
 //    vorbereitet (Hint), aktiviert erst mit Code-Profilen.
 interface Identity {
   register: string | null;
-  temperatur_laut: string | null; // leise|laut
-  temperatur_ton: string | null;  // serioes|verspielt
+  // Achsen als ZAHL 0-10 = Cursor-Startposition der Wolke. Die Labels
+  // darunter sind abgeleitet (Prompt-Text + Frontend-Kontrakt), nie Quelle.
+  temp_laut: number | null;
+  temp_ton: number | null;
   hero_ingredient: string | null;
+  temperatur_laut: string | null; // leise|laut  (abgeleitet)
+  temperatur_ton: string | null;  // serioes|verspielt (abgeleitet)
 }
 async function parseIdentity(query: string): Promise<Identity | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   const system = `Du liest einen Beauty-Marken-Brief und gibst NUR die weiche Identitäts-Ebene zurück. Keine Physik.
 Antworte NUR mit JSON:
-{"register":"pharma-klinisch|tech-premium|clean-minimal|natur-erdig|luxus-ritual|masse-funktional|null","temperatur_laut":"leise|laut|null","temperatur_ton":"serioes|verspielt|null","hero_ingredient":"<zutat oder null>"}
-Regeln: temperatur_laut ist ORTHOGONAL zum Register (natur kann laut sein). Nur setzen, was der Brief hergibt, sonst null.`;
+{"register":"pharma-klinisch|tech-premium|clean-minimal|natur-erdig|luxus-ritual|masse-funktional|null","temp_laut":<0-10 oder null>,"temp_ton":<0-10 oder null>,"hero_ingredient":"<zutat oder null>"}
+
+temp_laut — visuelle Lautstärke, ORTHOGONAL zum Register (natur kann laut sein):
+ 0-1 fast unsichtbar, apothecary-still, ungefärbt
+ 2-3 leise clean, weiß/transparent, ein dezenter Ton
+ 4-5 selbstbewusst aber ruhig, ein klarer Farbton
+ 6-7 farbig präsent, kräftiger Ton, sichtbarer Akzent
+ 8-9 knallig, neon, hoher Kontrast, will auffallen
+ 10  schrill, maximal, mehrere laute Töne gleichzeitig
+
+temp_ton — Haltung:
+ 0-1 streng klinisch   2-3 seriös/sachlich   4-6 neutral freundlich
+ 7-8 verspielt/lebendig   9-10 albern, cartoonhaft, ironisch
+
+Setze NUR, was der Brief hergibt. Kein Signal → null (NICHT 5 raten).`;
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -322,9 +339,21 @@ Regeln: temperatur_laut ist ORTHOGONAL zum Register (natur kann laut sein). Nur 
     if (!m) return null;
     const p = JSON.parse(m[0]);
     const nn = (v: any) => (v && v !== 'null') ? String(v) : null;
+    const n10 = (v: any) => {
+      const x = typeof v === 'number' ? v : parseFloat(v);
+      return Number.isFinite(x) ? Math.max(0, Math.min(10, Math.round(x))) : null;
+    };
+    const laut = n10(p.temp_laut), ton = n10(p.temp_ton);
+    // Label nur an den Polen — die Mitte bleibt bewusst unbeschriftet, damit
+    // der Prompt-Text nicht mehr behauptet als die Zahl hergibt.
+    const lbl = (n: number | null, lo: string, hi: string) =>
+      n === null ? null : n <= 4 ? lo : n >= 6 ? hi : null;
     return {
-      register: nn(p.register), temperatur_laut: nn(p.temperatur_laut),
-      temperatur_ton: nn(p.temperatur_ton), hero_ingredient: nn(p.hero_ingredient),
+      register: nn(p.register),
+      temp_laut: laut, temp_ton: ton,
+      hero_ingredient: nn(p.hero_ingredient),
+      temperatur_laut: lbl(laut, 'leise', 'laut'),
+      temperatur_ton: lbl(ton, 'serioes', 'verspielt'),
     };
   } catch { return null; }
 }
@@ -567,7 +596,9 @@ async function claudeRank(
   }
   let identityContext = '';
   if (identity) {
-    identityContext = `\nAbgeleitete Identität — Register: ${identity.register || '?'}; Lautstärke: ${identity.temperatur_laut || '?'}; Ton: ${identity.temperatur_ton || '?'}; Hero: ${identity.hero_ingredient || '?'}. Lautstärke ist orthogonal zum Register.`;
+    const fmtAxis = (n: number | null, lbl: string | null) =>
+      n === null ? '?' : `${n}/10${lbl ? ` (${lbl})` : ''}`;
+    identityContext = `\nAbgeleitete Identität — Register: ${identity.register || '?'}; Lautstärke: ${fmtAxis(identity.temp_laut, identity.temperatur_laut)}; Ton: ${fmtAxis(identity.temp_ton, identity.temperatur_ton)}; Hero: ${identity.hero_ingredient || '?'}. Lautstärke ist orthogonal zum Register (0 = still, 10 = schrill).`;
   }
   let wallContext = '';
   if (wall.notes.length > 0) {
@@ -703,6 +734,9 @@ function extractDesignCode(rec: any): DesignCode {
     dekoDichte: num(f['Deko_Dichte']),
     bodyBehandlung: selectName(f['Body_Behandlung']),
     farbort: selectName(f['Farbort']),
+    // ACHTUNG: Feld 'Farb_Traeger' existiert in tbl24ezzCjRQDYRnJ NICHT
+    // (verifiziert 12.08.26). Bleibt für den Frontend-Kontrakt als leerer
+    // String erhalten — entweder Feld anlegen+taggen oder Slot entfernen.
     farbTraeger: selectName(f['Farb_Traeger']),
     bodyHex: f['Body_Hex'] || '',
     bodyHex2: f['Body_Hex_2'] || '',
@@ -721,14 +755,10 @@ function extractDesignCode(rec: any): DesignCode {
   };
 }
 
-// Query-Identität ist kategorial (leise|laut), Code-Achse ist 0–10.
-// Kategorie → Pol-Wert, damit beide auf derselben Skala landen.
-function lautToNum(v: string | null | undefined): number | null {
-  if (v === 'laut') return 8; if (v === 'leise') return 2; return null;
-}
-function tonToNum(v: string | null | undefined): number | null {
-  if (v === 'verspielt') return 8; if (v === 'serioes') return 2; return null;
-}
+// Query-Achsen sind seit v20 direkt 0–10 (parseIdentity). Die alten
+// Kategorie→Pol-Mapper (lautToNum/tonToNum) sind entfallen: sie haben jede
+// Query auf exakt 2 oder 8 gerastet und damit die Skala auf drei Punkte
+// reduziert — die Wolke konnte nie als Cursor-Startposition dienen.
 const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
 // Register → weicher Segment-Hint (NUR Boost, kein Filter — siehe Handoff-
@@ -738,6 +768,28 @@ const REGISTER_SEGMENT: Record<string, string> = {
   'clean-minimal': 'Clean_Botanical', 'natur-erdig': 'Clean_Botanical',
   'luxus-ritual': 'Quiet_Luxury', 'masse-funktional': 'GenZ_DTC',
 };
+
+// ── Trägt der Code laute Farbe? ─────────────────────────────────────
+// NICHT über Body_Behandlung entscheiden. Ein klarer Body kann sehr wohl
+// laut sein: Pink Liquid = Body #FFFFFF / Farbort 'liquid' / Cap+Akzent
+// #FF007F — die Farbe sitzt in der Flüssigkeit und am Cap, nicht im
+// Material. Zwei unabhängige Belege zählen: Sättigung in irgendeinem
+// Farb-Slot ODER ein Farbort ausserhalb des Körpers.
+function hexSaturation(hex: string): number {
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || '').trim());
+  if (!m) return 0;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  if (max === 0) return 0;
+  return (max - min) / max; // HSV-S: #FF007F → 1.0, #FFFFFF → 0
+}
+function codeCarriesColor(code: DesignCode): boolean {
+  const satt = [code.bodyHex, code.bodyHex2, code.akzentHex, code.capHex]
+    .some(h => hexSaturation(h) >= 0.45);
+  const farbortTraegt = !!code.farbort && !/koerper|körper/i.test(code.farbort);
+  return satt || farbortTraegt;
+}
 
 // Achsen-Distanz Query ↔ Code-Zone-0 → Fit-Score 0–100.
 function axisMatchScore(code: DesignCode, identity: Identity | null): { score: number; why: string } {
@@ -749,13 +801,13 @@ function axisMatchScore(code: DesignCode, identity: Identity | null): { score: n
     else s -= 4;
   }
   // Lautstärke (Q6, orthogonal) — PRIMÄRACHSE für "laut bunt".
-  const ql = lautToNum(identity?.temperatur_laut);
+  const ql = identity?.temp_laut ?? null;
   if (ql !== null && code.tempLaut !== null) {
     const d = Math.abs(code.tempLaut - ql);
     s += (1 - d / 10) * 30 - 12; notes.push(`laut·Δ${d}`);
   }
   // Ton
-  const qt = tonToNum(identity?.temperatur_ton);
+  const qt = identity?.temp_ton ?? null;
   if (qt !== null && code.tempTon !== null) {
     const d = Math.abs(code.tempTon - qt);
     s += (1 - d / 10) * 16 - 8;
@@ -832,8 +884,14 @@ function buildDesignLooks(
     if (wall.forceTintIfGlass && isKlar && baseIsGlas) {
       bodyBeh = 'getoent'; why += ' [wand→getönt]';
     }
-    // "laut" trägt über opak/getönt — klar-Look dämpfen (spiegelt Base-Boost).
-    if (wall.preferOpaque && isKlar) { score = Math.max(0, score - 15); why += ' [-klar@laut]'; }
+    // "laut" braucht Farbe — aber die Farbe kann am Cap, im Akzent oder in
+    // der Flüssigkeit sitzen statt im Material. Der alte pauschale Malus auf
+    // isKlar hat genau die Codes bestraft, die die Lautstärke so tragen:
+    // Pink Liquid (laut 8) verlor dadurch um 1 Punkt gegen F've (laut 5).
+    // Jetzt greift er nur noch bei wirklich farblosen klar-Looks.
+    if (wall.preferOpaque && isKlar && !codeCarriesColor(code)) {
+      score = Math.max(0, score - 15); why += ' [-klar-farblos@laut]';
+    }
 
     looks.push({
       code_id: code.id, code_name: code.name, brand: code.brand, produkt: code.produkt,
@@ -980,6 +1038,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         temperatur_laut: identity?.temperatur_laut || null,
         temperatur_ton: identity?.temperatur_ton || null,
         hero_ingredient: identity?.hero_ingredient || null,
+        // Cursor-Startposition — bewusst dasselbe Shape wie design_code im
+        // Render: { wert, gesetzt, quelle }. Jede künftige Achse liefert es
+        // identisch, damit die Führungs-Chips generisch daraus entstehen.
+        achsen: {
+          temp_laut: { wert: identity?.temp_laut ?? null, gesetzt: identity?.temp_laut != null, quelle: 'brief' },
+          temp_ton:  { wert: identity?.temp_ton  ?? null, gesetzt: identity?.temp_ton  != null, quelle: 'brief' },
+          register:  { wert: identity?.register  ?? null, gesetzt: !!identity?.register,        quelle: 'brief' },
+        },
       },
       // Wand — was gesperrt wurde + Render-Direktiven (SF-Gate liest force_tint)
       wall: {
