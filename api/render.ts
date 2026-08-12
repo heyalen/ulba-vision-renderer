@@ -892,7 +892,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
 
 
 // ── Main Handler ────────────────────────────────────────────────────
-export const config = { api: { bodyParser: true } };
+export const config = { api: { bodyParser: true }, maxDuration: 60 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
