@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v18-laut-cursor-worldfix';
+const RENDER_VERSION = 'v19-laut-register-hood';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -279,7 +279,7 @@ type Concept = {
   segment?: string | null;
   // Design_Code-Provenienz + deterministische Render-Werte (Base & Cap
   // zitieren dieselbe Quelle -> Kohaerenz per Konstruktion).
-  design_code?: { id: string; name: string; umleitung: string | null; laut?: number | null; can_quieter?: boolean; can_louder?: boolean };
+  design_code?: { id: string; name: string; umleitung: string | null; laut?: number | null; register?: string | null; can_quieter?: boolean; can_louder?: boolean };
   render?: { bodyLineEn: string; capHex: string | null; capFinishEn: string; akzentEn: string };
 };
 
@@ -531,6 +531,9 @@ async function assemblePrompt(
         // Achsen-Cursor: Temp_Laut als numerische Koordinate. null = ungetaggt
         // -> nimmt an keiner Nudge-Wahl teil (rastet nie versehentlich ein).
         tempLaut: (f['Temp_Laut'] != null && f['Temp_Laut'] !== '') ? Number(f['Temp_Laut']) : null,
+        // Register = die real getaggte Welt-Achse (clean-minimal, tech-premium, ...).
+        // Das Segment-Feld der Codes ist leer -> Register ankert die Nudge-Nachbarschaft.
+        register: (selectName(f['Register']) || '').toLowerCase() || null,
         anforderungen: anford,
         compatible: remaining.length === 0,
         umleitung,
@@ -702,9 +705,22 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // kompatibel zur Base -> gleiche Flasche, ruhigerer/lauterer Look. Kein
   // Nachbar in Richtung -> No-Op (Chip ist frontendseitig ohnehin disabled).
   let cursorCode = forcedCode;
+  // Nachbarschafts-Pool: Codes desselben REGISTERS (die befuellte Welt-Achse).
+  // Das Segment-Feld der Codes ist leer, deshalb war "within-world" bisher
+  // wirkungslos und der Nudge sprang ueber Welten (pink -> tech-klinisch).
+  // Hat der Anker-Code kein Register oder ist er allein darin, faellt die
+  // Nachbarschaft auf den codePool zurueck (lieber grober Nachbar als toter Chip).
+  const nudgeNeighborhood = (anchor: { register: string | null } | null | undefined) => {
+    if (anchor?.register) {
+      const sameReg = codePool.filter(c => c.register === anchor.register);
+      if (sameReg.length > 1) return sameReg;
+    }
+    return codePool;
+  };
   if (forcedCode && forcedCode.tempLaut != null && (lautNudge === 'quieter' || lautNudge === 'louder')) {
     const cur = forcedCode.tempLaut;
-    const cands = codePool.filter(c =>
+    const hood = nudgeNeighborhood(forcedCode);
+    const cands = hood.filter(c =>
       c.tempLaut != null && (lautNudge === 'quieter' ? c.tempLaut < cur : c.tempLaut > cur)
     );
     cands.sort((a, b) =>
@@ -715,12 +731,12 @@ OUTPUT ONLY this JSON, no fences, no prose:
 
   const code = cursorCode || codePool.find(c => c.id === parsed?.code_id) || codePool[0];
 
-  // Nachbar-Verfuegbarkeit fuer die Nudge-Chips: existiert im Pool ueberhaupt
-  // ein leiserer / lauterer Code als der aktuell gewaehlte? Steuert enabled/
-  // disabled der Chips im Frontend (kein toter Klick).
+  // Nachbar-Verfuegbarkeit fuer die Nudge-Chips — auf DERSELBEN Nachbarschaft
+  // berechnet, in der der Nudge sucht (sonst luegen die Chips).
   const codeLaut = code.tempLaut;
-  const canQuieter = codeLaut != null && codePool.some(c => c.tempLaut != null && c.tempLaut < codeLaut);
-  const canLouder  = codeLaut != null && codePool.some(c => c.tempLaut != null && c.tempLaut > codeLaut);
+  const codeHood = nudgeNeighborhood(code);
+  const canQuieter = codeLaut != null && codeHood.some(c => c.tempLaut != null && c.tempLaut < codeLaut);
+  const canLouder  = codeLaut != null && codeHood.some(c => c.tempLaut != null && c.tempLaut > codeLaut);
   const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id)
     ? parsed.szene_id
     : (SCENE_PRESETS.some(s => s.id === code.szeneId) ? code.szeneId : 'studio_soft');
@@ -858,7 +874,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     radar,
     zielprofil: zielProfil,
     segment: effectiveSegment,
-    design_code: { id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut, can_quieter: canQuieter, can_louder: canLouder },
+    design_code: { id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut, register: code.register, can_quieter: canQuieter, can_louder: canLouder },
     render: {
       bodyLineEn,
       capHex: code.capHex,
