@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v24-deliver-first';
+const RENDER_VERSION = 'v25-pro-300s';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -71,7 +71,7 @@ async function falEdit(imageUrls: string[], prompt: string, endpoint: string = F
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
     body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: 'auto' }),
-    timeoutMs: 40000, label: 'fal.ai edit',
+    timeoutMs: 120000, label: 'fal.ai edit',
   });
   if (!r.ok) throw new Error(`fal.ai edit (${endpoint}): ${await r.text()}`);
   const d = await r.json() as { images?: Array<{ url: string }> };
@@ -948,7 +948,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
 
 
 // ── Main Handler ────────────────────────────────────────────────────
-export const config = { api: { bodyParser: true }, maxDuration: 60 };
+export const config = { api: { bodyParser: true }, maxDuration: 300 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
