@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v23-timeout-58';
+const RENDER_VERSION = 'v24-deliver-first';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -71,7 +71,7 @@ async function falEdit(imageUrls: string[], prompt: string, endpoint: string = F
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
     body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: 'auto' }),
-    timeoutMs: 58000, label: 'fal.ai edit',
+    timeoutMs: 40000, label: 'fal.ai edit',
   });
   if (!r.ok) throw new Error(`fal.ai edit (${endpoint}): ${await r.text()}`);
   const d = await r.json() as { images?: Array<{ url: string }> };
@@ -1111,8 +1111,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       renderingUrl = await geminiEdit(imgs, renderingPrompt);
     }
 
-    // ── 7. Bytes: Composite direkt nutzen, sonst herunterladen ──────
-    const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 30000, label: 'fal img download' })).arrayBuffer());
+    // ── 7. AUSLIEFERN ZUERST, cachen danach (Hobby-60s-Haertung) ─────
+    // Frueher: erst 4 Airtable-Writes, DANN antworten. Bei fal ~40s + Writes
+    // ~8s riss die Funktion die 60s-Wand MITTEN im Cache-Schreiben -> Bild bei
+    // fal fertig, aber Client bekam nie eine Antwort ("Failed to fetch") und
+    // der Cache blieb leer. Jetzt: fal-URL sofort an den Client (fal-URLs leben
+    // ~1h, reicht zum Anzeigen). Cachen laeuft als Best-Effort DANACH; killt
+    // die 60s-Wand es, hat der Nutzer sein Bild trotzdem laengst.
+    if (!res.headersSent) {
+      res.status(200).json({
+        renderingUrl,
+        capRenderingUrl,
+        renderingPrompt,
+        briefUsed: effectiveBrief,
+        rejected: forbidden,
+        capId: resolvedCapId,
+        cacheId: null,          // Cache laeuft noch — beim naechsten Treffer gesetzt
+        cached: false,
+        fall,
+        tier,
+        concept,
+      });
+    }
+
+    // ── 8. Persistieren (Best-Effort, nach der Antwort) ─────────────
+    // Ab hier darf ALLES scheitern, ohne den Nutzer zu betreffen — die Antwort
+    // ist raus. Ein Fehler wird geloggt, nie geworfen. Beim naechsten identischen
+    // Aufruf wird schlicht neu gerendert (Cache-Miss), bis ein Schreiben durchkommt.
+    try {
+    const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 15000, label: 'fal img download' })).arrayBuffer());
     const base64 = imgBuffer.toString('base64');
 
     const createRes = await fetch(
@@ -1172,13 +1199,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
     if (!createData.id) {
-      // Cachen endgueltig fehlgeschlagen — Render trotzdem ausliefern (nie blocken).
-      console.error('Cache-Record Fehler (Render wird dennoch ausgeliefert):', JSON.stringify(createData.error || createData));
-      return res.status(200).json({
-        renderingUrl, capRenderingUrl, renderingPrompt, briefUsed: effectiveBrief,
-        rejected: forbidden, capId: resolvedCapId, cacheId: null,
-        cached: false, fall, tier, concept,
-      });
+      // Antwort ist laengst raus — Cache-Fehler nur loggen, nichts mehr senden.
+      console.error('Cache-Record Fehler (Antwort war bereits ausgeliefert):', JSON.stringify(createData.error || createData));
+      return;
     }
 
     const uploadRes = await fetch(
@@ -1228,22 +1251,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    return res.status(200).json({
-      renderingUrl,
-      capRenderingUrl,
-      renderingPrompt,
-      briefUsed: effectiveBrief,
-      rejected: forbidden,
-      capId: resolvedCapId,
-      cacheId: createData.id,
-      cached: false,
-      fall,
-      tier,
-      concept, // { konzept_name, story, rationale, produzierbar, szene_id }
-    });
+    // Erfolgreich gecacht — Antwort war schon raus, hier gibt es nichts zu senden.
+    } catch (cacheErr) {
+      // Best-Effort-Cache gescheitert (z.B. 60s-Wand mitten im Upload). Nutzer
+      // hat sein Bild; beim naechsten identischen Aufruf wird neu gerendert.
+      console.error('Cache-Persist fehlgeschlagen (Antwort war bereits raus):', cacheErr);
+    }
+    return;
   } catch (err) {
+    // Fehler VOR der Auslieferung (fal-Timeout, Airtable-Read, Assembly).
+    // Nur hier darf noch ein 500 an den Client — sonst ist headersSent true.
     const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
     console.error('Render error:', message);
-    return res.status(500).json({ error: message });
+    if (!res.headersSent) return res.status(500).json({ error: message });
+    return;
   }
 }
