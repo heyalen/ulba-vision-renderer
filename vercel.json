@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/render.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "api/harmonize/route.ts": {
       "memory": 1024,
