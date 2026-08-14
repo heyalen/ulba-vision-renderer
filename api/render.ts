@@ -1,6 +1,28 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 
+// ── fetch mit hartem Timeout ──────────────────────────────────────────────
+// Ohne dies wartet ein haengender externer Call (fal.ai / Airtable / Anthropic)
+// bis Vercel die Funktion bei 60s killt -> Client sieht nur "Failed to fetch",
+// das Log zeigt "No outgoing requests" (der Call war nie abgeschlossen). Mit
+// Timeout bricht der einzelne Call ab und der Fehler NENNT den Dienst, der haengt.
+async function fetchT(
+  url: string,
+  init: RequestInit & { timeoutMs?: number; label?: string } = {}
+): Promise<Response> {
+  const { timeoutMs = 25000, label, ...rest } = init;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...rest, signal: ctrl.signal });
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw new Error(`Timeout ${timeoutMs}ms: ${label || url}`);
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
 const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
@@ -19,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v21-umleitung-gate';
+const RENDER_VERSION = 'v22-fetch-timeout';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -45,10 +67,11 @@ type RenderFall = 'A' | 'B' | 'C' | 'D';
 
 // Ein Gemini-Edit-Aufruf (fal.ai) → Bild-URL.
 async function falEdit(imageUrls: string[], prompt: string, endpoint: string = FAL_GEMINI_EDIT): Promise<string> {
-  const r = await fetch(endpoint, {
+  const r = await fetchT(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
     body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: 'auto' }),
+    timeoutMs: 45000, label: 'fal.ai edit',
   });
   if (!r.ok) throw new Error(`fal.ai edit (${endpoint}): ${await r.text()}`);
   const d = await r.json() as { images?: Array<{ url: string }> };
@@ -95,9 +118,9 @@ function imgUrl(attachmentField: any): string | null {
 }
 
 async function airtableFetch(table: string, recordId: string): Promise<any> {
-  const res = await fetch(
+  const res = await fetchT(
     `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}/${recordId}`,
-    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` }, label: 'airtable get' }
   );
   if (!res.ok) throw new Error(`Airtable ${table}/${recordId}: ${res.status}`);
   return res.json();
@@ -109,9 +132,9 @@ async function airtableQuery(table: string, formula: string, fields: string[], m
     maxRecords: String(maxRecords),
   });
   fields.forEach(f => params.append('fields[]', f));
-  const res = await fetch(
+  const res = await fetchT(
     `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}?${params}`,
-    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` }, label: 'airtable query' }
   );
   if (!res.ok) throw new Error(`Airtable query ${table}: ${res.status}`);
   const data = await res.json();
@@ -119,9 +142,9 @@ async function airtableQuery(table: string, formula: string, fields: string[], m
 }
 
 async function airtableListAll(table: string): Promise<any[]> {
-  const res = await fetch(
+  const res = await fetchT(
     `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}?pageSize=100`,
-    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` }, label: 'airtable list' }
   );
   if (!res.ok) throw new Error(`Airtable list ${table}: ${res.status}`);
   const data = await res.json();
@@ -648,13 +671,14 @@ STEP 8 — radar: score the TARGET emotional direction of this product on each a
 OUTPUT ONLY this JSON, no fences, no prose:
 {"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const res = await fetchT('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': process.env.ANTHROPIC_API_KEY || '',
       'anthropic-version': '2023-06-01',
     },
+    timeoutMs: 30000, label: 'anthropic haiku',
     body: JSON.stringify({
       model: 'claude-haiku-4-5',
       max_tokens: 500,
@@ -1088,7 +1112,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ── 7. Bytes: Composite direkt nutzen, sonst herunterladen ──────
-    const imgBuffer: Buffer = Buffer.from(await (await fetch(renderingUrl)).arrayBuffer());
+    const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 30000, label: 'fal img download' })).arrayBuffer());
     const base64 = imgBuffer.toString('base64');
 
     const createRes = await fetch(
@@ -1182,7 +1206,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // wird der Render trotzdem ausgeliefert.
     if (capRenderingUrl) {
       try {
-        const capBuf = Buffer.from(await (await fetch(capRenderingUrl)).arrayBuffer());
+        const capBuf = Buffer.from(await (await fetchT(capRenderingUrl, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
         const capUploadRes = await fetch(
           `https://content.airtable.com/v0/${AIRTABLE_BASE}/${createData.id}/${CACHE_CAP_IMAGE_FIELD}/uploadAttachment`,
           {
