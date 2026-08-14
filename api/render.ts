@@ -19,7 +19,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v20-klar-liquid-farbe';
+const RENDER_VERSION = 'v21-umleitung-gate';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -457,9 +457,12 @@ async function assemblePrompt(
   // Fasst Einfaerben + Lackieren zu "Koerper faerbbar" zusammen (zwei Wege,
   // ein Ziel: farbiger Koerper). Plastik = immer ok.
   const koerperFarbe = (): CapState => {
-    if (isPlasticGate) return 'ok';
-    if (confirmed.has('einfaerbbar') || confirmed.has('lackierbar')) return 'ok';
+    // Reihenfolge ist die Aussage: ein explizites "geht nicht" des Lieferanten
+    // schlaegt jede Material-Vermutung. Vorher stand isPlasticGate ZUERST und
+    // hat SF_Ausgeschlossen bei Plastikteilen lautlos ueberschrieben.
     if (excluded.has('einfaerbbar') && excluded.has('lackierbar')) return 'excluded';
+    if (confirmed.has('einfaerbbar') || confirmed.has('lackierbar')) return 'ok';
+    if (isPlasticGate) return 'ok';
     return 'unknown';
   };
   const capState = (cap: string): CapState => {
@@ -517,7 +520,11 @@ async function assemblePrompt(
       // UNBEKANNT bei Frost/Mattierung: keine sichere Ausweichform -> Code fuer
       // dieses System nicht anbieten (lieber nichts als falsch versprechen).
       const blockingUnknown = unknown.filter(a => a === 'braucht_frostbar');
-      const remaining = [...hardExcluded, ...blockingUnknown];
+      // Die Umleitung LOEST Koerper-Farb-Anforderungen (Farbe sitzt jetzt in
+      // der Fluessigkeit, das klare Gebinde kann jeder liefern). Sie duerfen
+      // den Code nicht mehr blockieren — sonst ist die Umleitung tote Logik.
+      const geloest = new Set(umleitung ? ['braucht_einfaerbbar', 'braucht_opak'] : []);
+      const remaining = [...hardExcluded, ...blockingUnknown].filter(a => !geloest.has(a));
       return {
         id: r.id,
         name: String(f['Name'] || ''),
