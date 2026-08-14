@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v25-pro-300s';
+const RENDER_VERSION = 'v26-nudge-noop';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -744,14 +744,14 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // Nachbarschafts-Pool: Codes desselben REGISTERS (die befuellte Welt-Achse).
   // Das Segment-Feld der Codes ist leer, deshalb war "within-world" bisher
   // wirkungslos und der Nudge sprang ueber Welten (pink -> tech-klinisch).
-  // Hat der Anker-Code kein Register oder ist er allein darin, faellt die
-  // Nachbarschaft auf den codePool zurueck (lieber grober Nachbar als toter Chip).
-  const nudgeNeighborhood = (anchor: { register: string | null } | null | undefined) => {
-    if (anchor?.register) {
-      const sameReg = codePool.filter(c => c.register === anchor.register);
-      if (sameReg.length > 1) return sameReg;
-    }
-    return codePool;
+  // Fix A (Welt-Sprung, 14.08.): Ist der Anker allein in seinem Register, gibt
+  // es KEINEN globalen Fallback mehr — der Chip wird ausgegraut (No-Op) statt in
+  // eine fremde Welt zu springen. Die grauen Chips sind ab jetzt die Landkarte
+  // der Dichte-Luecken (-> Matrix-Diagnose + Code-Dichte, Roadmap-Punkt 2).
+  const nudgeNeighborhood = (anchor: { id?: string; register: string | null } | null | undefined) => {
+    if (anchor?.register) return codePool.filter(c => c.register === anchor.register);
+    // Anker ohne Register -> keine identifizierbare Welt -> nur der Anker selbst.
+    return anchor?.id ? codePool.filter(c => c.id === anchor.id) : codePool;
   };
   if (forcedCode && forcedCode.tempLaut != null && (lautNudge === 'quieter' || lautNudge === 'louder')) {
     const cur = forcedCode.tempLaut;
