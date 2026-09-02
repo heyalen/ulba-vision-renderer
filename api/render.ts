@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v26-nudge-noop';
+const RENDER_VERSION = 'v27-dryrun-prosa';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -302,7 +302,12 @@ type Concept = {
   segment?: string | null;
   // Design_Code-Provenienz + deterministische Render-Werte (Base & Cap
   // zitieren dieselbe Quelle -> Kohaerenz per Konstruktion).
-  design_code?: { id: string; name: string; umleitung: string | null; laut?: number | null; register?: string | null; can_quieter?: boolean; can_louder?: boolean };
+  design_code?: {
+    id: string; name: string; umleitung: string | null;
+    laut?: number | null; register?: string | null;
+    can_quieter?: boolean; can_louder?: boolean;
+    beschreibung?: string | null; wirkstoff_welt?: string[]; zielgruppe?: string[];
+  };
   render?: { bodyLineEn: string; capHex: string | null; capFinishEn: string; akzentEn: string };
 };
 
@@ -402,7 +407,25 @@ type DesignCodeRec = {
   anforderungen: string[];
   compatible: boolean;
   umleitung: string | null; // gesetzt, wenn Konfliktregel Typ B umgeleitet hat
+  // v27 — Agentursprache: die kuratierte Prosa des Codes plus die beiden
+  // inhaltlichen Achsen. Gehen als Behauptungs-Material ins Frontend; der
+  // Render benutzt sie NICHT (keine Prompt-Aenderung, kein Bild-Effekt).
+  wirkungBeschreibung: string | null;
+  wirkstoffWelt: string[];
+  zielgruppe: string[];
 };
+
+// Feldnamen-Fallback: die drei neuen Felder werden hier zum ersten Mal
+// gelesen. Statt eine Schreibweise zu raten und still null zu liefern,
+// probieren wir die plausiblen Namen durch — ein falsch geratener Name
+// waere ein lautloser Ausfall, genau wie das leere Status-Feld.
+function fieldAny(f: any, names: string[]): any {
+  for (const n of names) {
+    const v = f[n];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
+}
 
 function parseJsonArray(raw: any): string[] {
   if (!raw) return [];
@@ -572,6 +595,12 @@ async function assemblePrompt(
         anforderungen: anford,
         compatible: remaining.length === 0,
         umleitung,
+        wirkungBeschreibung: (() => {
+          const v = fieldAny(f, ['Wirkung_Beschreibung', 'Wirkung_Beschreibung ', 'Wirkungsbeschreibung']);
+          return v ? String(v).trim() : null;
+        })(),
+        wirkstoffWelt: multiSelectNames(fieldAny(f, ['Wirkstoff_Welt', 'Wirkstoff-Welt', 'Wirkstoff'])),
+        zielgruppe: multiSelectNames(fieldAny(f, ['Zielgruppe', 'Zielgruppe_Archetype', 'Archetype', 'Zielgruppen_Archetyp'])),
       };
     });
 
@@ -930,7 +959,14 @@ OUTPUT ONLY this JSON, no fences, no prose:
     radar,
     zielprofil: zielProfil,
     segment: effectiveSegment,
-    design_code: { id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut, register: code.register, can_quieter: canQuieter, can_louder: canLouder },
+    design_code: {
+      id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut,
+      register: code.register, can_quieter: canQuieter, can_louder: canLouder,
+      // v27 — Material fuer die Behauptung im Frontend.
+      beschreibung: code.wirkungBeschreibung,
+      wirkstoff_welt: code.wirkstoffWelt,
+      zielgruppe: code.zielgruppe,
+    },
     render: {
       bodyLineEn,
       capHex: code.capHex,
@@ -967,6 +1003,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     forceCodeId = null,
     lautNudge = null,
     nocache = false,
+    dryRun = false,
   } = req.body as {
     systemId: string;
     query: string;
@@ -977,6 +1014,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     forceCodeId?: string | null;
     lautNudge?: string | null;
     nocache?: boolean;
+    // v27 — Behauptung ohne Bild: gleiche Ableitung, gleicher Code, kein
+    // fal.ai-Call. Der teure Schritt bleibt hinter dem zweiten Klick.
+    dryRun?: boolean;
   };
 
   if (!systemId || !query) {
@@ -994,7 +1034,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment, forceCodeId, lautNudge);
     let cached: any[] = [];
     // Dev-Bypass: nocache=true ueberspringt das Cache-Lesen -> immer frischer Render.
-    if (!nocache) try {
+    // dryRun liest den Cache nicht: der Cache haelt fertige BILDER. Wir
+    // wollen hier nur die Ableitung, und die soll denselben Weg nehmen wie
+    // beim echten Render — sonst behauptet der Screen etwas anderes als
+    // das Bild danach zeigt.
+    if (!nocache && !dryRun) try {
       cached = await airtableQuery(
         CACHE_TABLE,
         `{Cache_Key}='${key}'`,
@@ -1069,6 +1113,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
       await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge);
+
+    // ── 5b. dryRun: Behauptung ausliefern, NICHT rendern ────────────
+    // Die Ableitung ist komplett (Code gewaehlt, Konzept gebaut) — nur das
+    // Bild fehlt. Ein Gehirn, zwei Ausgaenge: derselbe assemblePrompt-Lauf
+    // liefert erst die Behauptung, beim zweiten Aufruf (ohne dryRun) das
+    // Bild. Damit kann der Screen nie etwas anderes sagen als der Render.
+    if (dryRun) {
+      return res.status(200).json({
+        dryRun: true,
+        renderingUrl: null,
+        capRenderingUrl: null,
+        renderingPrompt: null,
+        briefUsed: effectiveBrief,
+        rejected: forbidden,
+        capId: resolvedCapId,
+        cached: false,
+        fall,
+        tier,
+        concept,
+      });
+    }
 
     // ── 6. Render ───────────────────────────────────────────────────
     let renderingUrl: string;
