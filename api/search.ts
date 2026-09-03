@@ -713,6 +713,7 @@ interface DesignCode {
   id: string;
   name: string;
   segment: string[];
+  wirkstoffWelt: string[]; // v28 — Herkunfts-Wirkstoff des Codes (Airtable Wirkstoff_Welt)
   // Zone 0 — Achsen (steuern Match + später Nudge)
   register: string;
   tempLaut: number | null;
@@ -751,6 +752,7 @@ function extractDesignCode(rec: any): DesignCode {
     id: rec.id,
     name: f['Name'] || rec.id,
     segment: multiSelectNames(f['Segment']),
+    wirkstoffWelt: multiSelectNames(f['Wirkstoff_Welt']),
     register: selectName(f['Register']),
     tempLaut: num(f['Temp_Laut']),
     tempTon: num(f['Temp_Ton']),
@@ -785,6 +787,28 @@ function extractDesignCode(rec: any): DesignCode {
 // reduziert — die Wolke konnte nie als Cursor-Startposition dienen.
 const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
+// v28 — Brief-Wirkstoff → Wirkstoff_Welt-Präfix. parseIdentity liefert
+// hero_ingredient als Freitext ("vitamin c"); hier wird er auf das
+// Tag-Präfix der Codes gemappt (startsWith, tolerant gegen Suffix-Varianten
+// wie Vitamin_C_Glow). Deterministisch — kein LLM ("Berechne, was
+// berechenbar ist").
+const WIRKSTOFF_PREFIX: [RegExp, string][] = [
+  [/vitamin\s*c|ascorb/i, 'vitamin_c'],
+  [/retinol/i, 'retinol'],
+  [/hyaluron|hydrat/i, 'hyaluron'],
+  [/sensitiv|barriere/i, 'sensitiv'],
+  [/akne|kl(ä|ae)rung|salicyl|bha/i, 'akne'],
+  [/botani|pflanz/i, 'botanisch'],
+  [/sonne|spf|\buv\b/i, 'sonne'],
+  [/haar|shampoo/i, 'haar'],
+  [/duft|parfum/i, 'duft'],
+];
+function wirkstoffTag(hero: string | null | undefined): string | null {
+  if (!hero) return null;
+  for (const [re, pre] of WIRKSTOFF_PREFIX) if (re.test(hero)) return pre;
+  return null;
+}
+
 // Register → weicher Segment-Hint (NUR Boost, kein Filter — siehe Handoff-
 // Abweichung: hartes Segment-Gate würde den Payoff killen).
 const REGISTER_SEGMENT: Record<string, string> = {
@@ -818,17 +842,20 @@ function codeCarriesColor(code: DesignCode): boolean {
 // Achsen-Distanz Query ↔ Code-Zone-0 → Fit-Score 0–100.
 function axisMatchScore(code: DesignCode, identity: Identity | null): { score: number; why: string } {
   let s = 50; const notes: string[] = [];
-  // Register: schwaches Signal (kategorial + Haiku-Register schwankt) → kleiner
-  // Boost. Die kontinuierlichen Temp-Achsen tragen die Selektion, nicht Register.
+  // v28 — Welt vor Laut. Der alte Kommentar („Register schwaches Signal,
+  // Haiku-Register schwankt") stammte aus der Zeit verschmutzter Labels;
+  // seit Skript 5 v3.0 sind die Register sauber, und die WELT ist das
+  // Primärsignal: Spanne 30 (+20/−10) gegen Laut-Spanne 16. Ein Code in der
+  // falschen Welt kann nicht mehr über die Laut-Achse gewinnen.
   if (identity?.register && code.register) {
-    if (identity.register === code.register) { s += 12; notes.push('register✓'); }
-    else s -= 4;
+    if (identity.register === code.register) { s += 20; notes.push('register✓'); }
+    else s -= 10;
   }
-  // Lautstärke (Q6, orthogonal) — PRIMÄRACHSE für "laut bunt".
+  // Lautstärke: Feinposition INNERHALB der Welt — bewusst unter Register.
   const ql = identity?.temp_laut ?? null;
   if (ql !== null && code.tempLaut !== null) {
     const d = Math.abs(code.tempLaut - ql);
-    s += (1 - d / 10) * 30 - 12; notes.push(`laut·Δ${d}`);
+    s += (1 - d / 10) * 16 - 6; notes.push(`laut·Δ${d}`);
   }
   // Ton
   const qt = identity?.temp_ton ?? null;
@@ -839,6 +866,14 @@ function axisMatchScore(code: DesignCode, identity: Identity | null): { score: n
   // Segment-Boost (weich)
   const segHint = identity?.register ? REGISTER_SEGMENT[identity.register] : null;
   if (segHint && code.segment.includes(segHint)) { s += 6; notes.push('seg+'); }
+  // v28 — Wirkstoff-Boost: nennt der Brief eine Wirkstoff-Welt, gewinnen
+  // Codes aus dieser Welt (+10). 'Universal' zählt schwach (+4). Kein
+  // Wirkstoff im Brief → neutral, keine Strafe für andere Welten.
+  const wtag = wirkstoffTag(identity?.hero_ingredient);
+  if (wtag && code.wirkstoffWelt.length) {
+    if (code.wirkstoffWelt.some(w => w.toLowerCase().startsWith(wtag))) { s += 10; notes.push('wirkstoff✓'); }
+    else if (code.wirkstoffWelt.includes('Universal')) { s += 4; }
+  }
   return { score: clamp(s), why: notes.join(' ') };
 }
 
