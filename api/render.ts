@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v27-dryrun-prosa';
+const RENDER_VERSION = 'v28-wirkstoff-rank';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -673,8 +673,13 @@ async function assemblePrompt(
   // Segment-Feinfilter macht Haiku selbst (Instruktion) + harte Validierung danach.
   const codeCandidates = designCodes.filter(c => c.compatible);
   if (codeCandidates.length === 0) throw new Error('Kein kompatibler aktiver Design_Code vorhanden');
+  // v28 (§7.4): Wirkstoff-Welt + Wirkung_Beschreibung reisen pro Kandidat in
+  // den Selection-Prompt. Haiku sieht damit die reale Regalwirkung jedes
+  // Codes (kuratierte Prosa) statt nur Hex-Werte — und die Herkunfts-Welt,
+  // gegen die die INGREDIENT RULE prüft. Prosa auf 130 Zeichen gekappt:
+  // bei ~30 Kandidaten bleibt der Prompt klein.
   const designCodeList = codeCandidates.map(c =>
-    `- code_id: ${c.id} | seg: ${c.segments.join('/') || '-'} | ${c.name} | body: ${c.bodyBehandlung}/${c.farbort}${c.bodyHex ? ` ${c.bodyHex}` : ''} | cap: ${c.capHex || 'preserve'} ${c.capFinish} | akzent: ${c.akzentCue} | typo: ${c.typoHaltung || '-'}${c.umleitung ? ' | (umgeleitet)' : ''}`
+    `- code_id: ${c.id} | seg: ${c.segments.join('/') || '-'} | ${c.name} | body: ${c.bodyBehandlung}/${c.farbort}${c.bodyHex ? ` ${c.bodyHex}` : ''} | cap: ${c.capHex || 'preserve'} ${c.capFinish} | akzent: ${c.akzentCue} | typo: ${c.typoHaltung || '-'}${c.wirkstoffWelt.length ? ` | wirkstoff: ${c.wirkstoffWelt.join('/')}` : ''}${c.wirkungBeschreibung ? ` | wirkung: ${c.wirkungBeschreibung.slice(0, 130)}` : ''}${c.umleitung ? ' | (umgeleitet)' : ''}`
   ).join('\n');
 
   const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
@@ -693,7 +698,7 @@ PALETTES:
 ${paletteList}
 STEP 3 — finish: one of [${finishes.join(', ')}].
 STEP 4 — akzent: one of [${akzente.join(', ')}].
-STEP 4b — code_id: choose EXACTLY ONE curated design code from DESIGN CODES below. Its "seg" must contain your chosen segment. Pick the code whose design attitude (treatment, cap relation, accent, typo) best serves the brief's positioning — the code is the design DECISION; body colour, cap colour and accent will all be taken from it so the result is coherent by construction. Codes marked (umgeleitet) still work on this product via a redirected expression — they remain valid choices.
+STEP 4b — code_id: choose EXACTLY ONE curated design code from DESIGN CODES below. Its "seg" must contain your chosen segment. Pick the code whose design attitude (treatment, cap relation, accent, typo) best serves the brief's positioning — the code is the design DECISION; body colour, cap colour and accent will all be taken from it so the result is coherent by construction. INGREDIENT RULE (hard): if the brief names an active or ingredient world (vitamin c, retinol, hyaluron, barrier, acne, botanical, sun, hair, fragrance), you MUST prefer a code whose "wirkstoff" contains that world when one is available — a vitamin-c brief must never land on a retinol-world code while a vitamin-c code is listed. Use each code's "wirkung" prose to judge its real shelf effect and ground your herleitung in it. Codes marked (umgeleitet) still work on this product via a redirected expression — they remain valid choices.
 DESIGN CODES:
 ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
