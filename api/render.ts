@@ -590,7 +590,8 @@ async function assemblePrompt(
         // -> nimmt an keiner Nudge-Wahl teil (rastet nie versehentlich ein).
         tempLaut: (f['Temp_Laut'] != null && f['Temp_Laut'] !== '') ? Number(f['Temp_Laut']) : null,
         // Register = die real getaggte Welt-Achse (clean-minimal, tech-premium, ...).
-        // Das Segment-Feld der Codes ist leer -> Register ankert die Nudge-Nachbarschaft.
+        // Ankert die Nudge-Nachbarschaft. (Hinweis 02.09.: Segment ist inzwischen
+        // 35/35 getaggt — der alte Kommentar 'Segment-Feld ist leer' war veraltet.)
         register: (selectName(f['Register']) || '').toLowerCase() || null,
         anforderungen: anford,
         compatible: remaining.length === 0,
@@ -600,7 +601,10 @@ async function assemblePrompt(
           return v ? String(v).trim() : null;
         })(),
         wirkstoffWelt: multiSelectNames(fieldAny(f, ['Wirkstoff_Welt', 'Wirkstoff-Welt', 'Wirkstoff'])),
-        zielgruppe: multiSelectNames(fieldAny(f, ['Zielgruppe', 'Zielgruppe_Archetype', 'Archetype', 'Zielgruppen_Archetyp'])),
+        // Zielgruppe == das Feld 'Segment' der Codes (Klinisch_Derma, GenZ_DTC,
+        // Clean_Botanical, Quiet_Luxury). Wird oben schon als `segments`
+        // gelesen — hier nur unter sprechendem Namen weitergereicht.
+        zielgruppe: multiSelectNames(f['Segment']),
       };
     });
 
