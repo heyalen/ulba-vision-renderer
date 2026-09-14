@@ -995,12 +995,75 @@ OUTPUT ONLY this JSON, no fences, no prose:
 // ── Main Handler ────────────────────────────────────────────────────
 export const config = { api: { bodyParser: true }, maxDuration: 300 };
 
+// ── v29 — Reflect: Rückspiegelung fürs geführte Briefing (Beat 1) ───────
+// Deterministisch = Wahrheit (Register/Laut/Wirkstoff kommen berechnet vom
+// Frontend), Haiku = Stimme. Ein kurzer Call — kein Airtable, kein fal.ai,
+// kein Cache. Kein RENDER_VERSION-Bump: der Render-Output bleibt unberührt,
+// also bleiben alle Bild-Cache-Keys gültig.
+async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number }): Promise<{ lesart: string; weil: string } | null> {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  const lautWort = input.laut == null ? 'noch offen'
+    : input.laut >= 7 ? 'laut' : input.laut >= 6 ? 'eher laut'
+    : input.laut <= 3 ? 'sehr leise' : input.laut <= 4 ? 'eher leise' : 'ausgewogen';
+  const system = `Du bist Kreativdirektorin einer renommierten Design-Agentur für Beauty-Verpackung. Ein Kunde brieft dich im Gespräch. Du spielst zurück, was du verstanden hast — kurz, warm, präzise, in seinen eigenen Worten, mit einem sichtbaren „weil".
+
+ANKER (vom System berechnet, verbindlich — nicht widersprechen, nicht erfinden):
+- Register/Welt: ${input.register || 'noch offen'}
+- Lautstärke: ${lautWort}${input.laut != null ? ` (${input.laut}/10)` : ''}
+- Wirkstoff/Produktwelt: ${input.wirkstoff || 'nicht genannt'}
+- Gesprächsrunde: ${input.runde} von 3
+
+REGELN:
+1. Bedeutungs-Ebene nur. NIE Farben, Finishes, Materialien, Veredelungen, Typografie oder konkrete Design-Lösungen nennen.
+2. Zitiere oder spiegle die Worte des Kunden — er soll sich verstanden fühlen, nicht analysiert.
+3. "lesart": EIN Satz, beginnt mit „Verstanden —". Die Verdichtung dessen, was er gesagt hat.
+4. "weil": EIN Satz, beginnt mit „Weil". Die Konsequenz für die Richtung — nur laut/leise, ruhig/energisch, Nähe/Distanz, Ernst/Leichtigkeit. Keine Form.
+5. Ist ein Anker „noch offen", behaupte ihn nicht — bleib bei dem, was da ist.
+6. Keine Frage stellen. Keine Floskeln. Deutsch, du-Form.
+
+ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
+{"lesart":"…","weil":"…"}`;
+  const user = `Frage, die ich gestellt habe: ${input.frage}\n\nBisheriger Brief des Kunden (alle Antworten): ${input.brief}`;
+  try {
+    const res = await fetchT('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY || '', 'anthropic-version': '2023-06-01' },
+      timeoutMs: 15000, label: 'anthropic haiku reflect',
+      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 220, temperature: 0.4, system, messages: [{ role: 'user', content: user }] }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { content: Array<{ text: string }> };
+    const raw = (data.content?.[0]?.text || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim();
+    const p = JSON.parse(raw);
+    const lesart = typeof p?.lesart === 'string' ? p.lesart.trim() : '';
+    const weil = typeof p?.weil === 'string' ? p.weil.trim() : '';
+    if (!lesart || !weil) return null;
+    return { lesart, weil };
+  } catch { return null; }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  // ── v29 — Reflect-Modus (Beat 1): nur die Stimme, keine Pipeline ──────
+  if ((req.body as any)?.reflect === true) {
+    const b = req.body as { brief?: string; frage?: string; register?: string | null; laut?: number | null; wirkstoff?: string | null; runde?: number };
+    const brief = (b.brief || '').trim();
+    if (!brief) return res.status(400).json({ error: 'brief ist erforderlich' });
+    const out = await reflektiere({
+      brief, frage: (b.frage || '').trim(),
+      register: b.register ?? null,
+      laut: typeof b.laut === 'number' ? b.laut : null,
+      wirkstoff: b.wirkstoff ?? null,
+      runde: typeof b.runde === 'number' ? b.runde : 1,
+    });
+    // Haiku aus → 200 mit null: das Frontend behält die deterministische Lesart.
+    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null });
+  }
 
   const {
     systemId,
