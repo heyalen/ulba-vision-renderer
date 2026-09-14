@@ -1000,7 +1000,9 @@ export const config = { api: { bodyParser: true }, maxDuration: 300 };
 // Frontend), Haiku = Stimme. Ein kurzer Call — kein Airtable, kein fal.ai,
 // kein Cache. Kein RENDER_VERSION-Bump: der Render-Output bleibt unberührt,
 // also bleiben alle Bild-Cache-Keys gültig.
-async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number }): Promise<{ lesart: string; weil: string } | null> {
+const REFLECT_REGISTER = ['clean-minimal', 'pharma-klinisch', 'natur-erdig', 'luxus-ritual', 'tech-premium', 'masse-funktional'];
+const REFLECT_WORTE = ['ruhig', 'laut', 'warm', 'kühl', 'klinisch', 'natürlich', 'edel', 'verspielt', 'mutig', 'reduziert', 'technisch', 'alltagsnah'];
+async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number }): Promise<{ lesart: string; weil: string; register: string | null; laut: number | null; worte: string[] } | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   const lautWort = input.laut == null ? 'noch offen'
     : input.laut >= 7 ? 'laut' : input.laut >= 6 ? 'eher laut'
@@ -1013,6 +1015,8 @@ ANKER (vom System berechnet, verbindlich — nicht widersprechen, nicht erfinden
 - Wirkstoff/Produktwelt: ${input.wirkstoff || 'nicht genannt'}
 - Gesprächsrunde: ${input.runde} von 3
 
+Die Anker sind aus wörtlichen Stichwörtern berechnet. Echte Sätze enthalten diese Wörter selten — steht ein Anker auf "noch offen", LIES ihn aus dem Sinn des Briefs und gib ihn unten zurück.
+
 REGELN:
 1. Bedeutungs-Ebene nur. NIE Farben, Finishes, Materialien, Veredelungen, Typografie oder konkrete Design-Lösungen nennen.
 2. Zitiere oder spiegle die Worte des Kunden — er soll sich verstanden fühlen, nicht analysiert.
@@ -1020,9 +1024,13 @@ REGELN:
 4. "weil": EIN Satz, beginnt mit „Weil". Die Konsequenz für die Richtung — nur laut/leise, ruhig/energisch, Nähe/Distanz, Ernst/Leichtigkeit. Keine Form.
 5. Ist ein Anker „noch offen", behaupte ihn nicht — bleib bei dem, was da ist.
 6. Keine Frage stellen. Keine Floskeln. Deutsch, du-Form.
+7. "register": die Welt, in der die Marke spielt — GENAU einer dieser Werte oder null: ${REFLECT_REGISTER.join(' | ')}. Nur setzen, wenn der Brief es hergibt.
+8. "laut": Lautstärke 0–10 (0 = Aesop-Flüstern, 5 = ausgewogen, 10 = Glossier-Pink-Schrei), oder null wenn unklar.
+9. "worte": 1–4 Wörter NUR aus dieser Liste, die zum Brief passen: ${REFLECT_WORTE.join(', ')}. Leeres Array, wenn keines passt.
+Bei 7–9 gilt: lieber null/leer als geraten.
 
 ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
-{"lesart":"…","weil":"…"}`;
+{"lesart":"…","weil":"…","register":null,"laut":null,"worte":[]}`;
   const user = `Frage, die ich gestellt habe: ${input.frage}\n\nBisheriger Brief des Kunden (alle Antworten): ${input.brief}`;
   try {
     const res = await fetchT('https://api.anthropic.com/v1/messages', {
@@ -1038,7 +1046,11 @@ ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
     const lesart = typeof p?.lesart === 'string' ? p.lesart.trim() : '';
     const weil = typeof p?.weil === 'string' ? p.weil.trim() : '';
     if (!lesart || !weil) return null;
-    return { lesart, weil };
+    const register = typeof p?.register === 'string' && REFLECT_REGISTER.includes(p.register) ? p.register : null;
+    const lautRaw = typeof p?.laut === 'number' ? Math.round(p.laut) : null;
+    const laut = lautRaw != null && Number.isFinite(lautRaw) ? Math.max(0, Math.min(10, lautRaw)) : null;
+    const worte = Array.isArray(p?.worte) ? p.worte.filter((w: any) => typeof w === 'string' && REFLECT_WORTE.includes(w)).slice(0, 4) : [];
+    return { lesart, weil, register, laut, worte };
   } catch { return null; }
 }
 
@@ -1062,7 +1074,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       runde: typeof b.runde === 'number' ? b.runde : 1,
     });
     // Haiku aus → 200 mit null: das Frontend behält die deterministische Lesart.
-    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null });
+    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null, register: out?.register ?? null, laut: out?.laut ?? null, worte: out?.worte ?? [] });
   }
 
   const {
