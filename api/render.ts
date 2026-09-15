@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v34-ausspraegung';
+const RENDER_VERSION = 'v35-farbort';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -100,14 +100,14 @@ function queryHash(q: string): string {
   return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
 }
 
-function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null, codeId: string | null = null, lautNudge: string | null = null): string {
+function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null, codeId: string | null = null, lautNudge: string | null = null, farbortNudge: string | null = null): string {
   // RENDER_VERSION zuerst: aendert sich der Render-Code, aendert sich jeder Key.
   // codeId trennt verschiedene Looks auf DEMSELBEN Base+Query (sonst kollidiert
   // der Cache und liefert allen Looks denselben Render).
   // lautNudge: der Nudge leitet einen ANDEREN Code ab als forceCodeId (der
   // Cursor haengt am alten Code). Ohne den Nudge im Key kollidiert der
   // Vor-Nudge-Render mit dem Nach-Nudge-Render unter demselben forceCodeId.
-  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}${codeId ? `_c${codeId.slice(-6)}` : ''}${lautNudge ? `_n${lautNudge[0]}` : ''}`;
+  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}${codeId ? `_c${codeId.slice(-6)}` : ''}${lautNudge ? `_n${lautNudge[0]}` : ''}${farbortNudge ? `_f${farbortNudge[0]}` : ''}`;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -330,6 +330,7 @@ type Concept = {
   // zitieren dieselbe Quelle -> Kohaerenz per Konstruktion).
   design_code?: {
     id: string; name: string; umleitung: string | null; brand?: string | null; produkt?: string | null; stufe?: number; verlust?: string[];
+    farbort?: string; can_koerper?: boolean; can_liquid?: boolean;
     laut?: number | null; register?: string | null;
     can_quieter?: boolean; can_louder?: boolean;
     beschreibung?: string | null; wirkstoff_welt?: string[]; zielgruppe?: string[];
@@ -486,7 +487,8 @@ async function assemblePrompt(
   capFields: any | null,
   reqSegment: string | null = null,
   forceCodeId: string | null = null,
-  lautNudge: string | null = null
+  lautNudge: string | null = null,
+  farbortNudge: 'koerper' | 'liquid' | null = null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
   const [produktRegeln, farbpalettenAll, designCodesAll] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
@@ -952,23 +954,43 @@ OUTPUT ONLY this JSON, no fences, no prose:
     const mx = Math.max(rr, gg, bb), mn = Math.min(rr, gg, bb);
     return mx === 0 ? true : (mx - mn) / mx < 0.15;
   };
+  /* Welche Traeger kann DIESES Teil? koerper = Koerper faerbbar;
+     liquid = Wand durchsichtig (Glas oder klares Plastik). */
+  const klarFaehig = isGlassBody || /pet|petg|acryl|surlyn/.test(matGate);
+  const farbortMoeglich = (_c: DesignCodeRec) => ({
+    koerper: colorable || isPlastic,
+    liquid: klarFaehig,
+  });
   const codeBodyHexFuellung = istFarblos(code.bodyHex)
     ? (code.akzentHex && !istFarblos(code.akzentHex) ? code.akzentHex
        : code.capHex && !istFarblos(code.capHex) ? code.capHex : codeBodyHex)
     : codeBodyHex;
+  /* v35 — Seitliche Ausspraegung. Punkt 11 kannte bisher nur ABWAERTS (ein
+     Traeger faellt weg). Derselbe Code kann seine Farbe aber auch WOANDERS
+     tragen, auf gleicher Hoehe: Pink Play als klare Flasche mit rosa Serum
+     ODER als opake rosa Flasche. Beides ist Pink Play. Der Nudge wechselt nur
+     den Traeger — Code, Farben und Haltung bleiben identisch. */
+  let codeBodyBehandlung = code.bodyBehandlung;
+  let codeFarbort = code.farbort;
+  if (farbortNudge === 'koerper' && farbortMoeglich(code).koerper) {
+    codeBodyBehandlung = 'opak_recolor'; codeFarbort = 'koerper';
+  } else if (farbortNudge === 'liquid' && farbortMoeglich(code).liquid) {
+    codeBodyBehandlung = 'klar_liquid_farbe'; codeFarbort = 'liquid';
+  }
+  const code2 = { ...code, bodyBehandlung: codeBodyBehandlung, farbort: codeFarbort };
   let bodyLineEn: string;
-  switch (code.bodyBehandlung) {
+  switch (code2.bodyBehandlung) {
     case 'klar':
       // Farbort MUSS hier gelesen werden. Ein 'klar'-Code mit Farbort 'liquid'
       // (z.B. Pink Liquid: Body #FFFFFF, Cap+Akzent #FF007F, Farbe im Serum)
       // hat seine gesamte Lautstaerke in der Fluessigkeit — ohne diese Abfrage
       // fiel sie lautlos weg und der lauteste Code rendert als leere Flasche.
-      bodyLineEn = code.farbort === 'liquid'
+      bodyLineEn = code2.farbort === 'liquid'
         ? `Keep the body as clear transparent material exactly as in the reference image — do not tint or recolor the material itself. The bottle is filled with liquid in a saturated ${codeBodyHexFuellung}; the colour comes entirely from the contents and reads clearly through the clear wall, with a visible fill line near the shoulder.`
         : `Keep the body as clear transparent material exactly as in the reference image — do not tint or recolor it.`;
       break;
     case 'frosted':
-      bodyLineEn = code.farbort === 'liquid'
+      bodyLineEn = code2.farbort === 'liquid'
         ? `Give the body a satin frosted (sandblasted) surface. The liquid inside is ${codeBodyHex} and reads softly through the frosted wall. Do not recolor the material itself.`
         : `Give the body a satin frosted (sandblasted) ${codeBodyHex}-tinted surface — translucent, not opaque.`;
       break;
@@ -1052,6 +1074,9 @@ OUTPUT ONLY this JSON, no fences, no prose:
       id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut,
       brand: code.brand || null, produkt: code.produkt || null,
       stufe: code.stufe, verlust: code.verlust,
+      farbort: codeFarbort,
+      can_koerper: farbortMoeglich(code).koerper && codeFarbort !== 'koerper',
+      can_liquid: farbortMoeglich(code).liquid && codeFarbort !== 'liquid',
       register: code.register, can_quieter: canQuieter, can_louder: canLouder,
       // v27 — Material fuer die Behauptung im Frontend.
       beschreibung: code.wirkungBeschreibung,
@@ -1271,6 +1296,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     segment = null,
     forceCodeId = null,
     lautNudge = null,
+    farbortNudge = null,
     nocache = false,
     dryRun = false,
   } = req.body as {
@@ -1282,6 +1308,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     segment?: string | null;
     forceCodeId?: string | null;
     lautNudge?: string | null;
+    farbortNudge?: 'koerper' | 'liquid' | null;
     nocache?: boolean;
     // v27 — Behauptung ohne Bild: gleiche Ableitung, gleicher Code, kein
     // fal.ai-Call. Der teure Schritt bleibt hinter dem zweiten Klick.
@@ -1300,7 +1327,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment, forceCodeId, lautNudge);
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment, forceCodeId, lautNudge, farbortNudge);
     let cached: any[] = [];
     // Dev-Bypass: nocache=true ueberspringt das Cache-Lesen -> immer frischer Render.
     // dryRun liest den Cache nicht: der Cache haelt fertige BILDER. Wir
@@ -1381,7 +1408,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge);
+      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge, farbortNudge);
 
     // ── 5b. dryRun: Behauptung ausliefern, NICHT rendern ────────────
     // Die Ableitung ist komplett (Code gewaehlt, Konzept gebaut) — nur das
