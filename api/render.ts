@@ -669,20 +669,29 @@ async function assemblePrompt(
 
   // Welten, die in den gezeigten Paletten real vorkommen (leere Welten nie anbieten).
   const worldsAvail = [...new Set(candidates.flatMap(p => multiSelectNames(p.fields['Segment'])))].filter(Boolean);
+  // v31 — Referenzmarke als Kern-Anker: kompatibel -> bevorzugen; nicht
+  // kompatibel -> naechster Code derselben Welt, und die Herleitung nennt,
+  // was auf diesem Teil wegfiel (Kern bleibt, Ausdruck sinkt).
+  const referenzen = findeReferenzen(brief, designCodes);
+  const refZeilen = referenzen.map(r => `  · "${r.brand}" = code "${r.name}" (id ${r.id}, segment ${r.segments.join('/') || '?'}, world ${r.register || '?'}, loudness ${r.tempLaut ?? '?'}/10)${r.compatible ? '' : ' — NOT producible on this exact part'}`).join('\n');
+  const referenzHinweis = referenzen.length ? ` BRANDS NAMED IN THE BRIEF (our archive knows them):
+${refZeilen}
+  READ THE POLARITY yourself from the brief.
+  LOVED brand = the COMPASS. Its code is a hard preference: pick it if it is a candidate. If it is not (not producible, or its segment differs from the chosen one), pick the candidate that carries the SAME CORE — its treatment, cap relation, typo attitude and ingredient stance — and tune the expression toward the brief's positioning. Say in herleitung which signature details of the compass fall away here and why (core attitude stays, expression shifts).
+  REJECTED brand = SUBTRACT ITS DISTINGUISHING TRAITS, never its whole world. The customer rejects what makes that brand specific (e.g. candy colour, playful shapes, teen-loud tone), not every code that happens to share its register. A code in the same world is fine as long as it does not carry the rejected traits. NEVER pick the rejected brand's own code.
+  If unsure of the polarity, ignore the brand rather than guessing.` : '';
+  // P1/P2 — der Kompass darf nicht eine Stufe frueher aussortiert werden:
+  // sein Segment geht in die Segment-Wahl ein, statt erst bei der Code-Wahl
+  // auf eine bereits gefallene Entscheidung zu treffen.
+  const kompassSegmente = Array.from(new Set(referenzen.flatMap(r => r.segments))).filter(Boolean);
+  const segmentHinweis = referenzen.length ? ` The brief names brands our archive knows: ${referenzen.map(r => `"${r.brand}" sits in segment ${r.segments.join('/') || '?'}`).join('; ')}. If the customer LOVES one of them, its segment is the default choice. Deviate only if the brief's own positioning clearly contradicts it — and if the loved brand's segment and the stated positioning differ (e.g. a clinical/apothecary brand for a prestige shelf), that gap IS the position: choose the segment that lets the compass's credibility be expressed in the stated tone, and say so in herleitung.${kompassSegmente.length ? ` Compass segments present: ${kompassSegmente.join(', ')}.` : ''}` : '';
   const segmentStep = requestedSegment
     ? `WORLD (fixed by the user): ${requestedSegment}. Set "segment" to exactly this. Every palette below already belongs to this world.`
-    : `STEP 0 — segment: choose EXACTLY ONE world from [${worldsAvail.join(', ')}] that the brief's positioning belongs to. In STEP 2 you may ONLY pick a palette whose "seg" contains this chosen segment.`;
+    : `STEP 0 — segment: choose EXACTLY ONE world from [${worldsAvail.join(', ')}] that the brief's positioning belongs to.${segmentHinweis} In STEP 2 you may ONLY pick a palette whose "seg" contains this chosen segment.`;
 
   // Design-Code-Kandidaten: nur kompatible (inkl. Typ-B-umgeleitete).
   // Segment-Feinfilter macht Haiku selbst (Instruktion) + harte Validierung danach.
   const codeCandidates = designCodes.filter(c => c.compatible);
-  // v30 — Referenzmarke als Kern-Anker: kompatibel -> bevorzugen; nicht
-  // kompatibel -> naechster Code derselben Welt, und die Herleitung nennt,
-  // was auf diesem Teil wegfiel (Kern bleibt, Ausdruck sinkt).
-  const referenzen = findeReferenzen(brief, designCodes);
-  const referenzHinweis = referenzen.length ? ` BRANDS NAMED IN THE BRIEF (our archive knows them):
-${referenzen.map(r => `  · "${r.brand}" = code "${r.name}" (id ${r.id}, world ${r.register || '?'}, loudness ${r.tempLaut ?? '?'}/10)${r.compatible ? '' : ' — NOT producible on this exact part'}`).join('\n')}
-  READ THE POLARITY from the brief yourself: a brand the customer LOVES is a hard preference — pick its code if producible, otherwise the closest candidate in the SAME world, and name in herleitung which signature details fall away here (core attitude stays, expression softens). A brand the customer REJECTS ("… mag ich nicht", "bloss nicht so") must NEVER be chosen and its world should be avoided. If unsure of the polarity, ignore the brand entirely rather than guessing.` : '';
   if (codeCandidates.length === 0) throw new Error('Kein kompatibler aktiver Design_Code vorhanden');
   // v28 (§7.4): Wirkstoff-Welt + Wirkung_Beschreibung reisen pro Kandidat in
   // den Selection-Prompt. Haiku sieht damit die reale Regalwirkung jedes
@@ -714,7 +723,7 @@ DESIGN CODES:
 ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
-STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected).
+STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
@@ -776,8 +785,11 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // gewuerfelte Welt-Wahl. Sonst sucht der Nudge den leiseren Nachbarn im
   // falschen Weltpool ("leiser tut nichts") und graut die Chips falsch aus.
   const navWorld = (forcedCode?.segments[0]) || effectiveSegment;
+  // P2 — der Kompass-Code bleibt im Pool, auch wenn sein Segment ein anderes
+  // ist: zwischen zwei Segmenten liegt eine Position, kein Fehler.
+  const kompassIds = new Set(referenzen.filter(r => r.compatible).map(r => r.id));
   const codeWorldPool = navWorld
-    ? codeCandidates.filter(c => c.segments.includes(navWorld))
+    ? codeCandidates.filter(c => c.segments.includes(navWorld) || kompassIds.has(c.id))
     : codeCandidates;
   const codePool = codeWorldPool.length ? codeWorldPool : codeCandidates;
 
@@ -1016,7 +1028,7 @@ export const config = { api: { bodyParser: true }, maxDuration: 300 };
 // "Biodance" ist bei uns "Pink Play". Der Treffer wird Kern-Anker der Welt;
 // widerspricht er dem restlichen Brief, wird das BENANNT, nicht still entschieden.
 type Marke = { name: string; polaritaet: 'liebt' | 'ablehnt' };
-type Referenz = { brand: string; name: string; id: string; register: string | null; tempLaut: number | null; compatible: boolean; umleitung: string | null };
+type Referenz = { brand: string; name: string; id: string; register: string | null; tempLaut: number | null; compatible: boolean; umleitung: string | null; segments: string[] };
 /* Tippfehler kosten sonst das wichtigste Signal: "weloda" != "weleda".
    Distanz 1 ab 5 Zeichen, 2 ab 8 — eng genug, um Marken nicht zu verwechseln. */
 function levenshtein(a: string, b: string): number {
@@ -1047,7 +1059,7 @@ function markeTrifft(hay: string, marke: string): boolean {
   }
   return woerter.some(w => Math.abs(w.length - marke.length) <= tol && levenshtein(w, marke) <= tol);
 }
-function findeReferenzen(brief: string, codes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; compatible?: boolean; umleitung?: string | null }>): Referenz[] {
+function findeReferenzen(brief: string, codes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; compatible?: boolean; umleitung?: string | null; segments?: string[] }>): Referenz[] {
   const b = ' ' + brief.toLowerCase().replace(/[^a-z0-9äöüß]+/g, ' ') + ' ';
   const out: Referenz[] = [];
   const seen = new Set<string>();
@@ -1056,13 +1068,13 @@ function findeReferenzen(brief: string, codes: Array<{ id: string; name: string;
     if (br.length < 3 || seen.has(br)) continue;
     if (markeTrifft(b, br)) {
       seen.add(br);
-      out.push({ brand: c.brand, name: c.name, id: c.id, register: c.register, tempLaut: c.tempLaut, compatible: c.compatible !== false, umleitung: c.umleitung ?? null });
+      out.push({ brand: c.brand, name: c.name, id: c.id, register: c.register, tempLaut: c.tempLaut, compatible: c.compatible !== false, umleitung: c.umleitung ?? null, segments: c.segments ?? [] });
     }
   }
   return out;
 }
-let codesCache: { t: number; v: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null }> } | null = null;
-async function ladeCodesLeicht(): Promise<Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null }>> {
+let codesCache: { t: number; v: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[] }> } | null = null;
+async function ladeCodesLeicht(): Promise<Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[] }>> {
   if (codesCache && Date.now() - codesCache.t < 300000) return codesCache.v;
   const rows = await airtableListAll(DESIGN_CODE_TABLE);
   const v = rows
@@ -1071,6 +1083,7 @@ async function ladeCodesLeicht(): Promise<Array<{ id: string; name: string; bran
       id: r.id, name: String(r.fields['Name'] || ''), brand: String(r.fields['Brand'] || '').trim(),
       register: (selectName(r.fields['Register']) || '').toLowerCase() || null,
       tempLaut: (r.fields['Temp_Laut'] != null && r.fields['Temp_Laut'] !== '') ? Number(r.fields['Temp_Laut']) : null,
+      segments: multiSelectNames(r.fields['Segment']),
     }));
   codesCache = { t: Date.now(), v };
   return v;
@@ -1095,7 +1108,9 @@ MARKEN AUS UNSEREM ARCHIV (das ist unser Wissen — verbindlich):
 ${input.referenzen.map(r => `- "${r.brand}" = Design-Code "${r.name}" (Welt: ${r.register || 'unbekannt'}, Lautstärke ${r.tempLaut ?? '?'}/10).`).join('\n')}
 ENTSCHEIDEND: Lies aus dem Brief, WELCHE Marke der Kunde liebt und welche er ABLEHNT ("X mag ich, Y nicht" heisst: X = Kompass, Y = Gegenteil). Nur die GELIEBTE Marke ist Kern-Anker für "register" — eine abgelehnte Marke ist NIE der Anker, ihre Welt ist eher zu meiden.
 Erwähne in "lesart" kurz, dass du die Marken kennst. Trage jede genannte Marke in "marken" ein, mit korrekter Schreibweise UND Polarität.
-WIDERSPRICHT der Brief der geliebten Marke (z.B. Kunde will Prestige/Luxus, seine Lieblingsmarke ist klinisch-nüchtern oder jung/Gen Z), dann setze "konflikt" auf EINEN nachfragenden Satz wie eine Kreativdirektorin: "Du nennst X als Kompass, positionierst dich aber im Prestige-Regal — X ist nüchtern und sachlich. Willst du X' Ehrlichkeit, nur im Prestige-Ton?" Sonst konflikt = null.` : ''}
+SPANNT sich der Brief zwischen der geliebten Marke und der Positionierung (z.B. Kunde will Prestige/Luxus, seine Lieblingsmarke ist klinisch-nüchtern oder jung/Gen Z), dann ist das KEIN Widerspruch, den du dem Kunden zur Auflösung zurückgibst — das ist die Position selbst. Setze "konflikt" auf EINEN Satz, der wie eine Kreativdirektorin die MARKTPOSITION BENENNT, sie mit einer Referenz belegt, die der Kunde kennt, und ein Ja einholt. Nie eine Entweder-oder-Frage, nie zwei Optionen zur Auswahl.
+BEISPIEL (Weleda + Prestige-Regal): "Ich höre Weledas Ehrlichkeit für eine Douglas-Kundin — das ist Apotheken-Luxus, die Ecke von Augustinus Bader und Barbara Sturm: wissenschaftlich glaubwürdig, aber fürs Prestige-Regal gekleidet. Soll ich dahin?"
+Nenne eine reale Marke nur als Ortsangabe, nie als Vorlage zum Kopieren. Sonst konflikt = null.` : ''}
 
 Die Anker sind aus wörtlichen Stichwörtern berechnet. Echte Sätze enthalten diese Wörter selten — steht ein Anker auf "noch offen", LIES ihn aus dem Sinn des Briefs und gib ihn unten zurück.
 
@@ -1159,7 +1174,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!brief) return res.status(400).json({ error: 'brief ist erforderlich' });
     // Kennt unser Archiv eine genannte Marke? (leichter Loader, kein Gate noetig)
     let referenzen: Referenz[] = [];
-    let alleCodes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null }> = [];
+    let alleCodes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[] }> = [];
     try { alleCodes = await ladeCodesLeicht(); referenzen = findeReferenzen(brief, alleCodes); } catch { referenzen = []; }
     const out = await reflektiere({
       brief, frage: (b.frage || '').trim(),
