@@ -303,7 +303,7 @@ type Concept = {
   // Design_Code-Provenienz + deterministische Render-Werte (Base & Cap
   // zitieren dieselbe Quelle -> Kohaerenz per Konstruktion).
   design_code?: {
-    id: string; name: string; umleitung: string | null;
+    id: string; name: string; umleitung: string | null; brand?: string | null; produkt?: string | null;
     laut?: number | null; register?: string | null;
     can_quieter?: boolean; can_louder?: boolean;
     beschreibung?: string | null; wirkstoff_welt?: string[]; zielgruppe?: string[];
@@ -981,6 +981,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     segment: effectiveSegment,
     design_code: {
       id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut,
+      brand: code.brand || null, produkt: code.produkt || null,
       register: code.register, can_quieter: canQuieter, can_louder: canLouder,
       // v27 — Material fuer die Behauptung im Frontend.
       beschreibung: code.wirkungBeschreibung,
