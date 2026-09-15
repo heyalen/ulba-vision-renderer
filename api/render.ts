@@ -680,12 +680,9 @@ async function assemblePrompt(
   // kompatibel -> naechster Code derselben Welt, und die Herleitung nennt,
   // was auf diesem Teil wegfiel (Kern bleibt, Ausdruck sinkt).
   const referenzen = findeReferenzen(brief, designCodes);
-  const referenzHinweis = referenzen.length ? (() => {
-    const r = referenzen[0];
-    return r.compatible
-      ? ` REFERENCE (hard preference): the brief names "${r.brand}", which is our code "${r.name}" (id ${r.id}). Choose it unless the brief clearly contradicts its world; if you deviate, say why in herleitung.`
-      : ` REFERENCE: the brief names "${r.brand}" = our code "${r.name}" (world ${r.register || '?'}) — NOT producible on this exact part. Pick the closest candidate in the SAME world${r.register ? ` (${r.register})` : ''} and state in herleitung which signature details of "${r.name}" fall away here (core attitude stays, expression softens).`;
-  })() : '';
+  const referenzHinweis = referenzen.length ? ` BRANDS NAMED IN THE BRIEF (our archive knows them):
+${referenzen.map(r => `  · "${r.brand}" = code "${r.name}" (id ${r.id}, world ${r.register || '?'}, loudness ${r.tempLaut ?? '?'}/10)${r.compatible ? '' : ' — NOT producible on this exact part'}`).join('\n')}
+  READ THE POLARITY from the brief yourself: a brand the customer LOVES is a hard preference — pick its code if producible, otherwise the closest candidate in the SAME world, and name in herleitung which signature details fall away here (core attitude stays, expression softens). A brand the customer REJECTS ("… mag ich nicht", "bloss nicht so") must NEVER be chosen and its world should be avoided. If unsure of the polarity, ignore the brand entirely rather than guessing.` : '';
   if (codeCandidates.length === 0) throw new Error('Kein kompatibler aktiver Design_Code vorhanden');
   // v28 (§7.4): Wirkstoff-Welt + Wirkung_Beschreibung reisen pro Kandidat in
   // den Selection-Prompt. Haiku sieht damit die reale Regalwirkung jedes
@@ -1017,6 +1014,7 @@ export const config = { api: { bodyParser: true }, maxDuration: 300 };
 // ── v30 — Referenzmarke: der Brief nennt eine Marke, das Archiv KENNT sie ──
 // "Biodance" ist bei uns "Pink Play". Der Treffer wird Kern-Anker der Welt;
 // widerspricht er dem restlichen Brief, wird das BENANNT, nicht still entschieden.
+type Marke = { name: string; polaritaet: 'liebt' | 'ablehnt' };
 type Referenz = { brand: string; name: string; id: string; register: string | null; tempLaut: number | null; compatible: boolean; umleitung: string | null };
 /* Tippfehler kosten sonst das wichtigste Signal: "weloda" != "weleda".
    Distanz 1 ab 5 Zeichen, 2 ab 8 — eng genug, um Marken nicht zu verwechseln. */
@@ -1075,7 +1073,7 @@ async function ladeCodesLeicht(): Promise<Array<{ id: string; name: string; bran
 
 const REFLECT_REGISTER = ['clean-minimal', 'pharma-klinisch', 'natur-erdig', 'luxus-ritual', 'tech-premium', 'masse-funktional'];
 const REFLECT_WORTE = ['ruhig', 'laut', 'warm', 'kühl', 'klinisch', 'natürlich', 'edel', 'verspielt', 'mutig', 'reduziert', 'technisch', 'alltagsnah'];
-async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number; referenzen: Referenz[] }): Promise<{ lesart: string; weil: string; register: string | null; laut: number | null; worte: string[]; konflikt: string | null; marken: string[]; referenz: { brand: string; name: string; register: string | null } | null } | null> {
+async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number; referenzen: Referenz[] }): Promise<{ lesart: string; weil: string; register: string | null; laut: number | null; worte: string[]; konflikt: string | null; marken: Marke[]; referenz: { brand: string; name: string; register: string | null } | null } | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   const lautWort = input.laut == null ? 'noch offen'
     : input.laut >= 7 ? 'laut' : input.laut >= 6 ? 'eher laut'
@@ -1088,10 +1086,11 @@ ANKER (vom System berechnet, verbindlich — nicht widersprechen, nicht erfinden
 - Wirkstoff/Produktwelt: ${input.wirkstoff || 'nicht genannt'}
 - Gesprächsrunde: ${input.runde} von 3${input.referenzen.length ? `
 
-REFERENZ AUS UNSEREM ARCHIV (verbindlich, das ist unser Wissen):
-${input.referenzen.map(r => `- Der Kunde nennt "${r.brand}" — bei uns ist das der Design-Code "${r.name}" (Welt: ${r.register || 'unbekannt'}, Lautstärke ${r.tempLaut ?? '?'}/10).`).join('\n')}
-Erwähne in "lesart" kurz, dass du die Marke kennst (z.B. "${input.referenzen[0].brand} kenne ich — …"). Die Welt der Referenz ist der Kern-Anker für "register", SOFERN der Brief nicht klar widerspricht.
-WIDERSPRICHT der Brief der Referenz (z.B. Kunde will Prestige/Luxus, Referenz ist jung/clean/Gen Z), dann setze "konflikt" auf EINEN Satz, der beides benennt und nachfragt — wie eine Kreativdirektorin: "Du nennst X als Kompass, positionierst dich aber im Prestige-Regal — X ist jung und direkt. Willst du X' Verspieltheit, nur im Prestige-Ton?" Sonst konflikt = null.` : ''}
+MARKEN AUS UNSEREM ARCHIV (das ist unser Wissen — verbindlich):
+${input.referenzen.map(r => `- "${r.brand}" = Design-Code "${r.name}" (Welt: ${r.register || 'unbekannt'}, Lautstärke ${r.tempLaut ?? '?'}/10).`).join('\n')}
+ENTSCHEIDEND: Lies aus dem Brief, WELCHE Marke der Kunde liebt und welche er ABLEHNT ("X mag ich, Y nicht" heisst: X = Kompass, Y = Gegenteil). Nur die GELIEBTE Marke ist Kern-Anker für "register" — eine abgelehnte Marke ist NIE der Anker, ihre Welt ist eher zu meiden.
+Erwähne in "lesart" kurz, dass du die Marken kennst. Trage jede genannte Marke in "marken" ein, mit korrekter Schreibweise UND Polarität.
+WIDERSPRICHT der Brief der geliebten Marke (z.B. Kunde will Prestige/Luxus, seine Lieblingsmarke ist klinisch-nüchtern oder jung/Gen Z), dann setze "konflikt" auf EINEN nachfragenden Satz wie eine Kreativdirektorin: "Du nennst X als Kompass, positionierst dich aber im Prestige-Regal — X ist nüchtern und sachlich. Willst du X' Ehrlichkeit, nur im Prestige-Ton?" Sonst konflikt = null.` : ''}
 
 Die Anker sind aus wörtlichen Stichwörtern berechnet. Echte Sätze enthalten diese Wörter selten — steht ein Anker auf "noch offen", LIES ihn aus dem Sinn des Briefs und gib ihn unten zurück.
 
@@ -1107,10 +1106,10 @@ REGELN:
 9. "worte": 1–4 Wörter NUR aus dieser Liste, die zum Brief passen: ${REFLECT_WORTE.join(', ')}. Leeres Array, wenn keines passt.
 Bei 7–9 gilt: lieber null/leer als geraten.
 10. "konflikt": null, ausser eine Referenzmarke widerspricht dem Brief (siehe oben) — dann EIN nachfragender Satz.
-11. "marken": alle Marken, die der Kunde genannt hat, in KORREKTER Schreibweise (Tippfehler berichtigen, z.B. "weloda" → "Weleda"). Leeres Array, wenn keine.
+11. "marken": alle genannten Marken als Objekte {"name":"…","polaritaet":"liebt"|"ablehnt"} — Schreibweise korrigiert (z.B. "weloda" → "Weleda"). Leeres Array, wenn keine.
 
 ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
-{"lesart":"…","weil":"…","register":null,"laut":null,"worte":[],"konflikt":null,"marken":[]}`;
+{"lesart":"…","weil":"…","register":null,"laut":null,"worte":[],"konflikt":null,"marken":[{"name":"…","polaritaet":"liebt"}]}`;
   const user = `Frage, die ich gestellt habe: ${input.frage}\n\nBisheriger Brief des Kunden (alle Antworten): ${input.brief}`;
   try {
     const res = await fetchT('https://api.anthropic.com/v1/messages', {
@@ -1131,7 +1130,10 @@ ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
     const laut = lautRaw != null && Number.isFinite(lautRaw) ? Math.max(0, Math.min(10, lautRaw)) : null;
     const worte = Array.isArray(p?.worte) ? p.worte.filter((w: any) => typeof w === 'string' && REFLECT_WORTE.includes(w)).slice(0, 4) : [];
     const konflikt = typeof p?.konflikt === 'string' && p.konflikt.trim() ? p.konflikt.trim() : null;
-    const marken: string[] = Array.isArray(p?.marken) ? p.marken.filter((m: any) => typeof m === 'string' && m.trim()).map((m: string) => m.trim()).slice(0, 5) : [];
+    const marken: Marke[] = Array.isArray(p?.marken) ? p.marken
+      .filter((m: any) => m && typeof m.name === 'string' && m.name.trim())
+      .map((m: any) => ({ name: String(m.name).trim(), polaritaet: m.polaritaet === 'ablehnt' ? 'ablehnt' as const : 'liebt' as const }))
+      .slice(0, 6) : [];
     const ref = input.referenzen[0] ? { brand: input.referenzen[0].brand, name: input.referenzen[0].name, register: input.referenzen[0].register } : null;
     return { lesart, weil, register, laut, worte, konflikt, marken, referenz: ref };
   } catch { return null; }
@@ -1161,15 +1163,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       referenzen,
     });
     // Haiku aus → 200 mit null: das Frontend behält die deterministische Lesart.
-    // Zweiter Anlauf: Haiku hat Tippfehler berichtigt — damit nochmal suchen.
-    let ref2 = out?.referenz ?? (referenzen[0] ? { brand: referenzen[0].brand, name: referenzen[0].name, register: referenzen[0].register } : null);
-    if (!ref2 && out?.marken?.length) {
+    // Polaritaet entscheidet: nur die GELIEBTE Marke wird Anker. Haiku liefert
+    // zugleich die korrigierte Schreibweise, deshalb hier der zweite Anlauf.
+    let ref2: { brand: string; name: string; register: string | null } | null = null;
+    let anti: { brand: string; name: string; register: string | null } | null = null;
+    if (out?.marken?.length) {
       try {
-        const treffer = findeReferenzen(' ' + out.marken.join(' ') + ' ', await ladeCodesLeicht());
-        if (treffer[0]) ref2 = { brand: treffer[0].brand, name: treffer[0].name, register: treffer[0].register };
+        const alle = await ladeCodesLeicht();
+        const pick = (pol: 'liebt' | 'ablehnt') => {
+          const namen = out.marken.filter(m => m.polaritaet === pol).map(m => m.name);
+          if (!namen.length) return null;
+          const t = findeReferenzen(' ' + namen.join(' ') + ' ', alle)[0];
+          return t ? { brand: t.brand, name: t.name, register: t.register } : null;
+        };
+        ref2 = pick('liebt'); anti = pick('ablehnt');
       } catch { /* Archiv nicht erreichbar — Lesart bleibt gueltig */ }
     }
-    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null, register: out?.register ?? null, laut: out?.laut ?? null, worte: out?.worte ?? [], konflikt: out?.konflikt ?? null, referenz: ref2 });
+    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null, register: out?.register ?? null, laut: out?.laut ?? null, worte: out?.worte ?? [], konflikt: out?.konflikt ?? null, referenz: ref2, antiReferenz: anti });
   }
 
   const {
