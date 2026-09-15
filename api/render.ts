@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v32-grafikebene';
+const RENDER_VERSION = 'v33-linienwerk';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -271,17 +271,23 @@ function runGate(brief: string, lexicon: LexEntry[], coverage: string[]): string
    es eine Druckebene, aber OHNE lesbare Woerter: abstrakte Mikro-Typografie,
    wie in jedem Packaging-Mockup vor der Copy. Das IP-Risiko bleibt gedeckelt
    (keine echte Marke, kein Logo, kein lesbarer Text). */
+/* v33 — Linienwerk statt "Typografie". Worte wie "typography", "lettering"
+   oder "wordmark" liest das Bildmodell als Auftrag, Text zu SETZEN — und druckt
+   dann die Anweisung selbst aufs Teil (v32-Fehler: "abstract nonlegible
+   typography" stand lesbar auf der Flasche). Beschrieben wird deshalb nur noch
+   die GEOMETRIE: feine waagerechte Striche in Textzeilen-Anmutung. Das rendert
+   zuverlaessig als Etikett-Optik, ohne dass Buchstaben entstehen. */
 const TYPO_RENDER: Record<string, string> = {
-  minimal_klein: 'a small, restrained printed block of abstract micro-typography, centred low on the front face, occupying under 15% of the surface',
-  ingredient_block: 'a clean printed panel of abstract micro-typography in two or three stacked text blocks — the visual language of clinical ingredient labelling — set in the accent colour on the front face',
-  bold_wordmark: 'one bold, oversized abstract wordmark-shaped graphic block across the upper front face, plus a small secondary block beneath it',
+  minimal_klein: 'one small group of 2-3 short, fine horizontal printed lines, centred low on the front face, together occupying under 12% of the surface width',
+  ingredient_block: 'two or three stacked groups of fine horizontal printed lines of varying length — the look of a clinical ingredient panel seen from arm\'s length — centred on the lower front face',
+  bold_wordmark: 'one thick horizontal printed bar across the upper front face, with a group of two thin shorter lines beneath it',
   ohne: '',
 };
 function grafikRegel(typoHaltung: string | null | undefined, akzentHex: string | null | undefined): string {
   const t = (typoHaltung || '').toLowerCase();
   if (t === 'ohne') return 'The surface carries no printed graphics — bare, uninterrupted material.';
   const spec = TYPO_RENDER[t] || TYPO_RENDER.minimal_klein;
-  return `The product carries a printed graphic layer: ${spec}${akzentHex ? ` (printed in ${akzentHex})` : ''}. CRITICAL: this lettering must be ABSTRACT AND NON-LEGIBLE — it reads as typography from a distance but contains no readable words in any language, no slogans, no claims. Crisp, evenly spaced, printed flat on the surface — never embossed, never a sticker with visible edges, never warped or garbled letterforms.`;
+  return `Printed flat on the front surface: ${spec}${akzentHex ? `, printed in ${akzentHex}` : ''}. These are PURE GEOMETRIC LINES — plain solid rules with squared ends, evenly spaced. They must NOT form letters, characters, glyphs, numbers or words of any kind. Render them crisp and flat, never embossed, never on a sticker with visible edges.`;
 }
 
 function buildHardRule(fall: RenderFall, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null): string {
@@ -299,7 +305,7 @@ function buildHardRule(fall: RenderFall, forbidden: string[], typoHaltung?: stri
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
     // ── Markenwelt erlaubt, aber Guardrail ──
     grafikRegel(typoHaltung, akzentHex),
-    'STRICTLY FORBIDDEN: any real existing brand name, logo, trademark or crest (e.g. never Porsche, never a car-brand crest), and any readable word, claim or slogan.',
+    'STRICTLY FORBIDDEN on the product: any letter, character, digit, word, brand name, logo, trademark or crest. Never print words from these instructions onto the packaging — this text is a description, not label copy.',
     // ── Garantierte Render-Tells (code-seitig, verlässlich) ──
     'Ground the product on the surface with a soft contact shadow — the product must never float.',
     'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
