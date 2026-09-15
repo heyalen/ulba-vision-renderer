@@ -1018,6 +1018,36 @@ export const config = { api: { bodyParser: true }, maxDuration: 300 };
 // "Biodance" ist bei uns "Pink Play". Der Treffer wird Kern-Anker der Welt;
 // widerspricht er dem restlichen Brief, wird das BENANNT, nicht still entschieden.
 type Referenz = { brand: string; name: string; id: string; register: string | null; tempLaut: number | null; compatible: boolean; umleitung: string | null };
+/* Tippfehler kosten sonst das wichtigste Signal: "weloda" != "weleda".
+   Distanz 1 ab 5 Zeichen, 2 ab 8 — eng genug, um Marken nicht zu verwechseln. */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+function markeTrifft(hay: string, marke: string): boolean {
+  if (hay.includes(' ' + marke + ' ')) return true;
+  const tol = marke.length >= 8 ? 2 : marke.length >= 5 ? 1 : 0;
+  if (tol === 0) return false;
+  const teile = marke.split(' ');
+  const woerter = hay.trim().split(/\s+/);
+  if (teile.length > 1) {
+    for (let i = 0; i + teile.length <= woerter.length; i++) {
+      if (levenshtein(woerter.slice(i, i + teile.length).join(' '), marke) <= tol) return true;
+    }
+    return false;
+  }
+  return woerter.some(w => Math.abs(w.length - marke.length) <= tol && levenshtein(w, marke) <= tol);
+}
 function findeReferenzen(brief: string, codes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; compatible?: boolean; umleitung?: string | null }>): Referenz[] {
   const b = ' ' + brief.toLowerCase().replace(/[^a-z0-9äöüß]+/g, ' ') + ' ';
   const out: Referenz[] = [];
@@ -1025,7 +1055,7 @@ function findeReferenzen(brief: string, codes: Array<{ id: string; name: string;
   for (const c of codes) {
     const br = (c.brand || '').toLowerCase().replace(/[^a-z0-9äöüß]+/g, ' ').trim();
     if (br.length < 3 || seen.has(br)) continue;
-    if (b.includes(' ' + br + ' ')) {
+    if (markeTrifft(b, br)) {
       seen.add(br);
       out.push({ brand: c.brand, name: c.name, id: c.id, register: c.register, tempLaut: c.tempLaut, compatible: c.compatible !== false, umleitung: c.umleitung ?? null });
     }
@@ -1045,7 +1075,7 @@ async function ladeCodesLeicht(): Promise<Array<{ id: string; name: string; bran
 
 const REFLECT_REGISTER = ['clean-minimal', 'pharma-klinisch', 'natur-erdig', 'luxus-ritual', 'tech-premium', 'masse-funktional'];
 const REFLECT_WORTE = ['ruhig', 'laut', 'warm', 'kühl', 'klinisch', 'natürlich', 'edel', 'verspielt', 'mutig', 'reduziert', 'technisch', 'alltagsnah'];
-async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number; referenzen: Referenz[] }): Promise<{ lesart: string; weil: string; register: string | null; laut: number | null; worte: string[]; konflikt: string | null; referenz: { brand: string; name: string; register: string | null } | null } | null> {
+async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number; referenzen: Referenz[] }): Promise<{ lesart: string; weil: string; register: string | null; laut: number | null; worte: string[]; konflikt: string | null; marken: string[]; referenz: { brand: string; name: string; register: string | null } | null } | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   const lautWort = input.laut == null ? 'noch offen'
     : input.laut >= 7 ? 'laut' : input.laut >= 6 ? 'eher laut'
@@ -1077,9 +1107,10 @@ REGELN:
 9. "worte": 1–4 Wörter NUR aus dieser Liste, die zum Brief passen: ${REFLECT_WORTE.join(', ')}. Leeres Array, wenn keines passt.
 Bei 7–9 gilt: lieber null/leer als geraten.
 10. "konflikt": null, ausser eine Referenzmarke widerspricht dem Brief (siehe oben) — dann EIN nachfragender Satz.
+11. "marken": alle Marken, die der Kunde genannt hat, in KORREKTER Schreibweise (Tippfehler berichtigen, z.B. "weloda" → "Weleda"). Leeres Array, wenn keine.
 
 ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
-{"lesart":"…","weil":"…","register":null,"laut":null,"worte":[],"konflikt":null}`;
+{"lesart":"…","weil":"…","register":null,"laut":null,"worte":[],"konflikt":null,"marken":[]}`;
   const user = `Frage, die ich gestellt habe: ${input.frage}\n\nBisheriger Brief des Kunden (alle Antworten): ${input.brief}`;
   try {
     const res = await fetchT('https://api.anthropic.com/v1/messages', {
@@ -1100,8 +1131,9 @@ ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
     const laut = lautRaw != null && Number.isFinite(lautRaw) ? Math.max(0, Math.min(10, lautRaw)) : null;
     const worte = Array.isArray(p?.worte) ? p.worte.filter((w: any) => typeof w === 'string' && REFLECT_WORTE.includes(w)).slice(0, 4) : [];
     const konflikt = typeof p?.konflikt === 'string' && p.konflikt.trim() ? p.konflikt.trim() : null;
+    const marken: string[] = Array.isArray(p?.marken) ? p.marken.filter((m: any) => typeof m === 'string' && m.trim()).map((m: string) => m.trim()).slice(0, 5) : [];
     const ref = input.referenzen[0] ? { brand: input.referenzen[0].brand, name: input.referenzen[0].name, register: input.referenzen[0].register } : null;
-    return { lesart, weil, register, laut, worte, konflikt, referenz: ref };
+    return { lesart, weil, register, laut, worte, konflikt, marken, referenz: ref };
   } catch { return null; }
 }
 
@@ -1129,7 +1161,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       referenzen,
     });
     // Haiku aus → 200 mit null: das Frontend behält die deterministische Lesart.
-    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null, register: out?.register ?? null, laut: out?.laut ?? null, worte: out?.worte ?? [], konflikt: out?.konflikt ?? null, referenz: out?.referenz ?? (referenzen[0] ? { brand: referenzen[0].brand, name: referenzen[0].name, register: referenzen[0].register } : null) });
+    // Zweiter Anlauf: Haiku hat Tippfehler berichtigt — damit nochmal suchen.
+    let ref2 = out?.referenz ?? (referenzen[0] ? { brand: referenzen[0].brand, name: referenzen[0].name, register: referenzen[0].register } : null);
+    if (!ref2 && out?.marken?.length) {
+      try {
+        const treffer = findeReferenzen(' ' + out.marken.join(' ') + ' ', await ladeCodesLeicht());
+        if (treffer[0]) ref2 = { brand: treffer[0].brand, name: treffer[0].name, register: treffer[0].register };
+      } catch { /* Archiv nicht erreichbar — Lesart bleibt gueltig */ }
+    }
+    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null, register: out?.register ?? null, laut: out?.laut ?? null, worte: out?.worte ?? [], konflikt: out?.konflikt ?? null, referenz: ref2 });
   }
 
   const {
