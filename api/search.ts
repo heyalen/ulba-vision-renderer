@@ -369,6 +369,31 @@ interface CategoryConstraints {
   nichtType: string[];
   volumeMin: number | null;
   volumeMax: number | null;
+  formelFlags: string[];
+}
+
+/* Der erste Kompetenz-Beweis: ulba erklaert, WARUM diese Auswahl. Aus den
+   Formel_Flags der Kategorie, aktiviert durch Query-Signale (Feld-Doku).
+   Kommt VOR die Kacheln — Ebene 1 (Suche), nicht Ebene 2 (Brief). */
+function formelHinweis(cat: CategoryConstraints | null, query: string): string | null {
+  if (!cat) return null;
+  const q = query.toLowerCase();
+  const flags = new Set(cat.formelFlags.map(f => f.toLowerCase()));
+  const g: string[] = [];
+  const oxidAktiv = /vitamin\s*c|ascorb|retinol|retinal|niacin/.test(q);
+  if (flags.has('oxidationsempfindlich_moeglich')) {
+    g.push(oxidAktiv
+      ? 'die Formel ist licht- und oxidationsempfindlich — darum zeige ich dir keine offenen Pipetten in Klarglas'
+      : 'solche Formeln sind oft lichtempfindlich — offene Pipetten in Klarglas lasse ich weg');
+  }
+  if (flags.has('hochviskos')) g.push('sie ist dickflüssig — Pipette und Spray fallen weg, Tiegel, Tube und Pumpe passen');
+  if (flags.has('niedrigviskos')) g.push('sie ist dünnflüssig — Tropfer, Pipette und Spray sind hier stark');
+  if (flags.has('schaeumend_volumen')) g.push('sie schäumt — darum grössere Formate mit Pumpe oder Flip-Top');
+  if (flags.has('oelhaltig_moeglich')) g.push('ölhaltige Formeln vertragen kein PET — Glas und PP bevorzugt');
+  if (g.length === 0 && cat.nichtClosure.length > 0) g.push(`${cat.nichtClosure.join(' und ')} lasse ich hier weg`);
+  if (g.length === 0) return null;
+  const kern = g.slice(0, 2).join('; ');
+  return `Ich lese dich als ${cat.category}: ${kern.charAt(0).toUpperCase()}${kern.slice(1)}.`;
 }
 
 function matchCategory(query: string, regeln: any[]): CategoryConstraints | null {
@@ -388,6 +413,7 @@ function matchCategory(query: string, regeln: any[]): CategoryConstraints | null
         nichtType: split(f['Nicht_Typen']),
         volumeMin: f['Volume_Min'] ?? null,
         volumeMax: f['Volume_Max'] ?? null,
+        formelFlags: Array.isArray(f['Formel_Flags']) ? f['Formel_Flags'].map((x: any) => String(x)) : [],
       };
     }
   }
@@ -1085,6 +1111,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       activeCodes: activeCodes.length,
       designLooks: designLooks.length,
       categoryMatch: category?.category || null,
+      // v30 — Kompetenz-Satz fuer den Chat (vor den Kacheln)
+      hinweis: formelHinweis(category, query),
       // Spur B — Chips (unverändertes Frontend-Kontrakt + neu: forms)
       parsedFilters: {
         sizes: parsed.sizeMentions, materials: parsed.materialMentions,
