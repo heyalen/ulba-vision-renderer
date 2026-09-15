@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v33-linienwerk';
+const RENDER_VERSION = 'v34-ausspraegung';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -329,7 +329,7 @@ type Concept = {
   // Design_Code-Provenienz + deterministische Render-Werte (Base & Cap
   // zitieren dieselbe Quelle -> Kohaerenz per Konstruktion).
   design_code?: {
-    id: string; name: string; umleitung: string | null; brand?: string | null; produkt?: string | null;
+    id: string; name: string; umleitung: string | null; brand?: string | null; produkt?: string | null; stufe?: number; verlust?: string[];
     laut?: number | null; register?: string | null;
     can_quieter?: boolean; can_louder?: boolean;
     beschreibung?: string | null; wirkstoff_welt?: string[]; zielgruppe?: string[];
@@ -431,6 +431,12 @@ type DesignCodeRec = {
   typoHaltung: string;
   szeneId: string;
   anforderungen: string[];
+  // v34 (Punkt 11) — Kern vs. Ausspraegung: ein Code ist kein Ja/Nein. Stufe 3
+  // = volle Signatur, 2 = ein Traeger umgeleitet, 1 = Signaturtraeger faellt
+  // weg, Kern lebt auf Cap/Akzent/Druck weiter. 'verlust' benennt, WAS fehlt —
+  // damit die Herleitung es sagen kann statt es zu verschweigen.
+  stufe: 3 | 2 | 1;
+  verlust: string[];
   compatible: boolean;
   umleitung: string | null;
   brand: string;   // objektiver Label-Fakt vom Referenzbild (Tagger)
@@ -591,13 +597,36 @@ async function assemblePrompt(
         farbort = 'liquid';
         umleitung = `Typ B: Koerper NICHT faerbbar (Lieferant) -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar`;
       }
-      // UNBEKANNT bei Frost/Mattierung: keine sichere Ausweichform -> Code fuer
-      // dieses System nicht anbieten (lieber nichts als falsch versprechen).
-      const blockingUnknown = unknown.filter(a => a === 'braucht_frostbar');
+      // ── v34 — Ausspraegungs-Kaskade statt Rauswurf ────────────────────
+      // Fehlt ein Traeger, stirbt nicht der Code, sondern eine Stufe seines
+      // Ausdrucks. Abstufung VERLANGT WENIGER vom Teil als das Original —
+      // sie kann also nie etwas Unproduzierbares versprechen.
+      let stufe: 3 | 2 | 1 = umleitung ? 2 : 3;
+      const verlust: string[] = [];
+      if (umleitung) verlust.push('Körperfarbe — die Farbe sitzt jetzt in der Flüssigkeit, das Gebinde bleibt klar');
+
+      // Mattierung nicht belegt -> Frost faellt, Rest bleibt (vorher: Rauswurf).
+      if (bodyBehandlung === 'frosted' && checkAnforderung('braucht_frostbar') !== 'ok') {
+        bodyBehandlung = isGlassBody ? 'klar' : 'opak_recolor';
+        stufe = 1;
+        verlust.push('mattierte Oberfläche — dieses Teil ist nicht belegt mattierbar, der Körper bleibt glatt');
+      }
+      // Code lebt von Durchsicht, Teil ist kein Glas -> Transparenz faellt,
+      // Farbe/Akzent/Druck tragen die Haltung weiter (vorher: Rauswurf).
+      if (anford.includes('braucht_klarglas') && !isGlassBody) {
+        if (TRANSPARENT_BEHANDLUNG.includes(bodyBehandlung)) { bodyBehandlung = 'opak_recolor'; farbort = 'koerper'; }
+        stufe = 1;
+        verlust.push('durchsichtiger Körper — dieses Teil ist nicht aus Glas, die Haltung läuft über Farbe, Verschluss und Druck');
+      }
+      // Ohne Cap kann eine Cap-Anforderung durch nichts ersetzt werden — das
+      // ist der einzige verbliebene echte Ausschlussgrund.
+      const blockingUnknown: string[] = [];
       // Die Umleitung LOEST Koerper-Farb-Anforderungen (Farbe sitzt jetzt in
       // der Fluessigkeit, das klare Gebinde kann jeder liefern). Sie duerfen
       // den Code nicht mehr blockieren — sonst ist die Umleitung tote Logik.
-      const geloest = new Set(umleitung ? ['braucht_einfaerbbar', 'braucht_opak'] : []);
+      // Was die Kaskade aufgeloest hat, darf nicht mehr sperren.
+      const geloest = new Set<string>(umleitung ? ['braucht_einfaerbbar', 'braucht_opak'] : []);
+      if (stufe === 1) { geloest.add('braucht_klarglas'); geloest.add('braucht_frostbar'); geloest.add('braucht_einfaerbbar'); geloest.add('braucht_opak'); }
       const remaining = [...hardExcluded, ...blockingUnknown].filter(a => !geloest.has(a));
       return {
         id: r.id,
@@ -622,6 +651,7 @@ async function assemblePrompt(
         // 35/35 getaggt — der alte Kommentar 'Segment-Feld ist leer' war veraltet.)
         register: (selectName(f['Register']) || '').toLowerCase() || null,
         anforderungen: anford,
+        stufe, verlust,
         compatible: remaining.length === 0,
         umleitung,
         brand: String(f['Brand'] || '').trim(),
@@ -725,7 +755,7 @@ ${refZeilen}
   // gegen die die INGREDIENT RULE prüft. Prosa auf 130 Zeichen gekappt:
   // bei ~30 Kandidaten bleibt der Prompt klein.
   const designCodeList = codeCandidates.map(c =>
-    `- code_id: ${c.id} | seg: ${c.segments.join('/') || '-'} | ${c.name} | body: ${c.bodyBehandlung}/${c.farbort}${c.bodyHex ? ` ${c.bodyHex}` : ''} | cap: ${c.capHex || 'preserve'} ${c.capFinish} | akzent: ${c.akzentCue} | typo: ${c.typoHaltung || '-'}${c.wirkstoffWelt.length ? ` | wirkstoff: ${c.wirkstoffWelt.join('/')}` : ''}${c.wirkungBeschreibung ? ` | wirkung: ${c.wirkungBeschreibung.slice(0, 130)}` : ''}${c.umleitung ? ' | (umgeleitet)' : ''}`
+    `- code_id: ${c.id} | seg: ${c.segments.join('/') || '-'} | ${c.name} | body: ${c.bodyBehandlung}/${c.farbort}${c.bodyHex ? ` ${c.bodyHex}` : ''} | cap: ${c.capHex || 'preserve'} ${c.capFinish} | akzent: ${c.akzentCue} | typo: ${c.typoHaltung || '-'}${c.stufe < 3 ? ` | expression level ${c.stufe}/3 (lost: ${c.verlust.join('; ')})` : ''}${c.wirkstoffWelt.length ? ` | wirkstoff: ${c.wirkstoffWelt.join('/')}` : ''}${c.wirkungBeschreibung ? ` | wirkung: ${c.wirkungBeschreibung.slice(0, 130)}` : ''}${c.umleitung ? ' | (umgeleitet)' : ''}`
   ).join('\n');
 
   const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
@@ -745,6 +775,7 @@ ${paletteList}
 STEP 3 — finish: one of [${finishes.join(', ')}].
 STEP 4 — akzent: one of [${akzente.join(', ')}].
 STEP 4b — code_id: choose EXACTLY ONE curated design code from DESIGN CODES below.${referenzHinweis} Its "seg" must contain your chosen segment. Pick the code whose design attitude (treatment, cap relation, accent, typo) best serves the brief's positioning — the code is the design DECISION; body colour, cap colour and accent will all be taken from it so the result is coherent by construction. INGREDIENT RULE (hard): if the brief names an active or ingredient world (vitamin c, retinol, hyaluron, barrier, acne, botanical, sun, hair, fragrance), you MUST prefer a code whose "wirkstoff" contains that world when one is available — a vitamin-c brief must never land on a retinol-world code while a vitamin-c code is listed. Use each code's "wirkung" prose to judge its real shelf effect and ground your herleitung in it. Codes marked (umgeleitet) still work on this product via a redirected expression — they remain valid choices.
+EXPRESSION LEVEL: a code marked "expression level 2/3" or "1/3" is still a valid, honest choice — its core attitude survives, only part of its signature cannot be built on this exact part. Prefer level 3 when the fit is equal, but NEVER reject the compass brand's code just because its level is lower. Whenever you choose a code below level 3, the herleitung MUST name in plain German what falls away here (use the "lost:" text) — e.g. "Pink Play, hier in der ruhigen Ausprägung: Rosa und die reduzierte Typo bleiben, der Kugelverschluss und die Transparenz gehen auf einer Glas-Pumpflasche nicht."
 DESIGN CODES:
 ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
@@ -1020,6 +1051,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     design_code: {
       id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut,
       brand: code.brand || null, produkt: code.produkt || null,
+      stufe: code.stufe, verlust: code.verlust,
       register: code.register, can_quieter: canQuieter, can_louder: canLouder,
       // v27 — Material fuer die Behauptung im Frontend.
       beschreibung: code.wirkungBeschreibung,
