@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v28-wirkstoff-rank';
+const RENDER_VERSION = 'v32-grafikebene';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -265,7 +265,26 @@ function runGate(brief: string, lexicon: LexEntry[], coverage: string[]): string
  * jetzt Marken-Anmutung erlaubt (aber kein lesbarer Text / kein echtes Logo)
  * + garantierte Render-Tells (Grounding, Licht, Optik).
  */
-function buildHardRule(fall: RenderFall, forbidden: string[]): string {
+/* v32 — Grafikebene. Vorher galt "bare, uninterrupted material" ausnahmslos:
+   damit konnte ein Code, dessen Identitaet die Typo IST (ingredient_block),
+   nie etwas ausdruecken — klinische Codes rendern als nacktes Teil. Jetzt gibt
+   es eine Druckebene, aber OHNE lesbare Woerter: abstrakte Mikro-Typografie,
+   wie in jedem Packaging-Mockup vor der Copy. Das IP-Risiko bleibt gedeckelt
+   (keine echte Marke, kein Logo, kein lesbarer Text). */
+const TYPO_RENDER: Record<string, string> = {
+  minimal_klein: 'a small, restrained printed block of abstract micro-typography, centred low on the front face, occupying under 15% of the surface',
+  ingredient_block: 'a clean printed panel of abstract micro-typography in two or three stacked text blocks — the visual language of clinical ingredient labelling — set in the accent colour on the front face',
+  bold_wordmark: 'one bold, oversized abstract wordmark-shaped graphic block across the upper front face, plus a small secondary block beneath it',
+  ohne: '',
+};
+function grafikRegel(typoHaltung: string | null | undefined, akzentHex: string | null | undefined): string {
+  const t = (typoHaltung || '').toLowerCase();
+  if (t === 'ohne') return 'The surface carries no printed graphics — bare, uninterrupted material.';
+  const spec = TYPO_RENDER[t] || TYPO_RENDER.minimal_klein;
+  return `The product carries a printed graphic layer: ${spec}${akzentHex ? ` (printed in ${akzentHex})` : ''}. CRITICAL: this lettering must be ABSTRACT AND NON-LEGIBLE — it reads as typography from a distance but contains no readable words in any language, no slogans, no claims. Crisp, evenly spaced, printed flat on the surface — never embossed, never a sticker with visible edges, never warped or garbled letterforms.`;
+}
+
+function buildHardRule(fall: RenderFall, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null): string {
   const closureRule = fall === 'A'
     ? 'Do not add, remove, replace or restyle the closure — keep the closure exactly as shown in the reference image.'
     : 'Use ONLY the closure shown in image 2 — do not invent a different closure, do not change its shape or mechanism.';
@@ -279,7 +298,8 @@ function buildHardRule(fall: RenderFall, forbidden: string[]): string {
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
     // ── Markenwelt erlaubt, aber Guardrail ──
-    'No printed label, sticker, wordmark, panel or lettering anywhere on the product — the surface is bare, uninterrupted material. STRICTLY FORBIDDEN: any real existing brand name, logo or trademark (e.g. never Porsche, never a car-brand crest).',
+    grafikRegel(typoHaltung, akzentHex),
+    'STRICTLY FORBIDDEN: any real existing brand name, logo, trademark or crest (e.g. never Porsche, never a car-brand crest), and any readable word, claim or slogan.',
     // ── Garantierte Render-Tells (code-seitig, verlässlich) ──
     'Ground the product on the surface with a soft contact shadow — the product must never float.',
     'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
@@ -1009,7 +1029,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
   };
 
   return {
-    prompt: `${visuell}\n\n${buildHardRule(fall, forbidden)}`,
+    prompt: `${visuell}\n\n${buildHardRule(fall, forbidden, code.typoHaltung, code.akzentHex)}`,
     forbidden,
     concept,
   };
