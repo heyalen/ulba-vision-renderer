@@ -1060,15 +1060,19 @@ function findeReferenzen(brief: string, codes: Array<{ id: string; name: string;
   }
   return out;
 }
+let codesCache: { t: number; v: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null }> } | null = null;
 async function ladeCodesLeicht(): Promise<Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null }>> {
+  if (codesCache && Date.now() - codesCache.t < 300000) return codesCache.v;
   const rows = await airtableListAll(DESIGN_CODE_TABLE);
-  return rows
+  const v = rows
     .filter((r: any) => (selectName(r.fields?.['Status']) || '') === 'Aktiv')
     .map((r: any) => ({
       id: r.id, name: String(r.fields['Name'] || ''), brand: String(r.fields['Brand'] || '').trim(),
       register: (selectName(r.fields['Register']) || '').toLowerCase() || null,
       tempLaut: (r.fields['Temp_Laut'] != null && r.fields['Temp_Laut'] !== '') ? Number(r.fields['Temp_Laut']) : null,
     }));
+  codesCache = { t: Date.now(), v };
+  return v;
 }
 
 const REFLECT_REGISTER = ['clean-minimal', 'pharma-klinisch', 'natur-erdig', 'luxus-ritual', 'tech-premium', 'masse-funktional'];
@@ -1116,10 +1120,11 @@ ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY || '', 'anthropic-version': '2023-06-01' },
       timeoutMs: 15000, label: 'anthropic haiku reflect',
-      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 220, temperature: 0.4, system, messages: [{ role: 'user', content: user }] }),
+      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 700, temperature: 0.4, system, messages: [{ role: 'user', content: user }] }),
     });
     if (!res.ok) return null;
-    const data = await res.json() as { content: Array<{ text: string }> };
+    const data = await res.json() as { content: Array<{ text: string }>; stop_reason?: string };
+    if (data.stop_reason === 'max_tokens') console.warn('[reflect] Antwort abgeschnitten — max_tokens zu klein');
     const raw = (data.content?.[0]?.text || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim();
     const p = JSON.parse(raw);
     const lesart = typeof p?.lesart === 'string' ? p.lesart.trim() : '';
@@ -1153,7 +1158,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!brief) return res.status(400).json({ error: 'brief ist erforderlich' });
     // Kennt unser Archiv eine genannte Marke? (leichter Loader, kein Gate noetig)
     let referenzen: Referenz[] = [];
-    try { referenzen = findeReferenzen(brief, await ladeCodesLeicht()); } catch { referenzen = []; }
+    let alleCodes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null }> = [];
+    try { alleCodes = await ladeCodesLeicht(); referenzen = findeReferenzen(brief, alleCodes); } catch { referenzen = []; }
     const out = await reflektiere({
       brief, frage: (b.frage || '').trim(),
       register: b.register ?? null,
@@ -1169,7 +1175,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let anti: { brand: string; name: string; register: string | null } | null = null;
     if (out?.marken?.length) {
       try {
-        const alle = await ladeCodesLeicht();
+        const alle = alleCodes.length ? alleCodes : await ladeCodesLeicht();
         const pick = (pol: 'liebt' | 'ablehnt') => {
           const namen = out.marken.filter(m => m.polaritaet === pol).map(m => m.name);
           if (!namen.length) return null;
