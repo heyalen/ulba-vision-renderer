@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v43-karte';
+const RENDER_VERSION = 'v44-board';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -665,7 +665,11 @@ async function assemblePrompt(
   // die Gespraechs-Zeilen — aber der WIRKSTOFF steckt nur dort. Er reist hier
   // getrennt mit und wird ausschliesslich fuer die Wirkstoff-Zeile gelesen,
   // nie als Brief-Text interpretiert.
-  sucheQuery: string | null = null
+  sucheQuery: string | null = null,
+  // Board-Tipps auf echte Produkte. Sie ersetzen nicht die Ableitung — sie
+  // praezisieren den Anker, auf dem sie aufsetzt.
+  boardLikes: string[] = [],
+  boardDislikes: string[] = []
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
   const [produktRegeln, farbpalettenAll, designCodesAll, wirkstoffListe] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
@@ -924,6 +928,16 @@ ${refZeilen}
   // sein Segment geht in die Segment-Wahl ein, statt erst bei der Code-Wahl
   // auf eine bereits gefallene Entscheidung zu treffen.
   const kompassSegmente = Array.from(new Set(referenzen.flatMap(r => r.segments))).filter(Boolean);
+  /* Ein Tipp auf ein Bild ist eine vollstaendige Koordinate: Welt,
+     Lautstaerke und Wirkstoff-Welt des getippten Produkts sind getaggt. Das
+     ist praeziser als ein Markenname im Freitext — also waehlt der Tipp den
+     Anker, nicht das Textmatching. */
+  const boardRef = (ids: string[]) => designCodes.filter(c => ids.includes(c.id));
+  const geliebt = boardRef(boardLikes);
+  const abgelehnt = boardRef(boardDislikes);
+  const boardHinweis = (geliebt.length || abgelehnt.length)
+    ? `\nTAPPED REFERENCES (the customer pointed at these real products — this is a MEASURED coordinate and outranks any brand name in the free text).${geliebt.length ? `\n  LIKES: ${geliebt.map(c => `"${c.name}" (${c.brand}, world ${c.register || '?'}, loudness ${c.tempLaut ?? '?'}/10, id ${c.id})`).join('; ')}. Their shared world is the default choice; if they span worlds, the position sits between them and you must say so in kette.${geliebt.length === 1 ? ` With a single like, treat its world and loudness as the anchor unless the brief's own positioning clearly contradicts it.` : ''}` : ''}${abgelehnt.length ? `\n  REJECTS: ${abgelehnt.map(c => `"${c.name}" (${c.brand}, world ${c.register || '?'}, id ${c.id})`).join('; ')}. Never choose these codes. Subtract their colour, tone and decoration — never their physics. Set anti_code_id to one of them.` : ''}`
+    : '';
   const segmentHinweis = referenzen.length ? ` The brief names brands our archive knows: ${referenzen.map(r => `"${r.brand}" sits in segment ${r.segments.join('/') || '?'}`).join('; ')}. If the customer LOVES one of them, its segment is the default choice. Deviate only if the brief's own positioning clearly contradicts it — and if the loved brand's segment and the stated positioning differ (e.g. a clinical/apothecary brand for a prestige shelf), that gap IS the position: choose the segment that lets the compass's credibility be expressed in the stated tone, and say so in herleitung.${kompassSegmente.length ? ` Compass segments present: ${kompassSegmente.join(', ')}.` : ''}` : '';
   const segmentStep = requestedSegment
     ? `WORLD (fixed by the user): ${requestedSegment}. Set "segment" to exactly this. Every palette below already belongs to this world.`
@@ -981,7 +995,7 @@ ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
-BODY-COLOUR TRUTH (hard): ${koerperHinweisEn}${wirkstoffHinweisEn}
+BODY-COLOUR TRUTH (hard): ${koerperHinweisEn}${wirkstoffHinweisEn}${boardHinweis}
 STEP 9a — kompass_code_id / anti_code_id: from the reference brands listed above, the id of the code whose brand the customer LOVES (kompass) and the id whose brand they REJECT (anti). null if the brief names none.
 STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
 STEP 10 — do_not: 2–3 short German clauses naming what this direction must NOT become. Concrete visual traps, not vague warnings — the difference between an 80-euro serum and multivitamin juice. Ground each in the brief's audience or shelf. Examples: "kein wörtliches Orange", "keine Tropfen- oder Frucht-Deko", "kein Bonbon-Rosa", "kein Stock-Vektor-Blatt". Never name a field value or an English word.
@@ -1035,6 +1049,13 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // brechen wir sichtbar ab statt still auf einen anderen Look zu kippen
   // (der "immer Pink"-Bug): der Nutzer hat einen bestimmten Look gewaehlt,
   // ein anderer Look waere eine Luege.
+  // Harte Sperre statt Prompt-Bitte: ein getipptes "bloss nicht" darf nie
+  // gewaehlt werden, auch wenn Haiku es vorschlaegt.
+  if (boardDislikes.length) {
+    for (let i = codeCandidates.length - 1; i >= 0; i--) {
+      if (boardDislikes.includes(codeCandidates[i].id) && codeCandidates.length > 1) codeCandidates.splice(i, 1);
+    }
+  }
   const forcedCode = forceCodeId ? codeCandidates.find(c => c.id === forceCodeId) : null;
   if (forceCodeId && !forcedCode) {
     const wanted = designCodes.find(c => c.id === forceCodeId);
@@ -1558,17 +1579,20 @@ function findeReferenzen(brief: string, codes: Array<{ id: string; name: string;
   }
   return out;
 }
-let codesCache: { t: number; v: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[] }> } | null = null;
-async function ladeCodesLeicht(): Promise<Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[] }>> {
+type CodeLeicht = { id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[]; bild: string | null; wirkstoffWelt: string[] };
+let codesCache: { t: number; v: CodeLeicht[] } | null = null;
+async function ladeCodesLeicht(): Promise<CodeLeicht[]> {
   if (codesCache && Date.now() - codesCache.t < 300000) return codesCache.v;
   const rows = await airtableListAll(DESIGN_CODE_TABLE);
-  const v = rows
+  const v: CodeLeicht[] = rows
     .filter((r: any) => (selectName(r.fields?.['Status']) || '') === 'Aktiv')
     .map((r: any) => ({
       id: r.id, name: String(r.fields['Name'] || ''), brand: String(r.fields['Brand'] || '').trim(),
       register: (selectName(r.fields['Register']) || '').toLowerCase() || null,
       tempLaut: (r.fields['Temp_Laut'] != null && r.fields['Temp_Laut'] !== '') ? Number(r.fields['Temp_Laut']) : null,
       segments: multiSelectNames(r.fields['Segment']),
+      bild: (() => { const a = r.fields['Referenz_Bild']; return Array.isArray(a) && a[0] ? (a[0].thumbnails?.large?.url || a[0].url || null) : null; })(),
+      wirkstoffWelt: multiSelectNames(r.fields['Wirkstoff_Welt']),
     }));
   codesCache = { t: Date.now(), v };
   return v;
@@ -1689,6 +1713,51 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null, register: out?.register ?? null, laut: out?.laut ?? null, worte: out?.worte ?? [], konflikt: out?.konflikt ?? null, referenz: ref2, antiReferenz: anti });
   }
 
+  /* ── Das Board: die Referenz-Runde als Bild ────────────────────────
+     Bakic fragt "brands and packagings you aspire to". ulba fragte das als
+     Text — und bekam ein Wort zurueck, das erst gegen das Archiv gematcht
+     werden musste. Ein Tipp auf ein echtes Produkt ist dagegen eine ganze
+     Koordinate: der Tagger hat jedes Referenzbild auf Welt, Lautstaerke und
+     Wirkstoff-Welt vermessen.
+     KEIN Konfigurator: es wird NIE das Archiv gezeigt, sondern immer eine
+     ABGELEITETE Auswahl von acht Bildern — gestreut ueber die Welten, damit
+     der Tipp etwas unterscheidet, und gewichtet nach dem, was schon bekannt
+     ist. Der Kunde setzt nichts zusammen; er zeigt auf etwas, und die Engine
+     leitet neu ab. */
+  if ((req.body as any)?.board === true) {
+    try {
+      const b = req.body as { brief?: string; wirkstoff?: string | null; register?: string | null };
+      const brief = String(b.brief || '').toLowerCase();
+      const alle = (await ladeCodesLeicht()).filter(c => c.bild && c.brand);
+      const wsWelt = (b.wirkstoff || '').toLowerCase();
+      const punkte = (c: typeof alle[number]) => {
+        let p = 0;
+        // Passt die Wirkstoff-Welt des Codes zum Wirkstoff im Brief, ist das
+        // Produkt naeher an der Aufgabe — aber nie ausschlaggebend.
+        if (wsWelt && c.wirkstoffWelt.some(w => w.toLowerCase().replace(/_/g, ' ').includes(wsWelt.split(' ')[0]))) p += 3;
+        if (b.register && c.register === b.register) p += 2;
+        if (brief && c.brand && brief.includes(c.brand.toLowerCase())) p += 4;
+        return p;
+      };
+      // Streuung zuerst: pro Welt der staerkste Kandidat, dann auffuellen.
+      const welten = [...new Set(alle.map(c => c.register).filter(Boolean))] as string[];
+      const gewaehlt: typeof alle = [];
+      for (const w of welten) {
+        const best = alle.filter(c => c.register === w).sort((x, y) => punkte(y) - punkte(x))[0];
+        if (best) gewaehlt.push(best);
+      }
+      const rest = alle.filter(c => !gewaehlt.includes(c)).sort((x, y) => punkte(y) - punkte(x));
+      while (gewaehlt.length < 8 && rest.length) gewaehlt.push(rest.shift()!);
+      gewaehlt.sort((x, y) => (x.tempLaut ?? 5) - (y.tempLaut ?? 5));
+      return res.status(200).json({
+        board: true,
+        codes: gewaehlt.slice(0, 8).map(c => ({ id: c.id, name: c.name, brand: c.brand, bild: c.bild, register: c.register, laut: c.tempLaut })),
+      });
+    } catch (e: any) {
+      return res.status(200).json({ board: true, codes: [] });
+    }
+  }
+
   const {
     systemId,
     query,
@@ -1702,10 +1771,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     nocache = false,
     dryRun = false,
     sucheQuery = null,
+    boardLikes = [],
+    boardDislikes = [],
   } = req.body as {
     systemId: string;
     query: string;
     sucheQuery?: string | null;
+    // Board-Tipps: Code-IDs, nicht Markennamen. Ein Tipp ist eine exakte
+    // Koordinate und schlaegt deshalb jedes Textmatching auf Markennamen.
+    boardLikes?: string[];
+    boardDislikes?: string[];
     renderBrief?: string | null;
     selectedCapId?: string | null;
     tier?: Tier;
@@ -1812,7 +1887,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge, farbortNudge, sucheQuery);
+      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge, farbortNudge, sucheQuery, boardLikes, boardDislikes);
 
     // ── 5b. dryRun: Behauptung ausliefern, NICHT rendern ────────────
     // Die Ableitung ist komplett (Code gewaehlt, Konzept gebaut) — nur das
