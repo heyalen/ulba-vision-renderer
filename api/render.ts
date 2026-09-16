@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v36-farbrollen';
+const RENDER_VERSION = 'v37-donot';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -339,6 +339,7 @@ type Concept = {
   // Die Herleitungs-Leiter: pro Brief-Signal eine Zeile Bedeutung -> Form -> weil.
   // Ein Profi-Brief waehlt nie, er leitet her — diese Kette IST die Herleitung.
   kette?: Array<{ typ: string; bedeutung: string; form: string; weil: string }>;
+  do_not?: string[];
   // Die ernsthaft geprüfte und begruendet verworfene Alternative ("Winning
   // Concept" heisst: es gab mehrere). Billigster Agentur-Beweis im System.
   verworfen?: { name: string; grund: string } | null;
@@ -436,6 +437,38 @@ function akzentCueEn(cue: string, akzentHex: string | null): string {
 //   4. Drei Farben + Materialeigenfarbe. Die vierte ist Rauschen.
 //   5. Sitzt der Traeger in der Fluessigkeit, wird die Huelle
 //      Materialeigenfarbe — dann traegt der Cap MEHR Last, nicht weniger.
+// Wirkstoff kommt aus dem BRIEF des Nutzers. Das Tag am Design_Code ist
+// HERKUNFT (aus welchem Produkt die Farbwelt eingefroren wurde), nicht Aussage
+// ueber dieses Produkt. Wer das verwechselt, schreibt "Botanisch Natur" auf ein
+// Vitamin-C-Serum. Spiegelt WIRKSTOFF_ERKENNUNG im Frontend.
+const WIRKSTOFF_BRIEF: [RegExp, string][] = [
+  [/vitamin\s*c/i, 'Vitamin C'],
+  [/retinol/i, 'Retinol'],
+  [/hyaluron/i, 'Hyaluron'],
+  [/barriere|sensitiv/i, 'Barrierepflege'],
+  [/akne|kl(ä|ae)rung/i, 'Klärung'],
+  [/botani|pflanz/i, 'Botanik'],
+  [/sonne|spf|\buv\b/i, 'Sonnenschutz'],
+];
+function wirkstoffAusBrief(brief: string): string | null {
+  for (const [re, name] of WIRKSTOFF_BRIEF) if (re.test(brief)) return name;
+  return null;
+}
+// Interne Feldwerte duerfen NIE im Kundentext landen. Haiku sieht sie in den
+// Kandidatenzeilen und schreibt sie sonst mit ("ingredient_block Typo").
+const FELDWORT_DE: Record<string, string> = {
+  ingredient_block: 'Wirkstoff-Panel', bold_wordmark: 'kräftige Wortmarke',
+  minimal_klein: 'zurückhaltende Typo', ohne: 'ohne Druck',
+  metallic_band: 'Metallband', gold_ring: 'Goldring', praegung: 'Prägung',
+  opak_recolor: 'eingefärbter Körper', klar_liquid_farbe: 'Farbe in der Flüssigkeit',
+  klar: 'klar', frosted: 'satiniert', koerper: 'Körper', liquid: 'Flüssigkeit',
+};
+function entfeldere(t: string): string {
+  let out = t;
+  for (const [k, v] of Object.entries(FELDWORT_DE)) out = out.split(k).join(v);
+  // Restliche snake_case-Tokens entschaerfen, statt sie durchzulassen.
+  return out.replace(/\b[a-z]+_[a-z_]+\b/g, m => m.replace(/_/g, ' ')).trim();
+}
 function hexRgb(h: string | null | undefined): [number, number, number] | null {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim());
   if (!m) return null;
@@ -492,6 +525,10 @@ function farbSystem(
   const dL = (lT && lC) ? Math.abs(lT[0] - lC[0]) : null;
   if (dE != null && dL != null && dE < 25 && dL < 20) {
     warnungen.push(`Träger und Gegenspieler liegen zu nah (ΔE ${dE.toFixed(0)}, ΔL ${dL.toFixed(0)}) — das Teil liest sich einfarbig.`);
+  }
+  const dES = deltaE(capHex, akzentHex);
+  if (dES != null && dES < 12 && rollen.some(r => r.rolle === 'Signal')) {
+    warnungen.push('Gegenspieler und Signal sind fast dieselbe Farbe — das Signal verschwindet im Verschluss.');
   }
   // Regel 3: nur eine Rolle laut. Hoechste Chroma gewinnt.
   const kand = rollen.filter(r => r.hex).map(r => ({ r, c: chromaOf(r.hex) }));
@@ -882,11 +919,12 @@ STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAUL
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
 STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
-STEP 10 — verworfen: the ONE other design code from the list you seriously considered and then rejected. {"code_id": its id, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or channel, never "passt nicht"}. Example: {"grund":"deine Douglas-Kundin liest das als Teen-Ware"}. If genuinely only one code is viable, set verworfen to null.
+STEP 10 — do_not: 2–3 short German clauses naming what this direction must NOT become. Concrete visual traps, not vague warnings — the difference between an 80-euro serum and multivitamin juice. Ground each in the brief's audience or shelf. Examples: "kein wörtliches Orange", "keine Tropfen- oder Frucht-Deko", "kein Bonbon-Rosa", "kein Stock-Vektor-Blatt". Never name a field value or an English word.
+STEP 11 — verworfen: the ONE other design code from the list you seriously considered and then rejected. {"code_id": its id, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or channel, never "passt nicht"}. Example: {"grund":"deine Douglas-Kundin liest das als Teen-Ware"}. If genuinely only one code is viable, set verworfen to null.
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
-{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"verworfen":{"code_id":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
+{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"do_not":["…","…"],"verworfen":{"code_id":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
   const res = await fetchT('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -1028,6 +1066,19 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const matEN = material.join(' / ') || 'plastic';
   const kategorie = String(matchedProdukt[0]?.fields['Kategorie'] || type || 'Beauty Product');
 
+  // Geschmacks-Verbote fuer den Bild-Prompt. Nur generische Fallen, keine
+  // uebersetzte Prosa — Seedream braucht kurze englische Negativbegriffe.
+  const DO_NOT_EN: [RegExp, string][] = [
+    [/orange/i, 'any literal orange fruit, citrus slice or fruit imagery'],
+    [/tropfen|frucht|obst/i, 'droplet, splash or fruit decoration'],
+    [/bonbon|candy|s(ü|ue)ss/i, 'candy-bright saturated pastel'],
+    [/blatt|botanic|pflanz|vektor/i, 'stock vector leaf or botanical clip-art'],
+    [/glitter|glanzeffekt|sparkle/i, 'glitter or sparkle effects'],
+    [/gradient|verlauf/i, 'multi-colour gradients on the body'],
+  ];
+  const doNotRaw: string[] = (Array.isArray(parsed?.do_not) ? parsed.do_not : []).map((d: any) => String(d || ''));
+  const doNotEn = [...new Set(DO_NOT_EN.filter(([re]) => doNotRaw.some(d => re.test(d))).map(([, en]) => en))];
+
   const lines: string[] = [];
   lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
   if (attrConstraints.length) {
@@ -1129,6 +1180,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     !!capFields
   );
   if (farbsys.regelEn) lines.push(farbsys.regelEn);
+  if (doNotEn.length) lines.push(`Avoid entirely: ${doNotEn.join('; ')}.`);
   // Immer weisses Studio — kein Szenen-Preset im Recolor-Modus.
   lines.push(`Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`);
 
@@ -1173,11 +1225,12 @@ OUTPUT ONLY this JSON, no fences, no prose:
   type KetteZeile = { typ: string; bedeutung: string; form: string; weil: string };
   const kette: KetteZeile[] = [];
 
-  // Typ 1 — Wirkstoff: die Engine kennt ihn aus dem Suchtext, sie fragt nie.
-  if (code.wirkstoffWelt.length) {
+  // Typ 1 — Wirkstoff: aus dem BRIEF. Das Tag am Code ist Herkunft, nicht Aussage.
+  const briefWirkstoff = wirkstoffAusBrief(brief);
+  if (briefWirkstoff) {
     kette.push({
       typ: 'Wirkstoff',
-      bedeutung: code.wirkstoffWelt.join(' · ').replace(/_/g, ' '),
+      bedeutung: briefWirkstoff,
       form: `Farbwelt ${displayPalName}`,
       weil: 'der Wirkstoff signalisiert die Farbe — sie ist Argument, nicht Dekor',
     });
@@ -1186,9 +1239,9 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // Aus dem Brief (Haiku) — Zielgruppe, Kanal, Referenz.
   const haikuKette = Array.isArray(parsed?.kette) ? parsed.kette : [];
   for (const z of haikuKette.slice(0, 3)) {
-    const bedeutung = String(z?.bedeutung || '').trim();
-    const form = String(z?.form || '').trim();
-    const weil = String(z?.weil || '').trim();
+    const bedeutung = entfeldere(String(z?.bedeutung || ''));
+    const form = entfeldere(String(z?.form || ''));
+    const weil = entfeldere(String(z?.weil || ''));
     if (bedeutung && form) kette.push({ typ: 'Brief', bedeutung: bedeutung.slice(0, 80), form: form.slice(0, 80), weil: weil.slice(0, 160) });
   }
 
@@ -1220,12 +1273,24 @@ OUTPUT ONLY this JSON, no fences, no prose:
     kette.push({ typ: 'Ausprägung', bedeutung: `Stufe ${code.stufe}/3`, form: v, weil: 'dieses Teil kann es nicht — die Haltung bleibt, der Träger wechselt' });
   }
 
+  // Was NICHT — Geschmacks-Verbote, getrennt von den Physik-Verboten (forbidden).
+  const doNot: string[] = doNotRaw
+    .map((d: string) => entfeldere(d).slice(0, 90))
+    .filter((d: string) => d.length > 3)
+    .slice(0, 3);
+
   // Die verworfene Alternative: "Winning Concept" heisst, es gab mehrere.
   const vwRaw = parsed?.verworfen;
   const vwCode = vwRaw?.code_id ? codeCandidates.find(c => c.id === String(vwRaw.code_id)) : null;
   const verworfen = (vwCode && vwCode.id !== code.id && String(vwRaw?.grund || '').trim())
     ? { name: vwCode.brand ? `${vwCode.name} (${vwCode.brand})` : vwCode.name, grund: String(vwRaw.grund).trim().slice(0, 160) }
     : null;
+
+  // Reihenfolge = Anzeigepriorität. Das Frontend zeigt die ersten drei; der
+  // Rest liegt hinter "alle Schritte". Brief zuerst (die Einsicht), dann der
+  // Beweis (Physik), dann die Provenienz (Farbe).
+  const RANG: Record<string, number> = { Brief: 0, Physik: 1, Farbe: 2, Wirkstoff: 3, 'Ausprägung': 4 };
+  kette.sort((a, b) => (RANG[a.typ] ?? 9) - (RANG[b.typ] ?? 9));
 
   const rawRadar = parsed?.radar || {};
   const radarAxes = ['waerme', 'prestige', 'energie', 'ruhe', 'natuerlichkeit', 'praezision'];
@@ -1247,6 +1312,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     zielprofil: zielProfil,
     segment: effectiveSegment,
     kette,
+    do_not: doNot,
     verworfen,
     farbsystem: farbsys,
     design_code: {
