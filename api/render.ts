@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v38-traeger';
+const RENDER_VERSION = 'v39-koerperwahrheit';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -904,6 +904,15 @@ ${refZeilen}
     `- code_id: ${c.id} | seg: ${c.segments.join('/') || '-'} | ${c.name} | body: ${c.bodyBehandlung}/${c.farbort}${c.bodyHex ? ` ${c.bodyHex}` : ''} | cap: ${c.capHex || 'preserve'} ${c.capFinish} | akzent: ${c.akzentCue} | typo: ${c.typoHaltung || '-'}${c.stufe < 3 ? ` | expression level ${c.stufe}/3 (lost: ${c.verlust.join('; ')})` : ''}${c.wirkstoffWelt.length ? ` | wirkstoff: ${c.wirkstoffWelt.join('/')}` : ''}${c.wirkungBeschreibung ? ` | wirkung: ${c.wirkungBeschreibung.slice(0, 130)}` : ''}${c.umleitung ? ' | (umgeleitet)' : ''}`
   ).join('\n');
 
+  /* Der Körper ist die groesste Flaeche. Kann dieses Teil ihn nicht tragen,
+     darf keine Zeile eine Koerperfarbe behaupten — sonst steht "klinisches
+     Silber" auf dem Blatt, waehrend eine klare Flasche im Bild steht. Haiku
+     sieht body-Hex in jeder Kandidatenzeile und schreibt ihn sonst mit. */
+  const koerperTraegt = colorable || isPlasticGate;
+  const koerperHinweisEn = koerperTraegt
+    ? 'the body of this part CAN be coloured — naming the body colour in kette is allowed.'
+    : 'the body of this part CANNOT be coloured (it stays its own material). NEVER name a body colour, silver, metallic body or tinted body in kette, story or herleitung — the expression lives on the closure, the accent and the print only. A code\'s body hex is its ORIGIN, not what will be visible here.';
+
   const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
 You NEVER write a visual prompt and NEVER invent materials, shapes, ingredients, actives, scents or claims.
 You only SELECT from the finite options below and write a short German concept grounded in the brief.
@@ -927,6 +936,7 @@ ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
+BODY-COLOUR TRUTH (hard): ${koerperHinweisEn}
 STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
 STEP 10 — do_not: 2–3 short German clauses naming what this direction must NOT become. Concrete visual traps, not vague warnings — the difference between an 80-euro serum and multivitamin juice. Ground each in the brief's audience or shelf. Examples: "kein wörtliches Orange", "keine Tropfen- oder Frucht-Deko", "kein Bonbon-Rosa", "kein Stock-Vektor-Blatt". Never name a field value or an English word.
 STEP 11 — verworfen (REQUIRED, never null unless only one code exists in the whole list): name the ONE other design code you seriously considered and then rejected. {"code_id": its exact id from the list, "name": its exact name from the list, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or shelf, never "passt nicht"}. Example: {"grund":"deine Käuferin ab 40 liest das als Teen-Ware"}. A presented direction without a rejected alternative reads as the only option instead of a decision — always fill this.
@@ -1336,7 +1346,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // Reihenfolge = Anzeigepriorität. Das Frontend zeigt die ersten drei; der
   // Rest liegt hinter "alle Schritte". Brief zuerst (die Einsicht), dann der
   // Beweis (Physik), dann die Provenienz (Farbe).
-  const RANG: Record<string, number> = { Brief: 0, Physik: 1, Farbe: 2, Wirkstoff: 3, 'Ausprägung': 4 };
+  const RANG: Record<string, number> = { Wirkstoff: 0, Brief: 1, Physik: 2, Farbe: 3, 'Ausprägung': 4 };
   kette.sort((a, b) => (RANG[a.typ] ?? 9) - (RANG[b.typ] ?? 9));
 
   const rawRadar = parsed?.radar || {};
