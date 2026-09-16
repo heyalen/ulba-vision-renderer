@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v35-farbort';
+const RENDER_VERSION = 'v36-farbrollen';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -336,6 +336,13 @@ type Concept = {
     beschreibung?: string | null; wirkstoff_welt?: string[]; zielgruppe?: string[];
   };
   render?: { bodyLineEn: string; capHex: string | null; capFinishEn: string; akzentEn: string };
+  // Die Herleitungs-Leiter: pro Brief-Signal eine Zeile Bedeutung -> Form -> weil.
+  // Ein Profi-Brief waehlt nie, er leitet her — diese Kette IST die Herleitung.
+  kette?: Array<{ typ: string; bedeutung: string; form: string; weil: string }>;
+  // Die ernsthaft geprüfte und begruendet verworfene Alternative ("Winning
+  // Concept" heisst: es gab mehrere). Billigster Agentur-Beweis im System.
+  verworfen?: { name: string; grund: string } | null;
+  farbsystem?: FarbSystem;
 };
 
 // ── Prompt Assembly v5 — Constrained Selection ──────────────────────
@@ -411,6 +418,97 @@ function akzentCueEn(cue: string, akzentHex: string | null): string {
     default: return '';
   }
 }
+// ── Farb-Rollensystem ───────────────────────────────────────────────
+// Drei Hex-Felder ohne Regel sind keine Farbwelt, sondern drei Felder.
+// Rollen statt Positionen:
+//   Traeger      (Body_Hex,   ~70 %) traegt die WELT — wo du hingehoerst.
+//   Gegenspieler (Cap_Hex,    ~25 %) gibt die zweite Lesart. Fehlt er,
+//                                    liest sich alles wie Lagerware.
+//   Signal       (Akzent_Hex, <=10 %) traegt das ARGUMENT (Wirkstoff, Premium-Cue).
+// Harte Regeln:
+//   1. Jede Farbe braucht einen physischen Traeger -> Akzent_Hex ohne
+//      Akzent_Cue ist UNGUELTIG (nicht unschoen). Genau der Zustand, der
+//      "Silver Clinical" stillgelegt hatte.
+//   2. Mono-Verbot MIT ZAHL: Traeger vs. Gegenspieler brauchen dE >= 25
+//      ODER dL >= 20. Ohne Zahl prueft es niemand.
+//   3. Nur EINE Rolle darf laut sein (hoechste Chroma gewinnt) — der Rest
+//      geht ins Gedeckte. Die einzige Regel, die Bonbon-Chaos verhindert.
+//   4. Drei Farben + Materialeigenfarbe. Die vierte ist Rauschen.
+//   5. Sitzt der Traeger in der Fluessigkeit, wird die Huelle
+//      Materialeigenfarbe — dann traegt der Cap MEHR Last, nicht weniger.
+function hexRgb(h: string | null | undefined): [number, number, number] | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function hexLab(h: string | null | undefined): [number, number, number] | null {
+  const rgb = hexRgb(h);
+  if (!rgb) return null;
+  const lin = rgb.map(v => { const c = v / 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); });
+  const [r, g, b] = lin;
+  // sRGB -> XYZ (D65) -> Lab
+  let x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047;
+  let y = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 1.0;
+  let z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883;
+  const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : (7.787 * t + 16 / 116);
+  x = f(x); y = f(y); z = f(z);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+function deltaE(a: string | null | undefined, b: string | null | undefined): number | null {
+  const la = hexLab(a), lb = hexLab(b);
+  if (!la || !lb) return null;
+  return Math.sqrt((la[0] - lb[0]) ** 2 + (la[1] - lb[1]) ** 2 + (la[2] - lb[2]) ** 2);
+}
+function chromaOf(h: string | null | undefined): number {
+  const l = hexLab(h);
+  return l ? Math.sqrt(l[1] ** 2 + l[2] ** 2) : 0;
+}
+type FarbRolle = { rolle: 'Träger' | 'Gegenspieler' | 'Signal'; hex: string; ort: string; cue?: string };
+type FarbSystem = { rollen: FarbRolle[]; laut: string | null; warnungen: string[]; regelEn: string };
+function farbSystem(
+  traegerHex: string | null,
+  traegerOrt: string,
+  capHex: string | null,
+  akzentHex: string | null,
+  akzentCue: string,
+  capVorhanden: boolean
+): FarbSystem {
+  const rollen: FarbRolle[] = [];
+  const warnungen: string[] = [];
+  if (traegerHex && hexRgb(traegerHex)) rollen.push({ rolle: 'Träger', hex: traegerHex.toUpperCase(), ort: traegerOrt });
+  if (capHex && hexRgb(capHex)) rollen.push({ rolle: 'Gegenspieler', hex: capHex.toUpperCase(), ort: 'Verschluss' });
+  else if (capVorhanden) rollen.push({ rolle: 'Gegenspieler', hex: '', ort: 'Verschluss — Materialeigenfarbe' });
+  // Regel 1: Signal nur MIT Traeger (Cue). Hex ohne Cue ist tote Information.
+  const cueEcht = !!akzentCue && akzentCue !== 'kein' && akzentCue !== 'none';
+  if (akzentHex && hexRgb(akzentHex) && cueEcht) {
+    rollen.push({ rolle: 'Signal', hex: akzentHex.toUpperCase(), ort: 'Akzent', cue: akzentCue });
+  } else if (akzentHex && hexRgb(akzentHex) && !cueEcht) {
+    warnungen.push('Akzentfarbe ohne Träger (kein Akzent_Cue) — die Farbe hat keine Fläche und fällt lautlos weg.');
+  }
+  // Regel 2: Mono-Verbot mit Zahl.
+  const dE = deltaE(traegerHex, capHex);
+  const lT = hexLab(traegerHex), lC = hexLab(capHex);
+  const dL = (lT && lC) ? Math.abs(lT[0] - lC[0]) : null;
+  if (dE != null && dL != null && dE < 25 && dL < 20) {
+    warnungen.push(`Träger und Gegenspieler liegen zu nah (ΔE ${dE.toFixed(0)}, ΔL ${dL.toFixed(0)}) — das Teil liest sich einfarbig.`);
+  }
+  // Regel 3: nur eine Rolle laut. Hoechste Chroma gewinnt.
+  const kand = rollen.filter(r => r.hex).map(r => ({ r, c: chromaOf(r.hex) }));
+  const laut = kand.length ? kand.reduce((a, b) => b.c > a.c ? b : a).r : null;
+  const lautName = laut && chromaOf(laut.hex) > 12 ? laut.rolle : null;
+  if (kand.filter(k => k.c > 35).length > 1) {
+    warnungen.push('Mehr als eine Rolle ist voll gesättigt — zwei laute Farben nebeneinander lesen sich als Zufall, nicht als Entscheidung.');
+  }
+  // Regel 4: vierte Farbe ist Rauschen (Materialeigenfarbe zaehlt nicht mit).
+  if (rollen.filter(r => r.hex).length > 3) warnungen.push('Mehr als drei Farben — die vierte ist Rauschen.');
+  // Harte Render-Regel: Hierarchie in den Prompt, nicht nur in die Anzeige.
+  const regelEn = lautName
+    ? `Colour hierarchy (hard): only the ${lautName === 'Träger' ? (traegerOrt === 'Flüssigkeit' ? 'liquid' : 'body') : lautName === 'Gegenspieler' ? 'closure' : 'accent'} carries full saturation; every other coloured element stays visibly muted and desaturated so it supports that one instead of competing with it. Never more than one loud colour.`
+    : '';
+  return { rollen, laut: lautName, warnungen, regelEn };
+}
+
 type DesignCodeRec = {
   id: string;
   name: string;
@@ -783,10 +881,12 @@ ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
+STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
+STEP 10 — verworfen: the ONE other design code from the list you seriously considered and then rejected. {"code_id": its id, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or channel, never "passt nicht"}. Example: {"grund":"deine Douglas-Kundin liest das als Teen-Ware"}. If genuinely only one code is viable, set verworfen to null.
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
-{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
+{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"verworfen":{"code_id":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
   const res = await fetchT('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -798,7 +898,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     timeoutMs: 30000, label: 'anthropic haiku',
     body: JSON.stringify({
       model: 'claude-haiku-4-5',
-      max_tokens: 500,
+      max_tokens: 1000,
       temperature: 0,
       system: selectionPrompt,
       messages: [{ role: 'user', content: brief }],
@@ -1015,6 +1115,20 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const codeAkzentEn = akzentCueEn(code.akzentCue, code.akzentHex);
   if (codeAkzentEn) lines.push(`Add ${codeAkzentEn}.`);
   if (AKZENT_EN[akzent]) lines.push(`Add ${AKZENT_EN[akzent]}.`);
+  // ── Rollen-Hierarchie als HARTE Render-Regel ───────────────────────
+  // Sitzt der Traeger in der Fluessigkeit, wird die Huelle Materialeigenfarbe
+  // -> der Cap ist dann der einzige chromatische Anker am Gebinde und traegt
+  // mehr Last. Das ist eine ableitbare Regel, keine Geschmacksfrage.
+  const traegerOrt = code2.farbort === 'liquid' ? 'Flüssigkeit' : 'Körper';
+  const farbsys = farbSystem(
+    code2.farbort === 'liquid' ? codeBodyHexFuellung : codeBodyHex,
+    traegerOrt,
+    code.capHex,
+    code.akzentHex,
+    code.akzentCue,
+    !!capFields
+  );
+  if (farbsys.regelEn) lines.push(farbsys.regelEn);
   // Immer weisses Studio — kein Szenen-Preset im Recolor-Modus.
   lines.push(`Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`);
 
@@ -1051,6 +1165,68 @@ OUTPUT ONLY this JSON, no fences, no prose:
     herleitung || `Die Farbwelt ${displayPalName} und ${FINISH_DE[finish]} folgen aus dem Brief.`,
   ].filter(Boolean).join(' — ');
 
+  // ── Die Herleitungs-Leiter ────────────────────────────────────────
+  // Arbeitsteilung: was die Engine WEISS, schreibt die Engine (Wirkstoff,
+  // Physik, Farbprovenienz, Verlust) — deterministisch, nie halluziniert.
+  // Was nur im Brief steht (Zielgruppe, Kanal, Referenz), schreibt Haiku.
+  // Deshalb entsteht Tiefe OHNE eine einzige zusaetzliche Frage.
+  type KetteZeile = { typ: string; bedeutung: string; form: string; weil: string };
+  const kette: KetteZeile[] = [];
+
+  // Typ 1 — Wirkstoff: die Engine kennt ihn aus dem Suchtext, sie fragt nie.
+  if (code.wirkstoffWelt.length) {
+    kette.push({
+      typ: 'Wirkstoff',
+      bedeutung: code.wirkstoffWelt.join(' · ').replace(/_/g, ' '),
+      form: `Farbwelt ${displayPalName}`,
+      weil: 'der Wirkstoff signalisiert die Farbe — sie ist Argument, nicht Dekor',
+    });
+  }
+
+  // Aus dem Brief (Haiku) — Zielgruppe, Kanal, Referenz.
+  const haikuKette = Array.isArray(parsed?.kette) ? parsed.kette : [];
+  for (const z of haikuKette.slice(0, 3)) {
+    const bedeutung = String(z?.bedeutung || '').trim();
+    const form = String(z?.form || '').trim();
+    const weil = String(z?.weil || '').trim();
+    if (bedeutung && form) kette.push({ typ: 'Brief', bedeutung: bedeutung.slice(0, 80), form: form.slice(0, 80), weil: weil.slice(0, 160) });
+  }
+
+  // Typ 2 — Physik: die Wand des realen Teils. Kann keine Agentur wissen.
+  kette.push({
+    typ: 'Physik',
+    bedeutung: `${matEN.replace(/^(a|an) /, '')}${closureCoverage.length ? `, ${closureCoverage.join('/')}` : ''}`,
+    form: traegerOrt === 'Flüssigkeit' ? 'Farbe in die Flüssigkeit' : 'Farbe in den Körper',
+    weil: traegerOrt === 'Flüssigkeit'
+      ? 'das Gebinde bleibt transparent — die Hülle kann den Ausdruck nicht tragen'
+      : 'der Körper ist belegt einfärbbar, also trägt er die Welt',
+  });
+
+  // Farbe ist relational, nicht absolut — und geerbt statt erfunden.
+  // Ein Hex aus einem real produzierten Produkt ist STAERKER als ein
+  // hergeleiteter: darum nennt diese Zeile Provenienz, nie "abgeleitet".
+  if (code.brand) {
+    const rollenTxt = farbsys.rollen.filter(r => r.hex).map(r => `${r.rolle} ${r.hex}`).join(' · ');
+    kette.push({
+      typ: 'Farbe',
+      bedeutung: `Farbwelt aus ${code.brand}${code.produkt ? ` ${code.produkt}` : ''}`,
+      form: rollenTxt || displayPalName,
+      weil: 'real produziert, nicht geraten — am Regal bewiesen',
+    });
+  }
+
+  // Ausprägung: was auf DIESEM Teil wegfällt, wird benannt statt verschwiegen.
+  for (const v of code.verlust) {
+    kette.push({ typ: 'Ausprägung', bedeutung: `Stufe ${code.stufe}/3`, form: v, weil: 'dieses Teil kann es nicht — die Haltung bleibt, der Träger wechselt' });
+  }
+
+  // Die verworfene Alternative: "Winning Concept" heisst, es gab mehrere.
+  const vwRaw = parsed?.verworfen;
+  const vwCode = vwRaw?.code_id ? codeCandidates.find(c => c.id === String(vwRaw.code_id)) : null;
+  const verworfen = (vwCode && vwCode.id !== code.id && String(vwRaw?.grund || '').trim())
+    ? { name: vwCode.brand ? `${vwCode.name} (${vwCode.brand})` : vwCode.name, grund: String(vwRaw.grund).trim().slice(0, 160) }
+    : null;
+
   const rawRadar = parsed?.radar || {};
   const radarAxes = ['waerme', 'prestige', 'energie', 'ruhe', 'natuerlichkeit', 'praezision'];
   const radar: Record<string, number> = {};
@@ -1070,6 +1246,9 @@ OUTPUT ONLY this JSON, no fences, no prose:
     radar,
     zielprofil: zielProfil,
     segment: effectiveSegment,
+    kette,
+    verworfen,
+    farbsystem: farbsys,
     design_code: {
       id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut,
       brand: code.brand || null, produkt: code.produkt || null,
