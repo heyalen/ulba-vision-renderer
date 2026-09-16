@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v39-koerperwahrheit';
+const RENDER_VERSION = 'v40-transparenz';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -911,7 +911,7 @@ ${refZeilen}
   const koerperTraegt = colorable || isPlasticGate;
   const koerperHinweisEn = koerperTraegt
     ? 'the body of this part CAN be coloured — naming the body colour in kette is allowed.'
-    : 'the body of this part CANNOT be coloured (it stays its own material). NEVER name a body colour, silver, metallic body or tinted body in kette, story or herleitung — the expression lives on the closure, the accent and the print only. A code\'s body hex is its ORIGIN, not what will be visible here.';
+    : 'the body of this part CANNOT be coloured (it stays its own material). NEVER name a body colour, silver, metallic body or tinted body in kette, story or herleitung — the expression lives on the closure, the accent and the print only. A code\'s body hex is its ORIGIN, not what will be visible here. The body therefore stays CLEAR AND TRANSPARENT: never write that transparency is avoided, rejected or subtracted (not in kette, not in do_not, not when subtracting a rejected brand\'s traits) — the picture will visibly show a transparent bottle and the sheet would contradict it. Subtract the rejected brand\'s colour, tone and decoration instead.';
 
   const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
 You NEVER write a visual prompt and NEVER invent materials, shapes, ingredients, actives, scents or claims.
@@ -1094,9 +1094,10 @@ OUTPUT ONLY this JSON, no fences, no prose:
     [/blatt|botanic|pflanz|vektor/i, 'stock vector leaf or botanical clip-art'],
     [/glitter|glanzeffekt|sparkle/i, 'glitter or sparkle effects'],
     [/gradient|verlauf/i, 'multi-colour gradients on the body'],
+    [/transparen|durchsichtig|klarglas/i, ''],
   ];
   const doNotRaw: string[] = (Array.isArray(parsed?.do_not) ? parsed.do_not : []).map((d: any) => String(d || ''));
-  const doNotEn = [...new Set(DO_NOT_EN.filter(([re]) => doNotRaw.some(d => re.test(d))).map(([, en]) => en))];
+  const doNotEn = [...new Set(DO_NOT_EN.filter(([re]) => doNotRaw.some(d => re.test(d))).map(([, en]) => en))].filter(Boolean);
 
   const lines: string[] = [];
   lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
@@ -1323,6 +1324,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
 
   // Was NICHT — Geschmacks-Verbote, getrennt von den Physik-Verboten (forbidden).
   const doNot: string[] = doNotRaw
+    .filter((d: string) => !(traegerOrt === 'Material' && /transparen|durchsichtig|klarglas/i.test(d)))
     .map((d: string) => entfeldere(d).slice(0, 90))
     .filter((d: string) => d.length > 3)
     .slice(0, 3);
@@ -1338,10 +1340,11 @@ OUTPUT ONLY this JSON, no fences, no prose:
     || (vwName && codeCandidates.find(c => c.name.toLowerCase() === vwName))
     || (vwName && codeCandidates.find(c => c.name.toLowerCase().includes(vwName) || vwName.includes(c.name.toLowerCase())))
     || null;
-  const verworfen = (vwCode && vwCode.id !== code.id && vwGrund)
+  const namensgleich = !!vwCode && vwCode.name.trim().toLowerCase() === code.name.trim().toLowerCase();
+  const verworfen = (vwCode && vwCode.id !== code.id && !namensgleich && vwGrund)
     ? { name: vwCode.brand ? `${vwCode.name} (${vwCode.brand})` : vwCode.name, grund: vwGrund }
     : null;
-  if (!verworfen && vwGrund) console.log('[verworfen] nicht auflösbar:', vwRaw?.code_id, vwRaw?.name);
+  if (!verworfen && vwGrund) console.log('[verworfen] verworfen:', vwRaw?.code_id, vwRaw?.name, namensgleich ? '(namensgleich)' : '(nicht auflösbar)');
 
   // Reihenfolge = Anzeigepriorität. Das Frontend zeigt die ersten drei; der
   // Rest liegt hinter "alle Schritte". Brief zuerst (die Einsicht), dann der
