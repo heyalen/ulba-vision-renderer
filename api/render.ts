@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v41-wirkstoff';
+const RENDER_VERSION = 'v42-wirkstoff-base';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -441,75 +441,44 @@ function akzentCueEn(cue: string, akzentHex: string | null): string {
 // HERKUNFT (aus welchem Produkt die Farbwelt eingefroren wurde), nicht Aussage
 // ueber dieses Produkt. Wer das verwechselt, schreibt "Botanisch Natur" auf ein
 // Vitamin-C-Serum. Spiegelt WIRKSTOFF_ERKENNUNG im Frontend.
-const WIRKSTOFF_BRIEF: [RegExp, string][] = [
-  [/vitamin\s*c/i, 'Vitamin C'],
-  [/retinol/i, 'Retinol'],
-  [/hyaluron/i, 'Hyaluron'],
-  [/barriere|sensitiv/i, 'Barrierepflege'],
-  [/akne|kl(ä|ae)rung/i, 'Klärung'],
-  [/botani|pflanz/i, 'Botanik'],
-  [/sonne|spf|\buv\b/i, 'Sonnenschutz'],
-];
-function wirkstoffAusBrief(brief: string): string | null {
-  for (const [re, name] of WIRKSTOFF_BRIEF) if (re.test(brief)) return name;
-  return null;
-}
 /* ── Wirkstoff-Referenz (Typ 1: ABSOLUT) ───────────────────────────────
-   Die drei Wahrheiten pro Wirkstoff: funktional (was die Formel erzwingt),
-   emotional (was der Wirkstoff VERSPRICHT — die Schicht, die bisher fehlte)
-   und die Farb-Assoziation, plus eigene do_not-Klauseln.
-   Struktur absichtlich 1:1 wie die geplante Airtable-Tabelle `Wirkstoff`
-   (Name · Keywords · funktional · emotional · farb_assoziation · do_not) —
-   der Umzug in die Base ist dann ein Kopiervorgang, kein Umbau.
-   WICHTIG: Das hier sind Universalien einer KLASSE. Das Wirkstoff-Tag am
-   Design_Code bleibt Herkunft, nicht Aussage. */
+   Quelle: Airtable-Tabelle `Wirkstoffe` — Universalien pro KLASSE, von Alen
+   gepflegt. Nicht zu verwechseln mit Design_Code.Wirkstoff_Welt: das ist die
+   HERKUNFT eines Codes, hier steht die BEDEUTUNG des Wirkstoffs.
+   Modul-Cache 5 Min (wie ladeCodesLeicht) — kostet damit keine Ladezeit pro
+   Zug und wirkt trotzdem kurz nach dem Speichern in Airtable. */
+const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 type WirkstoffRef = {
-  name: string; keys: RegExp;
-  emotional: string;          // das Versprechen, in einem Halbsatz
-  farbe: string;              // die Design-Konsequenz (nicht der Palettenname)
+  name: string; keys: string[];
+  emotional: string; farbe: string;
   temp: 'warm' | 'kuehl' | 'neutral';
   doNot: string[];
 };
-const WIRKSTOFFE: WirkstoffRef[] = [
-  { name: 'Vitamin C', keys: /vitamin\s*c|ascorb/i,
-    emotional: 'Vitamin C verspricht Glow und Aufwachen — die Farbe ist Signal, nicht Dekor',
-    farbe: 'warm-helle Farbwelt', temp: 'warm',
-    doNot: ['kein wörtliches Orange', 'keine Zitrusscheibe oder Fruchtdeko'] },
-  { name: 'Retinol', keys: /retinol|retinal|retinoid/i,
-    emotional: 'Retinol verspricht Erneuerung und verlangt Disziplin — das liest sich ernst, nicht leicht',
-    farbe: 'gedeckte, dunkle Farbwelt', temp: 'kuehl',
-    doNot: ['keine verspielte Farbe', 'kein Wellness-Ton'] },
-  { name: 'Hyaluron', keys: /hyaluron|hyaluronic/i,
-    emotional: 'Hyaluron verspricht Prallheit und Ruhe — Wasser, nicht Wirkstoff-Härte',
-    farbe: 'kühl-klare Farbwelt', temp: 'kuehl',
-    doNot: ['keine Tropfen- oder Wellen-Deko', 'kein Aqua-Kitsch'] },
-  { name: 'Niacinamid', keys: /niacinamid|niacinamide|vitamin\s*b3/i,
-    emotional: 'Niacinamid verspricht Ausgleich statt Sensation — das trägt Vernunft, nicht Drama',
-    farbe: 'neutrale, gedeckte Farbwelt', temp: 'neutral',
-    doNot: ['keine Sensationsfarbe', 'keine Vorher-Nachher-Anmutung'] },
-  { name: 'Barrierepflege', keys: /barriere|barrier|ceramid|sensitiv|panthenol/i,
-    emotional: 'Barrierepflege verspricht Schutz und Beruhigung — Nähe zur Haut, keine Härte',
-    farbe: 'warm-neutrale, hautnahe Farbwelt', temp: 'warm',
-    doNot: ['kein kaltes Klinik-Weiß', 'keine aggressive Wirkstoff-Rhetorik'] },
-  { name: 'Klärung', keys: /akne|acne|bha|aha|salicyl|glykol|kl(ä|ae)rung|unrein/i,
-    emotional: 'Klärung verspricht Kontrolle — reduziert und sachlich, nie beschämend',
-    farbe: 'kühle, reduzierte Farbwelt', temp: 'kuehl',
-    doNot: ['keine Teen-Codes', 'keine Warnfarbe', 'keine Problemhaut-Bildsprache'] },
-  { name: 'Botanik', keys: /botani|pflanz|kräuter|kraeuter|blüten|blueten|extrakt/i,
-    emotional: 'Botanik verspricht Herkunft und Handwerk — gewachsen, nicht gemacht',
-    farbe: 'erdige, gedeckte Farbwelt', temp: 'warm',
-    doNot: ['kein Stock-Vektor-Blatt', 'kein Greenwashing-Grün'] },
-  { name: 'Sonnenschutz', keys: /sonne|spf|\buv\b|sunscreen|lsf/i,
-    emotional: 'Sonnenschutz verspricht Alltag und Leichtigkeit — täglich, nicht besonders',
-    farbe: 'helle, warme Farbwelt', temp: 'warm',
-    doNot: ['keine Strand- oder Urlaubsklischees', 'keine Sonnensymbole'] },
-  { name: 'Peptide', keys: /peptid|peptide|biotech/i,
-    emotional: 'Peptide versprechen Präzision — Biotechnik, nicht Kosmetik',
-    farbe: 'kühle, technische Farbwelt', temp: 'kuehl',
-    doNot: ['keine Sci-Fi-Chrome-Anmutung', 'keine Laborklischees'] },
-];
-function wirkstoffRef(text: string): WirkstoffRef | null {
-  for (const w of WIRKSTOFFE) if (w.keys.test(text)) return w;
+let wirkstoffCache: { t: number; data: WirkstoffRef[] } | null = null;
+async function ladeWirkstoffe(): Promise<WirkstoffRef[]> {
+  if (wirkstoffCache && Date.now() - wirkstoffCache.t < 300000) return wirkstoffCache.data;
+  const recs = await airtableListAll(WIRKSTOFF_TABLE);
+  const teile = (v: any) => String(v || '').split(',').map((x: string) => x.trim()).filter(Boolean);
+  const data: WirkstoffRef[] = recs
+    .filter((r: any) => (selectName(r.fields['Status']) || 'aktiv').toLowerCase() === 'aktiv')
+    .map((r: any) => ({
+      name: String(r.fields['Name'] || '').trim(),
+      keys: teile(r.fields['Keywords']).map((k: string) => k.toLowerCase()),
+      emotional: String(r.fields['Emotional'] || '').trim(),
+      farbe: String(r.fields['Farb_Assoziation'] || '').trim(),
+      temp: ((selectName(r.fields['Temperatur']) || 'neutral').toLowerCase() as 'warm' | 'kuehl' | 'neutral'),
+      doNot: teile(r.fields['Do_Not']),
+    }))
+    .filter((w: WirkstoffRef) => !!w.name && w.keys.length > 0 && !!w.emotional);
+  // Laengstes Keyword zuerst pruefen: "vitamin c" schlaegt "vitamin a",
+  // wenn ein Brief beides streift.
+  data.sort((a, b) => Math.max(...b.keys.map(k => k.length)) - Math.max(...a.keys.map(k => k.length)));
+  wirkstoffCache = { t: Date.now(), data };
+  return data;
+}
+function wirkstoffTreffer(text: string, liste: WirkstoffRef[]): WirkstoffRef | null {
+  const t = (text || '').toLowerCase();
+  for (const w of liste) if (w.keys.some(k => t.includes(k))) return w;
   return null;
 }
 // Interne Feldwerte duerfen NIE im Kundentext landen. Haiku sieht sie in den
@@ -692,11 +661,15 @@ async function assemblePrompt(
   // nie als Brief-Text interpretiert.
   sucheQuery: string | null = null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
-  const [produktRegeln, farbpalettenAll, designCodesAll] = await Promise.all([
+  const [produktRegeln, farbpalettenAll, designCodesAll, wirkstoffListe] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
     airtableListAll(FARBPALETTEN_TABLE),
     airtableListAll(DESIGN_CODE_TABLE),
+    ladeWirkstoffe().catch(() => [] as WirkstoffRef[]),
   ]);
+  // Ein Treffer pro Zug: Brief schlaegt Suchtext (der Nutzer ist praeziser als
+  // seine Suche), Suchtext faengt den Fall "Wirkstoff nur im Suchfeld genannt".
+  const wsRef = wirkstoffTreffer(brief, wirkstoffListe) || wirkstoffTreffer(sucheQuery || '', wirkstoffListe);
   // v5: Active-Filter (Bugfix — inaktive Paletten konnten bisher matchen).
   const farbpaletten = farbpalettenAll.filter(p => !!p.fields['Active']);
 
@@ -973,7 +946,7 @@ ${refZeilen}
 
   /* Typ-1-Wahrheit an die Auswahl weitergeben: Haiku soll wissen, was der
      Wirkstoff verspricht, damit ziel_profil und kette nicht dagegen laufen. */
-  const wsHint = wirkstoffRef(brief) || wirkstoffRef(sucheQuery || '');
+  const wsHint = wsRef;
   const wirkstoffHinweisEn = wsHint
     ? `\nACTIVE TRUTH: the brief names ${wsHint.name}. Its promise: ${wsHint.emotional}. Its colour expectation: ${wsHint.farbe} (${wsHint.temp}). Forbidden for this active: ${wsHint.doNot.join('; ')}. Honour it unless a loved reference brand pulls the other way — then follow the brand and say so.`
     : '';
@@ -1162,7 +1135,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     [/transparen|durchsichtig|klarglas/i, ''],
   ];
   const doNotRaw: string[] = (Array.isArray(parsed?.do_not) ? parsed.do_not : []).map((d: any) => String(d || ''));
-  const wsPrompt = wirkstoffRef(brief) || wirkstoffRef(sucheQuery || '');
+  const wsPrompt = wsRef;
   const doNotAlle = [...doNotRaw, ...(wsPrompt ? wsPrompt.doNot : [])];
   const doNotEn = [...new Set(DO_NOT_EN.filter(([re]) => doNotAlle.some(d => re.test(d))).map(([, en]) => en))].filter(Boolean);
 
@@ -1325,7 +1298,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const wirkstoffDoNot: string[] = [];
 
   // Typ 1 — Wirkstoff: aus dem BRIEF. Das Tag am Code ist Herkunft, nicht Aussage.
-  const wref = wirkstoffRef(brief) || wirkstoffRef(sucheQuery || '');
+  const wref = wsRef;
   if (wref) {
     /* Divergenz ehrlich benennen: Der Wirkstoff ERWARTET eine Temperatur, der
        gewählte Code bringt seine eigene mit (oft weil eine Referenzmarke der
