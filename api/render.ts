@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v40-transparenz';
+const RENDER_VERSION = 'v41-wirkstoff';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -452,6 +452,64 @@ const WIRKSTOFF_BRIEF: [RegExp, string][] = [
 ];
 function wirkstoffAusBrief(brief: string): string | null {
   for (const [re, name] of WIRKSTOFF_BRIEF) if (re.test(brief)) return name;
+  return null;
+}
+/* ── Wirkstoff-Referenz (Typ 1: ABSOLUT) ───────────────────────────────
+   Die drei Wahrheiten pro Wirkstoff: funktional (was die Formel erzwingt),
+   emotional (was der Wirkstoff VERSPRICHT — die Schicht, die bisher fehlte)
+   und die Farb-Assoziation, plus eigene do_not-Klauseln.
+   Struktur absichtlich 1:1 wie die geplante Airtable-Tabelle `Wirkstoff`
+   (Name · Keywords · funktional · emotional · farb_assoziation · do_not) —
+   der Umzug in die Base ist dann ein Kopiervorgang, kein Umbau.
+   WICHTIG: Das hier sind Universalien einer KLASSE. Das Wirkstoff-Tag am
+   Design_Code bleibt Herkunft, nicht Aussage. */
+type WirkstoffRef = {
+  name: string; keys: RegExp;
+  emotional: string;          // das Versprechen, in einem Halbsatz
+  farbe: string;              // die Design-Konsequenz (nicht der Palettenname)
+  temp: 'warm' | 'kuehl' | 'neutral';
+  doNot: string[];
+};
+const WIRKSTOFFE: WirkstoffRef[] = [
+  { name: 'Vitamin C', keys: /vitamin\s*c|ascorb/i,
+    emotional: 'Vitamin C verspricht Glow und Aufwachen — die Farbe ist Signal, nicht Dekor',
+    farbe: 'warm-helle Farbwelt', temp: 'warm',
+    doNot: ['kein wörtliches Orange', 'keine Zitrusscheibe oder Fruchtdeko'] },
+  { name: 'Retinol', keys: /retinol|retinal|retinoid/i,
+    emotional: 'Retinol verspricht Erneuerung und verlangt Disziplin — das liest sich ernst, nicht leicht',
+    farbe: 'gedeckte, dunkle Farbwelt', temp: 'kuehl',
+    doNot: ['keine verspielte Farbe', 'kein Wellness-Ton'] },
+  { name: 'Hyaluron', keys: /hyaluron|hyaluronic/i,
+    emotional: 'Hyaluron verspricht Prallheit und Ruhe — Wasser, nicht Wirkstoff-Härte',
+    farbe: 'kühl-klare Farbwelt', temp: 'kuehl',
+    doNot: ['keine Tropfen- oder Wellen-Deko', 'kein Aqua-Kitsch'] },
+  { name: 'Niacinamid', keys: /niacinamid|niacinamide|vitamin\s*b3/i,
+    emotional: 'Niacinamid verspricht Ausgleich statt Sensation — das trägt Vernunft, nicht Drama',
+    farbe: 'neutrale, gedeckte Farbwelt', temp: 'neutral',
+    doNot: ['keine Sensationsfarbe', 'keine Vorher-Nachher-Anmutung'] },
+  { name: 'Barrierepflege', keys: /barriere|barrier|ceramid|sensitiv|panthenol/i,
+    emotional: 'Barrierepflege verspricht Schutz und Beruhigung — Nähe zur Haut, keine Härte',
+    farbe: 'warm-neutrale, hautnahe Farbwelt', temp: 'warm',
+    doNot: ['kein kaltes Klinik-Weiß', 'keine aggressive Wirkstoff-Rhetorik'] },
+  { name: 'Klärung', keys: /akne|acne|bha|aha|salicyl|glykol|kl(ä|ae)rung|unrein/i,
+    emotional: 'Klärung verspricht Kontrolle — reduziert und sachlich, nie beschämend',
+    farbe: 'kühle, reduzierte Farbwelt', temp: 'kuehl',
+    doNot: ['keine Teen-Codes', 'keine Warnfarbe', 'keine Problemhaut-Bildsprache'] },
+  { name: 'Botanik', keys: /botani|pflanz|kräuter|kraeuter|blüten|blueten|extrakt/i,
+    emotional: 'Botanik verspricht Herkunft und Handwerk — gewachsen, nicht gemacht',
+    farbe: 'erdige, gedeckte Farbwelt', temp: 'warm',
+    doNot: ['kein Stock-Vektor-Blatt', 'kein Greenwashing-Grün'] },
+  { name: 'Sonnenschutz', keys: /sonne|spf|\buv\b|sunscreen|lsf/i,
+    emotional: 'Sonnenschutz verspricht Alltag und Leichtigkeit — täglich, nicht besonders',
+    farbe: 'helle, warme Farbwelt', temp: 'warm',
+    doNot: ['keine Strand- oder Urlaubsklischees', 'keine Sonnensymbole'] },
+  { name: 'Peptide', keys: /peptid|peptide|biotech/i,
+    emotional: 'Peptide versprechen Präzision — Biotechnik, nicht Kosmetik',
+    farbe: 'kühle, technische Farbwelt', temp: 'kuehl',
+    doNot: ['keine Sci-Fi-Chrome-Anmutung', 'keine Laborklischees'] },
+];
+function wirkstoffRef(text: string): WirkstoffRef | null {
+  for (const w of WIRKSTOFFE) if (w.keys.test(text)) return w;
   return null;
 }
 // Interne Feldwerte duerfen NIE im Kundentext landen. Haiku sieht sie in den
@@ -913,6 +971,13 @@ ${refZeilen}
     ? 'the body of this part CAN be coloured — naming the body colour in kette is allowed.'
     : 'the body of this part CANNOT be coloured (it stays its own material). NEVER name a body colour, silver, metallic body or tinted body in kette, story or herleitung — the expression lives on the closure, the accent and the print only. A code\'s body hex is its ORIGIN, not what will be visible here. The body therefore stays CLEAR AND TRANSPARENT: never write that transparency is avoided, rejected or subtracted (not in kette, not in do_not, not when subtracting a rejected brand\'s traits) — the picture will visibly show a transparent bottle and the sheet would contradict it. Subtract the rejected brand\'s colour, tone and decoration instead.';
 
+  /* Typ-1-Wahrheit an die Auswahl weitergeben: Haiku soll wissen, was der
+     Wirkstoff verspricht, damit ziel_profil und kette nicht dagegen laufen. */
+  const wsHint = wirkstoffRef(brief) || wirkstoffRef(sucheQuery || '');
+  const wirkstoffHinweisEn = wsHint
+    ? `\nACTIVE TRUTH: the brief names ${wsHint.name}. Its promise: ${wsHint.emotional}. Its colour expectation: ${wsHint.farbe} (${wsHint.temp}). Forbidden for this active: ${wsHint.doNot.join('; ')}. Honour it unless a loved reference brand pulls the other way — then follow the brand and say so.`
+    : '';
+
   const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
 You NEVER write a visual prompt and NEVER invent materials, shapes, ingredients, actives, scents or claims.
 You only SELECT from the finite options below and write a short German concept grounded in the brief.
@@ -936,7 +1001,7 @@ ${designCodeList}
 STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
-BODY-COLOUR TRUTH (hard): ${koerperHinweisEn}
+BODY-COLOUR TRUTH (hard): ${koerperHinweisEn}${wirkstoffHinweisEn}
 STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
 STEP 10 — do_not: 2–3 short German clauses naming what this direction must NOT become. Concrete visual traps, not vague warnings — the difference between an 80-euro serum and multivitamin juice. Ground each in the brief's audience or shelf. Examples: "kein wörtliches Orange", "keine Tropfen- oder Frucht-Deko", "kein Bonbon-Rosa", "kein Stock-Vektor-Blatt". Never name a field value or an English word.
 STEP 11 — verworfen (REQUIRED, never null unless only one code exists in the whole list): name the ONE other design code you seriously considered and then rejected. {"code_id": its exact id from the list, "name": its exact name from the list, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or shelf, never "passt nicht"}. Example: {"grund":"deine Käuferin ab 40 liest das als Teen-Ware"}. A presented direction without a rejected alternative reads as the only option instead of a decision — always fill this.
@@ -1097,7 +1162,9 @@ OUTPUT ONLY this JSON, no fences, no prose:
     [/transparen|durchsichtig|klarglas/i, ''],
   ];
   const doNotRaw: string[] = (Array.isArray(parsed?.do_not) ? parsed.do_not : []).map((d: any) => String(d || ''));
-  const doNotEn = [...new Set(DO_NOT_EN.filter(([re]) => doNotRaw.some(d => re.test(d))).map(([, en]) => en))].filter(Boolean);
+  const wsPrompt = wirkstoffRef(brief) || wirkstoffRef(sucheQuery || '');
+  const doNotAlle = [...doNotRaw, ...(wsPrompt ? wsPrompt.doNot : [])];
+  const doNotEn = [...new Set(DO_NOT_EN.filter(([re]) => doNotAlle.some(d => re.test(d))).map(([, en]) => en))].filter(Boolean);
 
   const lines: string[] = [];
   lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
@@ -1255,16 +1322,33 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // Deshalb entsteht Tiefe OHNE eine einzige zusaetzliche Frage.
   type KetteZeile = { typ: string; bedeutung: string; form: string; weil: string };
   const kette: KetteZeile[] = [];
+  const wirkstoffDoNot: string[] = [];
 
   // Typ 1 — Wirkstoff: aus dem BRIEF. Das Tag am Code ist Herkunft, nicht Aussage.
-  const briefWirkstoff = wirkstoffAusBrief(brief) || wirkstoffAusBrief(sucheQuery || '');
-  if (briefWirkstoff) {
+  const wref = wirkstoffRef(brief) || wirkstoffRef(sucheQuery || '');
+  if (wref) {
+    /* Divergenz ehrlich benennen: Der Wirkstoff ERWARTET eine Temperatur, der
+       gewählte Code bringt seine eigene mit (oft weil eine Referenzmarke der
+       Kompass war). Wo beides auseinandergeht, ist das keine Panne, sondern die
+       Entscheidung — und sie muss auf dem Blatt stehen, nicht verschwiegen
+       werden. Ohne das behauptet die Zeile eine Farbwelt, die das Bild nicht
+       zeigt. Temperatur aus dem Lab-b-Wert des lautesten Trägers. */
+    const lautHex = farbsys.rollen.find(r => r.rolle === farbsys.laut)?.hex
+      || farbsys.rollen.find(r => r.hex)?.hex || null;
+    const lab = hexLab(lautHex);
+    const istWarm = lab ? lab[2] > 8 : null;
+    const istKuehl = lab ? lab[2] < -8 : null;
+    const divergiert = (wref.temp === 'warm' && istKuehl === true) || (wref.temp === 'kuehl' && istWarm === true);
     kette.push({
       typ: 'Wirkstoff',
-      bedeutung: briefWirkstoff,
-      form: `Farbwelt ${displayPalName}`,
-      weil: 'der Wirkstoff signalisiert die Farbe — sie ist Argument, nicht Dekor',
+      bedeutung: wref.name,
+      form: divergiert ? `${wref.farbe} erwartet — hier bewusst anders` : wref.farbe,
+      weil: divergiert
+        ? `${wref.emotional}. Die gewählte Richtung geht dagegen — die Marken-Referenz wog hier schwerer als die Wirkstoff-Erwartung.`
+        : wref.emotional,
     });
+    // Wirkstoff-eigene Verbote treten zu Haikus Liste dazu (Typ-1-do_not).
+    wirkstoffDoNot.push(...wref.doNot);
   }
 
   // Aus dem Brief (Haiku) — Zielgruppe, Kanal, Referenz.
@@ -1323,11 +1407,13 @@ OUTPUT ONLY this JSON, no fences, no prose:
   }
 
   // Was NICHT — Geschmacks-Verbote, getrennt von den Physik-Verboten (forbidden).
-  const doNot: string[] = doNotRaw
+  const doNot: string[] = [...new Set([
+    ...doNotRaw.map((d: string) => entfeldere(d).slice(0, 90)),
+    ...wirkstoffDoNot,
+  ])]
     .filter((d: string) => !(traegerOrt === 'Material' && /transparen|durchsichtig|klarglas/i.test(d)))
-    .map((d: string) => entfeldere(d).slice(0, 90))
     .filter((d: string) => d.length > 3)
-    .slice(0, 3);
+    .slice(0, 4);
 
   // Die verworfene Alternative: "Winning Concept" heisst, es gab mehrere.
   const vwRaw = parsed?.verworfen;
