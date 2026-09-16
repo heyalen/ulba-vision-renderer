@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v37-donot';
+const RENDER_VERSION = 'v38-traeger';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -463,11 +463,15 @@ const FELDWORT_DE: Record<string, string> = {
   opak_recolor: 'eingefärbter Körper', klar_liquid_farbe: 'Farbe in der Flüssigkeit',
   klar: 'klar', frosted: 'satiniert', koerper: 'Körper', liquid: 'Flüssigkeit',
 };
+const FELDWORT_RE: Array<[RegExp, string]> = Object.entries(FELDWORT_DE).map(
+  ([k, v]) => [new RegExp(k.split('_').join('[-_ ]?'), 'gi'), v] as [RegExp, string]
+);
 function entfeldere(t: string): string {
   let out = t;
-  for (const [k, v] of Object.entries(FELDWORT_DE)) out = out.split(k).join(v);
-  // Restliche snake_case-Tokens entschaerfen, statt sie durchzulassen.
-  return out.replace(/\b[a-z]+_[a-z_]+\b/g, m => m.replace(/_/g, ' ')).trim();
+  // Haiku schreibt die Feldwerte auch grossgeschrieben und mit Bindestrich
+  // ("Ingredient-Block"). Exakter Substring-Vergleich griff daneben.
+  for (const [re, v] of FELDWORT_RE) out = out.replace(re, v);
+  return out.replace(/\b[a-zA-Z]+_[a-zA-Z_]+\b/g, m => m.replace(/_/g, ' ')).trim();
 }
 function hexRgb(h: string | null | undefined): [number, number, number] | null {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim());
@@ -623,7 +627,12 @@ async function assemblePrompt(
   reqSegment: string | null = null,
   forceCodeId: string | null = null,
   lautNudge: string | null = null,
-  farbortNudge: 'koerper' | 'liquid' | null = null
+  farbortNudge: 'koerper' | 'liquid' | null = null,
+  // v14.3 hielt die Packmittel-Suche bewusst aus dem Design-Brief. Richtig fuer
+  // die Gespraechs-Zeilen — aber der WIRKSTOFF steckt nur dort. Er reist hier
+  // getrennt mit und wird ausschliesslich fuer die Wirkstoff-Zeile gelesen,
+  // nie als Brief-Text interpretiert.
+  sucheQuery: string | null = null
 ): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
   const [produktRegeln, farbpalettenAll, designCodesAll] = await Promise.all([
     airtableListAll(PRODUKT_REGELN_TABLE),
@@ -920,11 +929,11 @@ STEP 6 — brandname: if the brief contains the user's own brand name, use it EX
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
 STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
 STEP 10 — do_not: 2–3 short German clauses naming what this direction must NOT become. Concrete visual traps, not vague warnings — the difference between an 80-euro serum and multivitamin juice. Ground each in the brief's audience or shelf. Examples: "kein wörtliches Orange", "keine Tropfen- oder Frucht-Deko", "kein Bonbon-Rosa", "kein Stock-Vektor-Blatt". Never name a field value or an English word.
-STEP 11 — verworfen: the ONE other design code from the list you seriously considered and then rejected. {"code_id": its id, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or channel, never "passt nicht"}. Example: {"grund":"deine Douglas-Kundin liest das als Teen-Ware"}. If genuinely only one code is viable, set verworfen to null.
+STEP 11 — verworfen (REQUIRED, never null unless only one code exists in the whole list): name the ONE other design code you seriously considered and then rejected. {"code_id": its exact id from the list, "name": its exact name from the list, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or shelf, never "passt nicht"}. Example: {"grund":"deine Käuferin ab 40 liest das als Teen-Ware"}. A presented direction without a rejected alternative reads as the only option instead of a decision — always fill this.
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
-{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"do_not":["…","…"],"verworfen":{"code_id":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
+{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"do_not":["…","…"],"verworfen":{"code_id":"…","name":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
   const res = await fetchT('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -1170,9 +1179,20 @@ OUTPUT ONLY this JSON, no fences, no prose:
   // Sitzt der Traeger in der Fluessigkeit, wird die Huelle Materialeigenfarbe
   // -> der Cap ist dann der einzige chromatische Anker am Gebinde und traegt
   // mehr Last. Das ist eine ableitbare Regel, keine Geschmacksfrage.
-  const traegerOrt = code2.farbort === 'liquid' ? 'Flüssigkeit' : 'Körper';
+  /* Der Träger muss aus dem ECHTEN Render-Ergebnis kommen, nicht aus
+     code.farbort. Ein 'opak_recolor'-Code auf nicht einfärbbarem Glas fällt in
+     der Switch oben auf "Keep the body in its original tone" — das Blatt hat
+     dann "der Körper trägt die Welt" behauptet, während das Bild eine klare
+     Flasche zeigte. Die Physik-Zeile trägt den Moat; sie darf nie lügen. */
+  const traegerOrt: 'Flüssigkeit' | 'Körper' | 'Material' =
+    (code2.farbort === 'liquid' || code2.bodyBehandlung === 'klar_liquid_farbe') ? 'Flüssigkeit'
+    : code2.bodyBehandlung === 'klar' ? 'Material'
+    : (code2.bodyBehandlung === 'opak_recolor' && !(colorable || isPlastic)) ? 'Material'
+    : 'Körper';
+  const traegerHexEcht = traegerOrt === 'Material' ? null
+    : traegerOrt === 'Flüssigkeit' ? codeBodyHexFuellung : codeBodyHex;
   const farbsys = farbSystem(
-    code2.farbort === 'liquid' ? codeBodyHexFuellung : codeBodyHex,
+    traegerHexEcht,
     traegerOrt,
     code.capHex,
     code.akzentHex,
@@ -1226,7 +1246,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const kette: KetteZeile[] = [];
 
   // Typ 1 — Wirkstoff: aus dem BRIEF. Das Tag am Code ist Herkunft, nicht Aussage.
-  const briefWirkstoff = wirkstoffAusBrief(brief);
+  const briefWirkstoff = wirkstoffAusBrief(brief) || wirkstoffAusBrief(sucheQuery || '');
   if (briefWirkstoff) {
     kette.push({
       typ: 'Wirkstoff',
@@ -1246,14 +1266,32 @@ OUTPUT ONLY this JSON, no fences, no prose:
   }
 
   // Typ 2 — Physik: die Wand des realen Teils. Kann keine Agentur wissen.
+  const PHYSIK_FORM: Record<string, string> = {
+    'Flüssigkeit': 'Farbe in die Flüssigkeit',
+    'Körper': 'Farbe in den Körper',
+    'Material': 'Farbe an Verschluss und Akzent',
+  };
+  const PHYSIK_WEIL: Record<string, string> = {
+    'Flüssigkeit': 'das Gebinde bleibt transparent — die Hülle kann den Ausdruck nicht tragen',
+    'Körper': 'der Körper ist belegt einfärbbar, also trägt er die Welt',
+    'Material': 'dieses Teil ist nicht belegt einfärbbar — die Wand bleibt Material, der Ausdruck wandert nach oben',
+  };
   kette.push({
     typ: 'Physik',
     bedeutung: `${matEN.replace(/^(a|an) /, '')}${closureCoverage.length ? `, ${closureCoverage.join('/')}` : ''}`,
-    form: traegerOrt === 'Flüssigkeit' ? 'Farbe in die Flüssigkeit' : 'Farbe in den Körper',
-    weil: traegerOrt === 'Flüssigkeit'
-      ? 'das Gebinde bleibt transparent — die Hülle kann den Ausdruck nicht tragen'
-      : 'der Körper ist belegt einfärbbar, also trägt er die Welt',
+    form: PHYSIK_FORM[traegerOrt],
+    weil: PHYSIK_WEIL[traegerOrt],
   });
+  // Wollte der Code den Körper färben und das Teil kann es nicht, ist das ein
+  // echter Ausdrucksverlust — er wird benannt, nicht verschwiegen.
+  if (traegerOrt === 'Material' && code.bodyHex && code2.bodyBehandlung !== 'klar') {
+    kette.push({
+      typ: 'Ausprägung',
+      bedeutung: `Stufe ${Math.min(code.stufe, 1)}/3`,
+      form: 'Körperfarbe fällt weg',
+      weil: 'die Haltung lebt über Verschluss, Akzent und Druck weiter',
+    });
+  }
 
   // Farbe ist relational, nicht absolut — und geerbt statt erfunden.
   // Ein Hex aus einem real produzierten Produkt ist STAERKER als ein
@@ -1281,10 +1319,19 @@ OUTPUT ONLY this JSON, no fences, no prose:
 
   // Die verworfene Alternative: "Winning Concept" heisst, es gab mehrere.
   const vwRaw = parsed?.verworfen;
-  const vwCode = vwRaw?.code_id ? codeCandidates.find(c => c.id === String(vwRaw.code_id)) : null;
-  const verworfen = (vwCode && vwCode.id !== code.id && String(vwRaw?.grund || '').trim())
-    ? { name: vwCode.brand ? `${vwCode.name} (${vwCode.brand})` : vwCode.name, grund: String(vwRaw.grund).trim().slice(0, 160) }
+  const vwGrund = entfeldere(String(vwRaw?.grund || '')).slice(0, 160);
+  const vwName = String(vwRaw?.name || '').trim().toLowerCase();
+  // Auflösen in drei Anläufen: exakte id, dann exakter Name, dann Teilstring.
+  // Vorher fiel die Zeile bei jeder id-Abweichung still aus — und genau sie ist
+  // der billigste Agentur-Beweis im ganzen Blatt.
+  const vwCode = (vwRaw?.code_id && codeCandidates.find(c => c.id === String(vwRaw.code_id)))
+    || (vwName && codeCandidates.find(c => c.name.toLowerCase() === vwName))
+    || (vwName && codeCandidates.find(c => c.name.toLowerCase().includes(vwName) || vwName.includes(c.name.toLowerCase())))
+    || null;
+  const verworfen = (vwCode && vwCode.id !== code.id && vwGrund)
+    ? { name: vwCode.brand ? `${vwCode.name} (${vwCode.brand})` : vwCode.name, grund: vwGrund }
     : null;
+  if (!verworfen && vwGrund) console.log('[verworfen] nicht auflösbar:', vwRaw?.code_id, vwRaw?.name);
 
   // Reihenfolge = Anzeigepriorität. Das Frontend zeigt die ersten drei; der
   // Rest liegt hinter "alle Schritte". Brief zuerst (die Einsicht), dann der
@@ -1544,9 +1591,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     farbortNudge = null,
     nocache = false,
     dryRun = false,
+    sucheQuery = null,
   } = req.body as {
     systemId: string;
     query: string;
+    sucheQuery?: string | null;
     renderBrief?: string | null;
     selectedCapId?: string | null;
     tier?: Tier;
@@ -1653,7 +1702,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
     const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge, farbortNudge);
+      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge, farbortNudge, sucheQuery);
 
     // ── 5b. dryRun: Behauptung ausliefern, NICHT rendern ────────────
     // Die Ableitung ist komplett (Code gewaehlt, Konzept gebaut) — nur das
