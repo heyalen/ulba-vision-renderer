@@ -41,7 +41,7 @@ const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical
 // Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
 // den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v42-wirkstoff-base';
+const RENDER_VERSION = 'v43-karte';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -340,6 +340,11 @@ type Concept = {
   // Ein Profi-Brief waehlt nie, er leitet her — diese Kette IST die Herleitung.
   kette?: Array<{ typ: string; bedeutung: string; form: string; weil: string }>;
   do_not?: string[];
+  karte?: {
+    register: string | null; laut: number | null;
+    gewaehlt: string; kompass: string | null; anti: string | null; verworfen: string | null;
+    welten: Array<{ register: string; anzahl: number; codes: Array<{ id: string; name: string; brand: string; bild: string | null; laut: number | null }> }>;
+  };
   // Die ernsthaft geprüfte und begruendet verworfene Alternative ("Winning
   // Concept" heisst: es gab mehrere). Billigster Agentur-Beweis im System.
   verworfen?: { name: string; grund: string } | null;
@@ -586,6 +591,7 @@ type DesignCodeRec = {
   // deshalb lief es trotzdem. Ein echter `tsc`/`next build` waere gebrochen.
   register: string | null;
   tempLaut: number | null;
+  bild: string | null;   // Referenz_Bild — das echte Marktprodukt, aus dem der Code stammt
   bodyBehandlung: string;
   farbort: string;
   bodyHex: string | null;
@@ -823,6 +829,7 @@ async function assemblePrompt(
         // Achsen-Cursor: Temp_Laut als numerische Koordinate. null = ungetaggt
         // -> nimmt an keiner Nudge-Wahl teil (rastet nie versehentlich ein).
         tempLaut: (f['Temp_Laut'] != null && f['Temp_Laut'] !== '') ? Number(f['Temp_Laut']) : null,
+        bild: (() => { const a = f['Referenz_Bild']; return Array.isArray(a) && a[0] ? (a[0].thumbnails?.large?.url || a[0].url || null) : null; })(),
         // Register = die real getaggte Welt-Achse (clean-minimal, tech-premium, ...).
         // Ankert die Nudge-Nachbarschaft. (Hinweis 02.09.: Segment ist inzwischen
         // 35/35 getaggt — der alte Kommentar 'Segment-Feld ist leer' war veraltet.)
@@ -975,13 +982,14 @@ STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAUL
 STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
 STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
 BODY-COLOUR TRUTH (hard): ${koerperHinweisEn}${wirkstoffHinweisEn}
+STEP 9a — kompass_code_id / anti_code_id: from the reference brands listed above, the id of the code whose brand the customer LOVES (kompass) and the id whose brand they REJECT (anti). null if the brief names none.
 STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
 STEP 10 — do_not: 2–3 short German clauses naming what this direction must NOT become. Concrete visual traps, not vague warnings — the difference between an 80-euro serum and multivitamin juice. Ground each in the brief's audience or shelf. Examples: "kein wörtliches Orange", "keine Tropfen- oder Frucht-Deko", "kein Bonbon-Rosa", "kein Stock-Vektor-Blatt". Never name a field value or an English word.
 STEP 11 — verworfen (REQUIRED, never null unless only one code exists in the whole list): name the ONE other design code you seriously considered and then rejected. {"code_id": its exact id from the list, "name": its exact name from the list, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or shelf, never "passt nicht"}. Example: {"grund":"deine Käuferin ab 40 liest das als Teen-Ware"}. A presented direction without a rejected alternative reads as the only option instead of a decision — always fill this.
 STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
 
 OUTPUT ONLY this JSON, no fences, no prose:
-{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"do_not":["…","…"],"verworfen":{"code_id":"…","name":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
+{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"kompass_code_id":"…","anti_code_id":"…","do_not":["…","…"],"verworfen":{"code_id":"…","name":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
 
   const res = await fetchT('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -1411,6 +1419,35 @@ OUTPUT ONLY this JSON, no fences, no prose:
   const RANG: Record<string, number> = { Wirkstoff: 0, Brief: 1, Physik: 2, Farbe: 3, 'Ausprägung': 4 };
   kette.sort((a, b) => (RANG[a.typ] ?? 9) - (RANG[b.typ] ?? 9));
 
+  /* ── Die Karte ──────────────────────────────────────────────────────
+     Was im Agentur-Deck 60 Folien sind — Benchmarks, fuenf Moodboards, die
+     Competitive Landscape mit dem weissen Fleck — entsteht hier aus dem
+     Archiv: sechs Welten (Register), gefuellt mit den Referenzbildern echter
+     Marktprodukte, die gewaehlte Welt mit Richtung, Kompass, Anti und
+     verworfener Alternative markiert. Leere Welten bleiben LEER: der weisse
+     Fleck ist die ehrlichste Zeile auf dem Blatt und macht Kuratierung zur
+     sichtbaren Aufgabe statt zur unsichtbaren. */
+  const KARTE_WELTEN = ['clean-minimal', 'masse-funktional', 'pharma-klinisch', 'natur-erdig', 'luxus-ritual', 'tech-premium'];
+  const idOderNull = (v: any) => (typeof v === 'string' && designCodes.some(c => c.id === v)) ? v : null;
+  const kompassId = idOderNull(parsed?.kompass_code_id) || ([...kompassIds][0] ?? null);
+  const antiId = idOderNull(parsed?.anti_code_id);
+  const karteCode = (c: typeof designCodes[number]) => ({ id: c.id, name: c.name, brand: c.brand, bild: c.bild, laut: c.tempLaut });
+  const karte = {
+    register: code.register,
+    laut: code.tempLaut,
+    gewaehlt: code.id,
+    kompass: kompassId,
+    anti: antiId,
+    verworfen: verworfen ? (vwCode?.id ?? null) : null,
+    welten: KARTE_WELTEN.map(reg => {
+      const drin = designCodes.filter(c => c.register === reg);
+      // Markierte zuerst, dann nach Lautstaerke, damit die Kacheln eine Ordnung haben.
+      const mark = new Set([code.id, kompassId, antiId, vwCode?.id].filter(Boolean));
+      drin.sort((a, b) => (mark.has(b.id) ? 1 : 0) - (mark.has(a.id) ? 1 : 0) || ((a.tempLaut ?? 5) - (b.tempLaut ?? 5)));
+      return { register: reg, anzahl: drin.length, codes: drin.slice(0, reg === code.register ? 8 : 4).map(karteCode) };
+    }),
+  };
+
   const rawRadar = parsed?.radar || {};
   const radarAxes = ['waerme', 'prestige', 'energie', 'ruhe', 'natuerlichkeit', 'praezision'];
   const radar: Record<string, number> = {};
@@ -1433,6 +1470,7 @@ OUTPUT ONLY this JSON, no fences, no prose:
     kette,
     do_not: doNot,
     verworfen,
+    karte,
     farbsystem: farbsys,
     design_code: {
       id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut,
