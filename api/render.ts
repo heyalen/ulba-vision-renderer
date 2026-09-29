@@ -1579,7 +1579,16 @@ function findeReferenzen(brief: string, codes: Array<{ id: string; name: string;
   }
   return out;
 }
-type CodeLeicht = { id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[]; bild: string | null; wirkstoffWelt: string[] };
+type CodeLeicht = {
+  id: string; name: string; brand: string; register: string | null; tempLaut: number | null;
+  segments: string[]; bild: string | null; wirkstoffWelt: string[];
+  // v45 — Facetten fuer die Design-Wand. Alle Werte liegen bereits in der
+  // Design_Code-Tabelle; hier werden sie nur mitgeliefert, nichts Neues erfunden.
+  tempTon: number | null; tempForm: number | null; farbtemp: number | null; dekoDichte: number | null;
+  hfForm: string | null; hfMaterial: string | null; hfTyp: string | null;
+  bodyHex: string | null; capHex: string | null; wirkung: string;
+};
+const numOrNull = (v: any): number | null => (v != null && v !== '' && !isNaN(Number(v))) ? Number(v) : null;
 let codesCache: { t: number; v: CodeLeicht[] } | null = null;
 async function ladeCodesLeicht(): Promise<CodeLeicht[]> {
   if (codesCache && Date.now() - codesCache.t < 300000) return codesCache.v;
@@ -1593,6 +1602,16 @@ async function ladeCodesLeicht(): Promise<CodeLeicht[]> {
       segments: multiSelectNames(r.fields['Segment']),
       bild: (() => { const a = r.fields['Referenz_Bild']; return Array.isArray(a) && a[0] ? (a[0].thumbnails?.large?.url || a[0].url || null) : null; })(),
       wirkstoffWelt: multiSelectNames(r.fields['Wirkstoff_Welt']),
+      tempTon: numOrNull(r.fields['Temp_Ton']),
+      tempForm: numOrNull(r.fields['Temp_Form']),
+      farbtemp: numOrNull(r.fields['Farbtemp']),
+      dekoDichte: numOrNull(r.fields['Deko_Dichte']),
+      hfForm: selectName(r.fields['HF_Form']) || null,
+      hfMaterial: selectName(r.fields['HF_Material']) || null,
+      hfTyp: selectName(r.fields['HF_Typ']) || null,
+      bodyHex: String(r.fields['Body_Hex'] || '').trim() || null,
+      capHex: String(r.fields['Cap_Hex'] || '').trim() || null,
+      wirkung: String(r.fields['Wirkung_Keywords'] || '').trim(),
     }));
   codesCache = { t: Date.now(), v };
   return v;
@@ -1724,6 +1743,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
      der Tipp etwas unterscheidet, und gewichtet nach dem, was schon bekannt
      ist. Der Kunde setzt nichts zusammen; er zeigt auf etwas, und die Engine
      leitet neu ab. */
+  /* ── v45 — Die Design-Wand. Ein Modus, eine Antwort: alle aktiven Codes mit
+     Bild, plus die Facetten, nach denen sich filtern laesst. Kein Ranking-
+     Geheimnis: 'passend' ist nur eine Vorsortierung, die Wand zeigt alles. */
+  if ((req.body as any)?.codes === true) {
+    try {
+      const b = req.body as { register?: string | null; wirkstoff?: string | null; segment?: string | null };
+      const alle = (await ladeCodesLeicht()).filter(c => c.bild);
+      const ws = (b.wirkstoff || '').toLowerCase().split(' ')[0];
+      const punkte = (c: CodeLeicht) => {
+        let p = 0;
+        if (b.register && c.register === b.register) p += 3;
+        if (ws && c.wirkstoffWelt.some(w => w.toLowerCase().replace(/_/g, ' ').includes(ws))) p += 2;
+        if (b.segment && c.segments.includes(b.segment)) p += 1;
+        return p;
+      };
+      const sortiert = [...alle].sort((x, y) => punkte(y) - punkte(x));
+      const facetten = {
+        register: [...new Set(alle.map(c => c.register).filter(Boolean))].sort() as string[],
+        segment: [...new Set(alle.flatMap(c => c.segments))].sort(),
+        form: [...new Set(alle.map(c => c.hfForm).filter(Boolean))].sort() as string[],
+        material: [...new Set(alle.map(c => c.hfMaterial).filter(Boolean))].sort() as string[],
+        wirkstoff: [...new Set(alle.flatMap(c => c.wirkstoffWelt))].sort(),
+      };
+      return res.status(200).json({
+        codes: sortiert.map(c => ({
+          id: c.id, name: c.name, brand: c.brand, bild: c.bild,
+          register: c.register, segments: c.segments, wirkstoffWelt: c.wirkstoffWelt,
+          laut: c.tempLaut, ton: c.tempTon, form: c.tempForm, farbtemp: c.farbtemp, deko: c.dekoDichte,
+          hfForm: c.hfForm, hfMaterial: c.hfMaterial, hfTyp: c.hfTyp,
+          bodyHex: c.bodyHex, capHex: c.capHex, wirkung: c.wirkung,
+          passend: punkte(c) > 0,
+        })),
+        facetten,
+      });
+    } catch {
+      return res.status(200).json({ codes: [], facetten: { register: [], segment: [], form: [], material: [], wirkstoff: [] } });
+    }
+  }
+
   if ((req.body as any)?.board === true) {
     try {
       const b = req.body as { brief?: string; wirkstoff?: string | null; register?: string | null };
