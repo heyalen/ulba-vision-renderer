@@ -1688,12 +1688,49 @@ ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
   } catch { return null; }
 }
 
+// ── Zugangs-Riegel (v46) ──────────────────────────────────────────────
+// Der Renderer stand offen: CORS '*', keine Auth, kein Limit. Jeder mit der
+// URL konnte auf ulbas fal.ai-/Anthropic-Guthaben rendern lassen. Ab hier
+// gilt: nur die eigene Oberflaeche darf rufen, und auch die nicht endlos.
+const ULBA_ORIGINS = new Set<string>([
+  'https://ulba.vercel.app',
+  'http://localhost:3000',
+]);
+
+function riegel(req: VercelRequest, res: VercelResponse, opts?: { originOptional?: boolean }): boolean {
+  const origin = String(req.headers.origin || '');
+  const erlaubt = origin ? ULBA_ORIGINS.has(origin) : !!opts?.originOptional;
+  if (origin && erlaubt) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  return erlaubt;
+}
+
+// Pro-Instanz-Zaehler. Serverless heisst: nicht global exakt, aber es kappt
+// jeden Dauerbeschuss, und mehr soll es hier nicht.
+const ULBA_TAKT = new Map<string, number[]>();
+function taktOk(req: VercelRequest, max: number, fensterMs: number): boolean {
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || 'unbekannt';
+  const jetzt = Date.now();
+  const treffer = (ULBA_TAKT.get(ip) || []).filter(t => jetzt - t < fensterMs);
+  if (treffer.length >= max) { ULBA_TAKT.set(ip, treffer); return false; }
+  treffer.push(jetzt);
+  ULBA_TAKT.set(ip, treffer);
+  if (ULBA_TAKT.size > 500) {
+    for (const [k, v] of ULBA_TAKT) if (!v.some(t => jetzt - t < fensterMs)) ULBA_TAKT.delete(k);
+  }
+  return true;
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  const offen = riegel(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
+  if (!taktOk(req, 30, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen — kurz warten.' });
 
   // ── v29 — Reflect-Modus (Beat 1): nur die Stimme, keine Pipeline ──────
   if ((req.body as any)?.reflect === true) {
@@ -1826,7 +1863,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     forceCodeId = null,
     lautNudge = null,
     farbortNudge = null,
-    nocache = false,
+    nocache: nocacheRoh = false,
     dryRun = false,
     sucheQuery = null,
     boardLikes = [],
@@ -1858,6 +1895,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (tier !== 'lite' && tier !== 'pro') {
     return res.status(400).json({ error: 'tier muss "lite" oder "pro" sein' });
   }
+
+  // nocache umgeht den Cache und kostet damit bei jedem Aufruf einen
+  // frischen fal.ai-Lauf. Ab v46 nur noch mit Dev-Geheimnis im Header.
+  const nocache = nocacheRoh === true
+    && !!process.env.ULBA_DEV_SECRET
+    && req.headers['x-ulba-dev'] === process.env.ULBA_DEV_SECRET;
 
   // Rendering-Brief aus der Suche hat Vorrang; Query bleibt Demand-Signal.
   const effectiveBrief = (renderBrief && renderBrief.trim()) ? renderBrief.trim() : query;
