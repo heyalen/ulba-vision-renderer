@@ -1302,11 +1302,12 @@ function attributScore(
   bildTags: Map<string, string>,
   tags: Map<string, Map<string, Set<string>>>,
   katGewicht: Map<string, number>
-): { score: number; treffer: string[]; differenz: string[] } {
+): { score: number; treffer: string[]; differenz: string[]; geometrieBruch: boolean } {
   const proSys = tags.get(sysId);
   const treffer: string[] = [];
   const differenz: string[] = [];
-  if (!proSys || bildTags.size === 0) return { score: 0, treffer, differenz };
+  let geometrieBruch = false;
+  if (!proSys || bildTags.size === 0) return { score: 0, treffer, differenz, geometrieBruch };
   let max = 0, punkte = 0;
   for (const [kat, bildWert] of bildTags) {
     const sysWerte = proSys.get(kat);
@@ -1314,9 +1315,14 @@ function attributScore(
     const g = katGewicht.get(kat) || 0.03;
     max += g;
     if (sysWerte.has(bildWert)) { punkte += g; treffer.push(kat); }
-    else differenz.push(`${kat.replace(/^[A-Z]\d_/, '')}: ${Array.from(sysWerte)[0]} statt ${bildWert}`);
+    else {
+      differenz.push(`${kat.replace(/^[A-Z]\d_/, '')}: ${Array.from(sysWerte)[0]} statt ${bildWert}`);
+      // Die Koerpergeometrie ist keine Nuance, sondern die Frage selbst:
+      // eine kubische Referenz wird nicht durch einen Zylinder beantwortet.
+      if (kat === 'A1_Body_Geometry') geometrieBruch = true;
+    }
   }
-  return { score: max > 0 ? (punkte / max) * 100 : 0, treffer, differenz };
+  return { score: max > 0 ? (punkte / max) * 100 : 0, treffer, differenz, geometrieBruch };
 }
 
 // Harte Fakten aus der System-Tabelle, im Vokabular der Tabelle selbst.
@@ -1524,7 +1530,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ranked = filtered.map(p => {
         const hf = hardfactScore(p, lesart!);
         const at = attributScore(p.id, bildTags, tags, katGewicht);
-        const gesamt = at.score > 0 ? hf.score * 0.6 + at.score * 0.4 : hf.score;
+        // Die Attribute fuehren: 33 kuratierte Kategorien mit eigenen
+        // Gewichten schlagen fuenf grobe Tabellenfelder. Bricht die
+        // Geometrie, faellt der Treffer hart zurueck statt nur Punkte zu
+        // verlieren — sonst gleichen Material und Verschluss das aus.
+        let gesamt = at.score > 0 ? at.score * 0.7 + hf.score * 0.3 : hf.score;
+        if (at.geometrieBruch) gesamt *= 0.45;
         const naeh = [...hf.abweichung, ...at.differenz];
         return {
           ...p,
@@ -1543,7 +1554,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         for (const r of ranked) {
           const hf = hardfactScore(r, lesart);
           const at = attributScore(r.id, bildTags, tags, katGewicht);
-          r.score = Math.round(Math.max(0, Math.min(100, r.score * 0.5 + hf.score * 0.3 + at.score * 0.2)));
+          let g = r.score * 0.4 + at.score * 0.4 + hf.score * 0.2;
+          if (at.geometrieBruch) g *= 0.6;
+          r.score = Math.round(Math.max(0, Math.min(100, g)));
           r.abweichung = [...hf.abweichung, ...at.differenz].slice(0, 4);
         }
         ranked.sort((a, b) => b.score - a.score);
@@ -1574,6 +1587,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const codes = activeCodes.map(extractDesignCode);
       designLooks = buildDesignLooks(codes, ranked, identity, wall);
     } catch { /* Looks optional — results shippen immer */ }
+
+    // Wie viele Treffer sind wirklich nah? Eine Suchmaschine, die 18 Teile
+    // ausbreitet, obwohl zwei passen, ist wieder ein Katalog. Nah heisst:
+    // innerhalb von 12 Punkten zur Spitze und mindestens 50 Punkte absolut.
+    // Der Rest bleibt erreichbar, wird aber nicht als Antwort behauptet.
+    let nah = 0;
+    if (bildModus && ranked.length > 0) {
+      const spitze = ranked[0].score;
+      nah = ranked.filter(r => r.score >= Math.max(50, spitze - 12)).length;
+      nah = Math.min(Math.max(nah, 1), 6);
+    }
 
     // Interne Felder nicht an Client leaken (capIds, excluded)
     const publicResults = ranked.map(({ capIds, excluded, ...rest }) => rest);
@@ -1611,6 +1635,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // `bildlesart` — dann ordnet sich die Liste ohne neuen Vision-Call.
       bildlesart: lesart,
       bild_tags: Array.from(bildTags.entries()).map(([kat, wert]) => ({ kat, wert })),
+      nah,
       bild_fallback: bildFallback,
       totalProducts: products.length,
       afterFilter: filtered.length,
