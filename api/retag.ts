@@ -127,7 +127,12 @@ Antworte NUR mit einem JSON-Objekt {"<Kategorie>":"<Wert oder null>", ...}, kein
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (!process.env.ULBA_DEV_SECRET || req.headers['x-ulba-dev'] !== process.env.ULBA_DEV_SECRET) {
+  // Secret als Header ODER als ?key= — damit der Lauf auch aus dem Browser
+  // geht. Ein Secret in der URL landet in Browser-Verlauf und Server-Logs;
+  // fuer einen einmaligen Admin-Lauf ist das vertretbar, fuer alles andere
+  // nicht. Nach getaner Arbeit in Vercel einen neuen Wert setzen.
+  const geheim = (req.headers['x-ulba-dev'] as string) || (req.query.key as string) || '';
+  if (!process.env.ULBA_DEV_SECRET || geheim !== process.env.ULBA_DEV_SECRET) {
     return res.status(403).json({ error: 'Nur mit Dev-Secret' });
   }
   if (!process.env.AIRTABLE_PAT || !process.env.ANTHROPIC_API_KEY) {
