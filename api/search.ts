@@ -1630,9 +1630,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const sil = (refProfil && p.silhouette) ? aehnlichkeit(refProfil, p.silhouette) : null;
         let gesamt: number;
         if (sil !== null) {
-          gesamt = at.score > 0
-            ? sil * 0.45 + at.score * 0.35 + hf.score * 0.2
-            : sil * 0.6 + hf.score * 0.4;
+          // Die Form ENTSCHEIDET, der Rest ORDNET nur. Als Summe konnten
+          // zwanzig kleine Uebereinstimmungen (Material, Verschluss) eine
+          // grosse Formdifferenz aufwiegen: Circus (Form 68) schlug Carmen
+          // (Form 93), weil Carmen eine andere Kappe traegt — die bei ulba
+          // ein eigenes, austauschbares Teil ist. Multiplikativ kann der
+          // Rest die Form hoechstens um 30 % druecken.
+          const rest = at.score > 0 ? at.score * 0.6 + hf.score * 0.4 : hf.score;
+          gesamt = sil * (0.7 + 0.3 * Math.max(0, Math.min(100, rest)) / 100);
         } else {
           gesamt = at.score > 0 ? at.score * 0.7 + hf.score * 0.3 : hf.score;
           if (at.geometrieBruch) gesamt *= 0.45;
