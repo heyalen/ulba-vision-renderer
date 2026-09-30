@@ -17,13 +17,14 @@ export interface Profil {
   breiten: number[];          // BAENDER Werte, 0..1, relativ zur groessten Breite
 }
 
+export let letzterFalFehler = '';
 export async function falFreistellen(bildUrl: string): Promise<string | null> {
   const r = await fetch('https://fal.run/fal-ai/birefnet/v2', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
     body: JSON.stringify({ image_url: bildUrl, model: 'General Use (Light)', refine_foreground: true }),
   });
-  if (!r.ok) return null;
+  if (!r.ok) { letzterFalFehler = `${r.status} ${(await r.text()).slice(0, 160)}`; return null; }
   const j = await r.json();
   return j?.image?.url || null;
 }
