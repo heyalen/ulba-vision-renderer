@@ -141,6 +141,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const q = req.query as Record<string, string>;
   const dry = q.dry !== '0';
   const limit = q.limit ? parseInt(q.limit, 10) : 0;
+  // Vercel bricht eine Funktion nach einer Minute ab, ein Bild braucht ~3 s.
+  // Also in Bloecken arbeiten: skip sagt, wo der naechste Lauf ansetzt.
+  const skip = q.skip ? parseInt(q.skip, 10) : 0;
   const nur = q.nur ? q.nur.split(',').map(x => x.trim()).filter(Boolean) : null;
 
   try {
@@ -164,8 +167,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     werte.forEach(w => nameZuId.set(`${w.kategorie}::${w.name}`, w.id));
 
     // 2. Systeme laden
-    let systeme = await ladeAlle(SYSTEM_TABLE, [SYS_F.bild, SYS_F.bildAlt, SYS_F.attribute, SYS_F.name], '{Published}=TRUE()');
+    const alleSysteme = await ladeAlle(SYSTEM_TABLE, [SYS_F.bild, SYS_F.bildAlt, SYS_F.attribute, SYS_F.name], '{Published}=TRUE()');
+    const gesamt = alleSysteme.length;
+    let systeme = alleSysteme.slice(skip);
     if (limit > 0) systeme = systeme.slice(0, limit);
+    const naechsterSkip = skip + systeme.length;
 
     // 3. Nacheinander taggen — parallel wuerde das Anthropic-Limit reissen
     const bericht: any[] = [];
@@ -220,6 +226,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       modus: dry ? 'Vorschau — nichts geschrieben' : 'geschrieben',
       kategorien: Array.from(katMap.keys()),
       systeme: systeme.length,
+      fortschritt: `${naechsterSkip} von ${gesamt}`,
+      weiter: naechsterSkip < gesamt ? `&skip=${naechsterSkip}` : 'fertig — alle Systeme bearbeitet',
       geschrieben,
       bericht,
     });
