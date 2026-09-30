@@ -1282,6 +1282,16 @@ function systemTags(werte: AttrWert[]): Map<string, Map<string, Set<string>>> {
 // Gewichteter Attribut-Vergleich. Gezaehlt wird nur, wo BEIDE Seiten etwas
 // gesagt haben — ein System wird nicht dafuer bestraft, dass eine Kategorie
 // bei ihm ungetaggt ist, und das Bild nicht fuer das, was es nicht sieht.
+// Veredelung ist nicht Identitaet. Dasselbe Teil in Kupfer metallisiert ist
+// dasselbe bestellbare Teil wie in Klarglas — der Look kommt bei ulba ohnehin
+// aus den Design-Codes. Ein Referenzfoto zeigt fast immer ein veredeltes
+// Produkt, ein Lieferantenfoto das nackte Teil. Wuerden Farbe, Oberflaeche,
+// Transluzenz und Material abwerten, faende die Suche das Teil nie wieder.
+// Diese Kategorien zaehlen deshalb nur, wenn sie passen — nie dagegen.
+function istVeredelung(kat: string): boolean {
+  return kat.startsWith('D') || kat.startsWith('E');
+}
+
 function attributScore(
   sysId: string,
   bildTags: Map<string, string>,
@@ -1298,8 +1308,12 @@ function attributScore(
     const sysWerte = proSys.get(kat);
     if (!sysWerte || sysWerte.size === 0) continue; // Kategorie ungetaggt -> zaehlt nicht
     const g = katGewicht.get(kat) || 0.03;
-    max += g;
-    if (sysWerte.has(bildWert)) { punkte += g; treffer.push(kat); }
+    const veredelung = istVeredelung(kat);
+    // Veredelung geht nicht in den Nenner: sie kann Punkte bringen, aber
+    // keine kosten. Form entscheidet, Oberflaeche schmueckt.
+    if (!veredelung) max += g;
+    if (sysWerte.has(bildWert)) { punkte += veredelung ? g * 0.3 : g; treffer.push(kat); }
+    else if (veredelung) { /* andere Veredelung, gleiches Teil — kein Abzug */ }
     else {
       differenz.push(`${kat.replace(/^[A-Z]\d_/, '')}: ${Array.from(sysWerte)[0]} statt ${bildWert}`);
       // Die Koerpergeometrie ist keine Nuance, sondern die Frage selbst:
@@ -1312,15 +1326,18 @@ function attributScore(
 
 // Harte Fakten aus der System-Tabelle, im Vokabular der Tabelle selbst.
 // Typ und Form tragen das meiste Gewicht: sie sind am Foto belegbar.
-function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichung: string[] } {
+function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichung: string[]; typBruch: boolean } {
   const ab: string[] = [];
   let max = 0, punkte = 0;
+  // Ein Tiegel ist keine Flasche. Der Typ ist am Foto so sicher wie nichts
+  // sonst — weicht er ab, ist es schlicht die falsche Antwort.
+  let typBruch = false;
   const kl = (x: string) => x.toLowerCase().trim();
 
   if (l.typ) {
     max += 30;
     if (p.type && kl(p.type) === kl(l.typ)) punkte += 30;
-    else if (p.type) ab.push(`${p.type} statt ${l.typ}`);
+    else if (p.type) { ab.push(`${p.type} statt ${l.typ}`); typBruch = true; }
   }
   if (l.form.length) {
     max += 25;
@@ -1345,10 +1362,11 @@ function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichu
     else if (p.closure) ab.push(`${p.closure} statt ${l.verschluss}`);
   }
   if (l.material.length) {
-    max += 15;
+    // Material ist am Foto oft nicht das Material: eine metallisierte
+    // Glasflasche liest sich als Aluminium. Kleiner Bonus bei Treffer,
+    // kein Abzug bei Abweichung.
     const alle = [...p.material, ...p.availableMaterials].map(kl);
-    if (l.material.some(mm => alle.some(a => a === kl(mm) || a.startsWith(kl(mm))))) punkte += 15;
-    else if (alle.length) ab.push(`${[...p.material, ...p.availableMaterials].slice(0, 2).join('/')} statt ${l.material.join('/')}`);
+    if (l.material.some(mm => alle.some(a => a === kl(mm) || a.startsWith(kl(mm))))) { max += 6; punkte += 6; }
   }
   if (l.volumen) {
     max += 15;
@@ -1366,7 +1384,7 @@ function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichu
       }
     }
   }
-  return { score: max > 0 ? (punkte / max) * 100 : 0, abweichung: ab };
+  return { score: max > 0 ? (punkte / max) * 100 : 0, abweichung: ab, typBruch };
 }
 
 // ── Zugangs-Riegel (v46) ──────────────────────────────────────────────
@@ -1533,6 +1551,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // verlieren — sonst gleichen Material und Verschluss das aus.
         let gesamt = at.score > 0 ? at.score * 0.7 + hf.score * 0.3 : hf.score;
         if (at.geometrieBruch) gesamt *= 0.45;
+        if (hf.typBruch) gesamt *= 0.5;
         const naeh = [...hf.abweichung, ...at.differenz];
         return {
           ...p,
