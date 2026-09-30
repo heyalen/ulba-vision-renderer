@@ -78,20 +78,40 @@ async function profilVonPng(pngUrl: string): Promise<Profil | null> {
     .toBuffer({ resolveWithObject: true });
 
   const B = info.width, H = info.height;
-  const voll = (x: number, y: number) => data[y * B + x] > 127;
 
-  // Bounding Box des Teils
+  // Klarglas ist der Normalfall, nicht der Randfall: BiRefNet gibt bei
+  // transparentem Material eine halbdurchsichtige Maske zurueck — kraeftige
+  // Kanten, schwache Flaeche dazwischen. Mit einer hohen Schwelle zaehlte nur
+  // der Rand als Teil, und der Fuellgrad eines Glasflakons fiel auf 0,27.
+  // Deshalb: niedrige Schwelle fuer die Raender, und pro Zeile zwischen
+  // linkem und rechtem Rand auffuellen. Packmittel-Silhouetten sind konvex —
+  // was zwischen den Kanten liegt, gehoert zum Teil, ob man hindurchsieht
+  // oder nicht.
+  const SCHWELLE = 16;
+  const MIN_BREITE = Math.max(2, Math.round(B * 0.015)); // gegen Rauschpixel
+
+  // Pro Zeile die Spanne bestimmen
+  const spannen: Array<[number, number] | null> = [];
+  for (let y = 0; y < H; y++) {
+    let links = -1, rechts = -1;
+    for (let x = 0; x < B; x++) {
+      if (data[y * B + x] > SCHWELLE) { if (links < 0) links = x; rechts = x; }
+    }
+    spannen.push(links >= 0 && rechts - links + 1 >= MIN_BREITE ? [links, rechts] : null);
+  }
+
   let minX = B, maxX = -1, minY = H, maxY = -1, flaeche = 0, summeY = 0;
   for (let y = 0; y < H; y++) {
-    for (let x = 0; x < B; x++) {
-      if (!voll(x, y)) continue;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-      flaeche++;
-      summeY += y;
-    }
+    const sp = spannen[y];
+    if (!sp) continue;
+    const [links, rechts] = sp;
+    if (links < minX) minX = links;
+    if (rechts > maxX) maxX = rechts;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    const w = rechts - links + 1;
+    flaeche += w;
+    summeY += w * y;
   }
   if (maxX < 0 || flaeche < 50) return null; // nichts erkannt
 
@@ -99,19 +119,16 @@ async function profilVonPng(pngUrl: string): Promise<Profil | null> {
 
   // Breitenprofil ueber die Hoehe — das Herzstueck. Eine bauchige Flasche
   // waechst zur Mitte hin, ein Zylinder bleibt flach, ein Tiegel ist kurz
-  // und durchgehend breit.
+  // und durchgehend breit, eine Schulterflasche springt oben zurueck.
   const breiten: number[] = [];
   let maxBreite = 1;
   for (let i = 0; i < BAENDER; i++) {
     const y0 = minY + Math.floor((i * bh) / BAENDER);
-    const y1 = minY + Math.max(y0 + 1, Math.floor(((i + 1) * bh) / BAENDER));
+    const y1 = minY + Math.max(y0 - minY + 1, Math.floor(((i + 1) * bh) / BAENDER));
     let breiteste = 0;
     for (let y = y0; y < Math.min(y1, minY + bh); y++) {
-      let links = -1, rechts = -1;
-      for (let x = minX; x <= maxX; x++) {
-        if (voll(x, y)) { if (links < 0) links = x; rechts = x; }
-      }
-      if (links >= 0) breiteste = Math.max(breiteste, rechts - links + 1);
+      const sp = spannen[y];
+      if (sp) breiteste = Math.max(breiteste, sp[1] - sp[0] + 1);
     }
     breiten.push(breiteste);
     if (breiteste > maxBreite) maxBreite = breiteste;
