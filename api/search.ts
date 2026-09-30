@@ -601,6 +601,9 @@ function hardFilter(
 interface RankedProduct extends ProductData {
   score: number;
   reasoning: string;
+  // v47 — Bildpfad: wo dieses Teil vom Referenzbild abweicht. Jeder Treffer
+  // sagt selbst, was nicht stimmt, statt es zu verschweigen.
+  abweichung?: string[];
 }
 
 async function claudeRank(
@@ -999,6 +1002,183 @@ function buildDesignLooks(
 }
 
 // ── Main Handler ────────────────────────────────────────────────────
+// ══ Bildpfad (v47) ═══════════════════════════════════════════════════
+// Foto rein -> bestellbare Teile raus. Drei Ebenen, nach Verlaesslichkeit
+// getrennt: Form (Geometrie, sicher) > Anmutung (Material/Finish, mittel)
+// > Masse (Volumen, geraten). Regel: die unsicheren Ebenen SCOREN, sie
+// FILTERN nie. Ein Teil mit perfekter Schulter und falschem Volumen landet
+// auf Platz 4 — nicht im Nichts.
+
+interface Bildlesart {
+  typ: string | null;            // Flasche | Tiegel | Tube | Spender | Airless | Dose
+  form: string[];                // rund | eckig | oval | konisch | zylindrisch
+  schulter: string | null;       // weich | eckig | abfallend | keine
+  proportion: string | null;     // gedrungen | ausgewogen | schlank
+  verschluss: string | null;     // Pipette | Pumpe | Schraubkappe | Sprueher | Disc | keiner
+  material: string[];            // Glas | PET | PP | HDPE | Aluminium | Keramik
+  transparenz: string | null;    // klar | getoent | opak
+  finish: string | null;         // matt | glaenzend | frosted | soft_touch | metallic
+  volumen: string | null;        // "30ml"
+  prosa: string;                 // "gedrungen, weich, apothekenhaft"
+  geraten: string[];             // Felder, die geschaetzt sind -> Frontend zeichnet sie gestrichelt
+}
+
+function leerLesart(): Bildlesart {
+  return { typ: null, form: [], schulter: null, proportion: null, verschluss: null,
+    material: [], transparenz: null, finish: null, volumen: null, prosa: '', geraten: [] };
+}
+
+function alsListe(v: any): string[] {
+  if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);
+  if (typeof v === 'string' && v.trim()) return [v.trim()];
+  return [];
+}
+function alsText(v: any): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  return (!t || t.toLowerCase() === 'null' || t === '?') ? null : t;
+}
+
+// Vision-Schritt. Haiku 4.5 liest Bilder und ist der guenstigste Weg; faellt
+// die Formlesung schwach aus, wird hier spaeter ein staerkeres Modell
+// eingehaengt — nur fuer diesen einen Schritt.
+async function leseBild(dataUrl: string): Promise<Bildlesart | null> {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([\s\S]+)$/.exec(dataUrl.trim());
+  if (!m) return null;
+  const [, mediaType, b64] = m;
+  // ~5 MB base64 Deckel — groessere Bilder bringen nichts und kosten nur.
+  if (b64.length > 5_000_000) return null;
+
+  const system = `Du bist Verpackungsentwickler und liest ein Foto eines Beauty-Packmittels.
+Beschreibe NUR das Packmittel (Huelle + Verschluss), nie Label, Text, Hintergrund oder Inhalt.
+
+Trenne streng nach Sicherheit:
+ SICHER   Geometrie: Typ, Grundform, Schulterverlauf, Proportion, Verschlusstyp.
+ MITTEL   Anmutung: Material, Transparenz, Finish — aus Glanz, Kante, Lichtbrechung geschlossen.
+ GERATEN  Masse: Volumen. Immer eine Schaetzung. Nenne sie, aber liste das Feld unter "geraten".
+
+Antworte NUR mit JSON, kein anderer Text:
+{"typ":"Flasche|Tiegel|Tube|Spender|Airless|Dose|null",
+ "form":["rund|eckig|oval|konisch|zylindrisch"],
+ "schulter":"weich|eckig|abfallend|keine|null",
+ "proportion":"gedrungen|ausgewogen|schlank|null",
+ "verschluss":"Pipette|Pumpe|Schraubkappe|Spruehkopf|Disc|Klappdeckel|keiner|null",
+ "material":["Glas|PET|PP|HDPE|Aluminium|Keramik"],
+ "transparenz":"klar|getoent|opak|null",
+ "finish":"matt|glaenzend|frosted|soft_touch|metallic|null",
+ "volumen":"<z. B. 30ml oder null>",
+ "prosa":"<3-6 Woerter Formcharakter, z. B. gedrungen, weich, apothekenhaft>",
+ "geraten":["<Feldnamen, die du geschaetzt hast>"]}
+
+Was du nicht siehst, ist null — rate nicht, um das Feld zu fuellen. "volumen" gehoert IMMER in "geraten".`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5', max_tokens: 500, temperature: 0, system,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+            { type: 'text', text: 'Lies dieses Packmittel.' },
+          ],
+        }],
+      }),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const txt = (j?.content || []).map((c: any) => c?.text || '').join('').trim();
+    const roh = txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+    const d = JSON.parse(roh);
+    const l = leerLesart();
+    l.typ = alsText(d.typ);
+    l.form = alsListe(d.form);
+    l.schulter = alsText(d.schulter);
+    l.proportion = alsText(d.proportion);
+    l.verschluss = alsText(d.verschluss);
+    l.material = alsListe(d.material);
+    l.transparenz = alsText(d.transparenz);
+    l.finish = alsText(d.finish);
+    l.volumen = alsText(d.volumen);
+    l.prosa = alsText(d.prosa) || '';
+    l.geraten = alsListe(d.geraten);
+    if (l.volumen && !l.geraten.includes('volumen')) l.geraten.push('volumen');
+    return l;
+  } catch { return null; }
+}
+
+// Die Lesart als Suchsatz — damit Kategorie, Identitaet und Ranking
+// dieselbe Sprache bekommen wie bei einer getippten Suche.
+function lesartAlsQuery(l: Bildlesart): string {
+  return [
+    l.typ, l.form.join(' '), l.schulter ? `${l.schulter}e Schulter` : '',
+    l.proportion, l.verschluss, l.material.join(' '),
+    l.transparenz, l.finish, l.prosa,
+  ].filter(Boolean).join(', ');
+}
+
+function lesartKontext(l: Bildlesart): string {
+  const z = (k: string, v: string | null) => v ? `${k}: ${v}` : '';
+  return `\n\n[Referenzbild — so liest ulba das Teil]\n` + [
+    z('Typ', l.typ), z('Form', l.form.join('/') || null), z('Schulter', l.schulter),
+    z('Proportion', l.proportion), z('Verschluss', l.verschluss),
+    z('Material (geschlossen)', l.material.join('/') || null),
+    z('Transparenz', l.transparenz), z('Finish', l.finish),
+    z('Volumen (geschaetzt)', l.volumen), z('Charakter', l.prosa),
+  ].filter(Boolean).join(' | ') +
+  `\nGewichte die GEOMETRIE am staerksten (Typ, Grundform, Schulter, Proportion, Verschluss).` +
+  ` Material und Finish zaehlen mittel — ein Teil kann in mehreren Materialien kommen.` +
+  ` Das Volumen ist geraten und darf ein sonst perfektes Teil NICHT abwerten.`;
+}
+
+// Deterministischer Aufschlag auf den Claude-Score plus die ehrliche
+// Abweichungsliste. Bewusst klein gehalten: er korrigiert das Ranking,
+// er ersetzt es nicht.
+function bildAufschlag(p: ProductData, l: Bildlesart): { bonus: number; abweichung: string[] } {
+  const ab: string[] = [];
+  let bonus = 0;
+  const norm = (x: string) => x.toLowerCase().trim();
+  const hat = (arr: string[], w: string) => arr.some(a => norm(a).includes(norm(w)) || norm(w).includes(norm(a)));
+
+  if (l.typ) {
+    if (p.type && hat([p.type], l.typ)) bonus += 14;
+    else if (p.type) { bonus -= 10; ab.push(`${p.type} statt ${l.typ}`); }
+  }
+  if (l.form.length && p.form.length) {
+    const treffer = l.form.filter(f => hat(p.form, f)).length;
+    if (treffer > 0) bonus += Math.min(12, treffer * 8);
+    else ab.push(`Form ${p.form.join('/')} statt ${l.form.join('/')}`);
+  }
+  if (l.verschluss && p.closure) {
+    if (hat([p.closure], l.verschluss)) bonus += 8;
+    else ab.push(`${p.closure} statt ${l.verschluss}`);
+  }
+  if (l.material.length) {
+    const alle = [...p.material, ...p.availableMaterials];
+    if (l.material.some(mm => hat(alle, mm))) bonus += 5;
+    else if (alle.length) ab.push(`${alle.slice(0, 2).join('/')} statt ${l.material.join('/')}`);
+  }
+  if (l.volumen) {
+    const ziel = parseInt(l.volumen.replace(/[^0-9]/g, ''), 10);
+    const groessen = p.availableSizes.map(x => parseInt(x.replace(/[^0-9]/g, ''), 10)).filter(n => !isNaN(n));
+    if (!isNaN(ziel) && groessen.length) {
+      if (groessen.some(g => g === ziel)) bonus += 4;
+      else {
+        const naechste = groessen.reduce((a, b) => Math.abs(b - ziel) < Math.abs(a - ziel) ? b : a);
+        ab.push(`${naechste} ml statt geschaetzt ${ziel} ml`);
+      }
+    }
+  }
+  return { bonus, abweichung: ab };
+}
+
 // ── Zugangs-Riegel (v46) ──────────────────────────────────────────────
 // Der Renderer stand offen: CORS '*', keine Auth, kein Limit. Jeder mit der
 // URL konnte auf ulbas fal.ai-/Anthropic-Guthaben rendern lassen. Ab hier
@@ -1043,33 +1223,67 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
   if (!taktOk(req, 40, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen — kurz warten.' });
 
-  const { query, active_filters, removed_filters } = req.body as { query: string; active_filters?: any; removed_filters?: any };
-  if (!query) return res.status(400).json({ error: 'query ist erforderlich' });
+  const { query, image, bildlesart: lesartKorrigiert, active_filters, removed_filters } = req.body as {
+    query?: string;
+    // v47 — Bildpfad. `image` = data-URL (Frontend skaliert vorher).
+    // `bildlesart` = vom Nutzer korrigierte Chips; kommt sie mit, entfaellt
+    // der Vision-Call komplett (Korrektur kostet nichts).
+    image?: string;
+    bildlesart?: Partial<Bildlesart>;
+    active_filters?: any;
+    removed_filters?: any;
+  };
+  if (!query && !image && !lesartKorrigiert) {
+    return res.status(400).json({ error: 'query oder image ist erforderlich' });
+  }
   if (!process.env.AIRTABLE_PAT) return res.status(500).json({ error: 'AIRTABLE_PAT env var fehlt' });
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY env var fehlt' });
 
   try {
+    // 0. Bildpfad: erst lesen, dann suchen. Eine korrigierte Lesart vom
+    //    Nutzer schlaegt das Modell — sie kommt ohne neuen Vision-Call.
+    let lesart: Bildlesart | null = null;
+    if (lesartKorrigiert) {
+      lesart = { ...leerLesart(), ...lesartKorrigiert } as Bildlesart;
+    } else if (image) {
+      lesart = await leseBild(image);
+      if (!lesart) return res.status(422).json({ error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.' });
+    }
+    const bildModus = lesart !== null;
+    // Getippter Text hat Vorrang; ohne ihn spricht das Bild.
+    const eigeneWorte = (query || '').trim();
+    const effektiveQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : '');
+    if (!effektiveQuery) return res.status(400).json({ error: 'Kein lesbarer Suchinhalt' });
+
     // 1. Produkte + Regeln + Aktiv-Codes parallel laden; Identität parallel
     //    ableiten. Code-Laden non-fatal: fällt es aus, laufen results normal
     //    weiter, nur design_looks bleibt leer (wie Cache-Prinzip).
     const [allProducts, produktRegeln, identity, activeCodes] = await Promise.all([
       airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
       airtableListAll(PRODUKT_REGELN_TABLE),
-      parseIdentity(query),
+      parseIdentity(effektiveQuery),
       airtableListAll(DESIGN_CODE_TABLE, "{Status}='Aktiv'").catch(() => [] as any[]),
     ]);
 
     // 2. Spur B parsen + Client-Overrides (Chip-Removal)
-    const parsedBase = parseQuery(query);
-    const parsed = applyActiveFilters(parsedBase, active_filters, removed_filters);
+    const parsedBase = parseQuery(effektiveQuery);
+    let parsed = applyActiveFilters(parsedBase, active_filters, removed_filters);
     const freeHints = parsedBase.freeHints;
 
+    // 2b. Bildregel: aus einem Foto darf nur der Typ hart filtern. Material,
+    //     Groesse, Form und Verschluss sind geschlossen oder geraten — die
+    //     scoren. Sonst schneidet eine Fehllesung die richtige Antwort weg.
+    //     Getippte Worte des Nutzers bleiben unangetastet.
+    if (bildModus && !eigeneWorte) {
+      parsed = { ...parsed, sizeMentions: [], materialMentions: [], closureMentions: [], formMentions: [] };
+    }
+
     // 3. Spur A: Formel → Wand (deterministisch)
-    const formeln = parseFormula(query);
+    const formeln = parseFormula(effektiveQuery);
     const wall = buildFormulaWall(formeln);
 
     // 4. Kategorie (Produkt_Regeln)
-    const category = matchCategory(query, produktRegeln);
+    const category = matchCategory(effektiveQuery, produktRegeln);
 
     // 5. Extraktion
     const products = allProducts.map(extractProduct);
@@ -1082,10 +1296,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       : new Map<string, string>();
 
     // 6. Hard Filter (Spur B + Regeln + Formel-Wand)
-    const filtered = hardFilter(products, parsed, category, wall, capClosures);
+    let filtered = hardFilter(products, parsed, category, wall, capClosures);
 
-    // 7. Ranking (Ebene 2)
-    const ranked = await claudeRank(query, filtered, category, identity, wall);
+    // 6b. Nie eine leere Liste ohne Erklaerung. Greift der Filter im
+    //     Bildmodus zu scharf, faellt die Suche auf das ganze Archiv zurueck
+    //     und das Ranking entscheidet — mit Abweichung an jeder Karte.
+    let bildFallback = false;
+    if (bildModus && filtered.length < 3) { filtered = products; bildFallback = true; }
+
+    // 7. Ranking (Ebene 2) — im Bildmodus mit der Lesart als Kontext
+    const rankQuery = lesart ? effektiveQuery + lesartKontext(lesart) : effektiveQuery;
+    const ranked = await claudeRank(rankQuery, filtered, category, identity, wall);
+
+    // 7a. Geometrie-Aufschlag + Abweichungen (deterministisch, nach Claude)
+    if (lesart) {
+      for (const r of ranked) {
+        const { bonus, abweichung } = bildAufschlag(r, lesart);
+        r.score = Math.max(0, Math.min(100, r.score + bonus));
+        r.abweichung = abweichung;
+      }
+      ranked.sort((a, b) => b.score - a.score);
+    }
 
     // 7b. Caps für Top-Ergebnisse auflösen
     const TOP_N_FOR_CAPS = 30;
@@ -1122,7 +1353,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
       body: JSON.stringify({
         fields: {
-          Query: query,
+          Query: bildModus && !eigeneWorte ? `[BILD] ${effektiveQuery}` : effektiveQuery,
           Category_Match: category?.category || '',
           Total_Products: products.length,
           After_Filter: filtered.length,
@@ -1142,14 +1373,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // NEU: Look-zentrierte Ebene — jeder Eintrag = Design-Rezept + reales
       // Gate-Base. Frontend rendert daraus die Style-Frames (Grid-Vielfalt).
       design_looks: designLooks,
-      query,
+      query: effektiveQuery,
+      // v47 — korrigierbare Chips. `geraten` sagt dem Frontend, welche
+      // gestrichelt zu zeichnen sind. Korrektur zurueckschicken als
+      // `bildlesart` — dann ordnet sich die Liste ohne neuen Vision-Call.
+      bildlesart: lesart,
+      bild_fallback: bildFallback,
       totalProducts: products.length,
       afterFilter: filtered.length,
       activeCodes: activeCodes.length,
       designLooks: designLooks.length,
       categoryMatch: category?.category || null,
       // v30 — Kompetenz-Satz fuer den Chat (vor den Kacheln)
-      hinweis: formelHinweis(category, query),
+      hinweis: formelHinweis(category, effektiveQuery),
       // Spur B — Chips (unverändertes Frontend-Kontrakt + neu: forms)
       parsedFilters: {
         sizes: parsed.sizeMentions, materials: parsed.materialMentions,
