@@ -31,12 +31,49 @@ function selectName(v: any): string {
   return '';
 }
 
+// ── Zugangs-Riegel (v46) ──────────────────────────────────────────────
+// Der Renderer stand offen: CORS '*', keine Auth, kein Limit. Jeder mit der
+// URL konnte auf ulbas fal.ai-/Anthropic-Guthaben rendern lassen. Ab hier
+// gilt: nur die eigene Oberflaeche darf rufen, und auch die nicht endlos.
+const ULBA_ORIGINS = new Set<string>([
+  'https://ulba.vercel.app',
+  'http://localhost:3000',
+]);
+
+function riegel(req: VercelRequest, res: VercelResponse, opts?: { originOptional?: boolean }): boolean {
+  const origin = String(req.headers.origin || '');
+  const erlaubt = origin ? ULBA_ORIGINS.has(origin) : !!opts?.originOptional;
+  if (origin && erlaubt) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  return erlaubt;
+}
+
+// Pro-Instanz-Zaehler. Serverless heisst: nicht global exakt, aber es kappt
+// jeden Dauerbeschuss, und mehr soll es hier nicht.
+const ULBA_TAKT = new Map<string, number[]>();
+function taktOk(req: VercelRequest, max: number, fensterMs: number): boolean {
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || 'unbekannt';
+  const jetzt = Date.now();
+  const treffer = (ULBA_TAKT.get(ip) || []).filter(t => jetzt - t < fensterMs);
+  if (treffer.length >= max) { ULBA_TAKT.set(ip, treffer); return false; }
+  treffer.push(jetzt);
+  ULBA_TAKT.set(ip, treffer);
+  if (ULBA_TAKT.size > 500) {
+    for (const [k, v] of ULBA_TAKT) if (!v.some(t => jetzt - t < fensterMs)) ULBA_TAKT.delete(k);
+  }
+  return true;
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Defensive CORS — Projekt-Ebene deckt es i. d. R. schon, doppelt hält besser.
-  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  const offen = riegel(req, res, { originOptional: true });
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
+  if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
+  if (!taktOk(req, 60, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen' });
 
   try {
     const worte: VokabRecord[] = [];
