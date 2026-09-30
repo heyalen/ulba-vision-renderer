@@ -1051,6 +1051,8 @@ function alsText(v: any): string | null {
 // Jetzt: ein Aufruf, der beides in einem Zug entscheidet, mit demselben
 // Modell und derselben Aufloesung, mit der die Systeme getaggt sind.
 // Widerspruch ist damit strukturell ausgeschlossen.
+let letzterBildfehler = '';
+
 async function lesenUndTaggen(
   dataUrl: string,
   katMap: Map<string, AttrWert[]>
@@ -1116,9 +1118,10 @@ Antworte NUR mit JSON, kein anderer Text:
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        // Formunterscheidung ist die teuerste Sehleistung im Flow und laeuft
-        // einmal pro Suche. Haiku hat hier zu oft "Cylindrical" geraten.
-        model: 'claude-sonnet-5-5', max_tokens: 2000, temperature: 0, system,
+        // Haiku reicht, wenn Lesart und Attribute aus EINEM Urteil kommen —
+        // der Widerspruch war das Problem, nicht die Sehkraft. Und es haelt
+        // die Suche bei Zehntelrappen statt Rappen.
+        model: 'claude-haiku-4-5', max_tokens: 2000, temperature: 0, system,
         messages: [{
           role: 'user',
           content: [
@@ -1128,10 +1131,19 @@ Antworte NUR mit JSON, kein anderer Text:
         }],
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      letzterBildfehler = `Modell ${res.status}: ${(await res.text()).slice(0, 200)}`;
+      return null;
+    }
     const j = await res.json();
     const txt = (j?.content || []).map((c: any) => c?.text || '').join('').trim();
-    const d = JSON.parse(txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim());
+    let d: any;
+    try {
+      d = JSON.parse(txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim());
+    } catch {
+      letzterBildfehler = `Antwort war kein JSON: ${txt.slice(0, 150)}`;
+      return null;
+    }
 
     const l = leerLesart();
     l.typ = alsText(d.typ);
@@ -1155,7 +1167,10 @@ Antworte NUR mit JSON, kein anderer Text:
       if (t) tags.set(kat, t.name);
     }
     return { lesart: l, tags };
-  } catch { return null; }
+  } catch (e: any) {
+    letzterBildfehler = String(e?.message || e).slice(0, 200);
+    return null;
+  }
 }
 
 function lesartAlsQuery(l: Bildlesart): string {
@@ -1453,7 +1468,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let bildTags = new Map<string, string>();
     if (image) {
       const gelesen = await lesenUndTaggen(image, katMap);
-      if (!gelesen) return res.status(422).json({ error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.' });
+      if (!gelesen) return res.status(422).json({
+        error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.',
+        detail: letzterBildfehler || 'kein Detail',
+      });
       lesart = gelesen.lesart;
       bildTags = gelesen.tags;
     }
