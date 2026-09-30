@@ -1,4 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
+// fal nimmt image_url auch als data-URI entgegen — das Referenzbild reist
+// ohnehin als data-URL vom Frontend an, kein Zwischenspeichern noetig.
+import { Profil, falFreistellen, profilVonPng, aehnlichkeit } from './_form';
 
 // ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
@@ -441,6 +444,9 @@ interface ProductData {
   caps: CapRef[];
   capImages: string[];
   supplier: string;
+  // v55 — gespeichertes Silhouettenprofil (Feld "Silhouette", JSON),
+  // gerechnet von api/silhouette.ts mit derselben Regel wie das Referenzbild.
+  silhouette: Profil | null;
 }
 
 function extractProduct(rec: any): ProductData {
@@ -470,6 +476,14 @@ function extractProduct(rec: any): ProductData {
     caps: [],
     capImages: [],
     supplier: multiSelectNames(f['Lieferant'])[0] || '',
+    silhouette: (() => {
+      const roh = f['Silhouette'];
+      if (typeof roh !== 'string' || !roh) return null;
+      try {
+        const p = JSON.parse(roh);
+        return Array.isArray(p?.breiten) ? (p as Profil) : null;
+      } catch { return null; }
+    })(),
   };
 }
 
@@ -1507,14 +1521,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     katMap.forEach((werte, kat) => katGewicht.set(kat, werte[0]?.gewicht ?? 0.03));
     const tags = systemTags(attrWerte);
     let bildTags = new Map<string, string>();
+    // v55 — die Silhouette ist das Geometrie-Signal: sie misst den Koerper
+    // als Zahl, wo das Sprachmodell sich zwischen "Cylindrical" und
+    // "Spherical" entscheiden musste und jeder Uebergang verloren ging.
+    // Faellt fal aus, laeuft die Suche ohne sie weiter (non-fatal).
+    let refProfil: Profil | null = null;
     if (image) {
-      const gelesen = await lesenUndTaggen(image, katMap);
+      const [gelesen, frei] = await Promise.all([
+        lesenUndTaggen(image, katMap),
+        falFreistellen(image).catch(() => null),
+      ]);
       if (!gelesen) return res.status(422).json({
         error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.',
         detail: letzterBildfehler || 'kein Detail',
       });
       lesart = gelesen.lesart;
       bildTags = gelesen.tags;
+      if (frei) refProfil = await profilVonPng(frei).catch(() => null);
     }
 
     const effektiveQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : '');
@@ -1568,20 +1591,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ranked = filtered.map(p => {
         const hf = hardfactScore(p, lesart!);
         const at = attributScore(p.id, bildTags, tags, katGewicht);
-        // Die Attribute fuehren: 33 kuratierte Kategorien mit eigenen
-        // Gewichten schlagen fuenf grobe Tabellenfelder. Bricht die
-        // Geometrie, faellt der Treffer hart zurueck statt nur Punkte zu
-        // verlieren — sonst gleichen Material und Verschluss das aus.
-        let gesamt = at.score > 0 ? at.score * 0.7 + hf.score * 0.3 : hf.score;
-        if (at.geometrieBruch) gesamt *= 0.45;
+        // Arbeitsteilung (v55): die SILHOUETTE misst den Koerper als Zahl
+        // und ersetzt die harte A1-Wand — sie kennt den Uebergang zwischen
+        // bauchig und zylindrisch, den eine Kategorie nicht kennt. Die
+        // ATTRIBUTE steuern bei, was die Silhouette nicht sieht: Kappe,
+        // Kappen-Koerper-Verhaeltnis, Verschluss, Oberflaeche. HARDFACTS
+        // filtern (Typ-Wand bleibt) und ergaenzen Volumen.
+        const sil = (refProfil && p.silhouette) ? aehnlichkeit(refProfil, p.silhouette) : null;
+        let gesamt: number;
+        if (sil !== null) {
+          gesamt = at.score > 0
+            ? sil * 0.45 + at.score * 0.35 + hf.score * 0.2
+            : sil * 0.6 + hf.score * 0.4;
+        } else {
+          gesamt = at.score > 0 ? at.score * 0.7 + hf.score * 0.3 : hf.score;
+          if (at.geometrieBruch) gesamt *= 0.45;
+        }
         if (hf.typBruch) gesamt *= 0.5;
         const naeh = [...hf.abweichung, ...at.differenz];
         return {
           ...p,
           score: Math.round(Math.max(0, Math.min(100, gesamt))),
-          reasoning: at.treffer.length
-            ? `Gleiche ${at.treffer.length} von ${bildTags.size} Bildmerkmalen${naeh.length ? `, abweichend in ${naeh.length}` : ''}.`
-            : 'Passung ueber Typ, Form, Verschluss und Material.',
+          reasoning: sil !== null
+            ? `Form ${sil}% nah${at.treffer.length ? `, gleiche ${at.treffer.length} von ${bildTags.size} Bildmerkmalen` : ''}${naeh.length ? `, abweichend in ${naeh.length}` : ''}.`
+            : at.treffer.length
+              ? `Gleiche ${at.treffer.length} von ${bildTags.size} Bildmerkmalen${naeh.length ? `, abweichend in ${naeh.length}` : ''}.`
+              : 'Passung ueber Typ, Form, Verschluss und Material.',
           abweichung: naeh.slice(0, 4),
         } as RankedProduct;
       }).sort((a, b) => b.score - a.score);
@@ -1631,11 +1666,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ausbreitet, obwohl zwei passen, ist wieder ein Katalog. Nah heisst:
     // innerhalb von 12 Punkten zur Spitze und mindestens 50 Punkte absolut.
     // Der Rest bleibt erreichbar, wird aber nicht als Antwort behauptet.
-    let nah = 0;
+    let nah = 0, aehnlich = 0;
     if (bildModus && ranked.length > 0) {
       const spitze = ranked[0].score;
-      nah = ranked.filter(r => r.score >= Math.max(50, spitze - 12)).length;
-      nah = Math.min(Math.max(nah, 1), 6);
+      nah = ranked.filter(r => r.score >= Math.max(50, spitze - 8)).length;
+      nah = Math.min(Math.max(nah, 1), 4);
+      // Zweite Stufe — Alens Anforderung: gibt es keinen Volltreffer,
+      // zeigt ulba trotzdem, was in der Form verwandt ist, klar als
+      // "aehnlich" gekennzeichnet statt als Antwort behauptet.
+      aehnlich = ranked.filter(r => r.score >= Math.max(45, spitze - 20)).length - nah;
+      aehnlich = Math.min(Math.max(aehnlich, 0), 4);
     }
 
     // Interne Felder nicht an Client leaken (capIds, excluded)
@@ -1675,6 +1715,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bildlesart: lesart,
       bild_tags: Array.from(bildTags.entries()).map(([kat, wert]) => ({ kat, wert })),
       nah,
+      aehnlich,
       bild_fallback: bildFallback,
       totalProducts: products.length,
       afterFilter: filtered.length,
