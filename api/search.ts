@@ -1039,35 +1039,63 @@ function alsText(v: any): string | null {
   return (!t || t.toLowerCase() === 'null' || t === '?') ? null : t;
 }
 
-// Vision-Schritt. Haiku 4.5 liest Bilder und ist der guenstigste Weg; faellt
-// die Formlesung schwach aus, wird hier spaeter ein staerkeres Modell
-// eingehaengt — nur fuer diesen einen Schritt.
-async function leseBild(dataUrl: string): Promise<Bildlesart | null> {
+
+// Die Lesart als Suchsatz — damit Kategorie, Identitaet und Ranking
+// dieselbe Sprache bekommen wie bei einer getippten Suche.
+// ══ Ein Blick, ein Urteil (v51) ══════════════════════════════════════
+// Vorher lasen zwei getrennte Modellaufrufe dasselbe Foto: einer fuer die
+// groben Tabellenfelder, einer fuer die Attribut-Bibliothek. Sie durften
+// sich widersprechen — und taten es: die Lesart sagte "eckig", der Tagger
+// "Cylindrical". Damit lief die Geometrie-Wand ins Leere.
+//
+// Jetzt: ein Aufruf, der beides in einem Zug entscheidet, mit demselben
+// Modell und derselben Aufloesung, mit der die Systeme getaggt sind.
+// Widerspruch ist damit strukturell ausgeschlossen.
+async function lesenUndTaggen(
+  dataUrl: string,
+  katMap: Map<string, AttrWert[]>
+): Promise<{ lesart: Bildlesart; tags: Map<string, string> } | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([\s\S]+)$/.exec(dataUrl.trim());
   if (!m) return null;
   const [, mediaType, b64] = m;
-  // ~5 MB base64 Deckel — groessere Bilder bringen nichts und kosten nur.
   if (b64.length > 5_000_000) return null;
 
+  const menue = Array.from(katMap.entries()).map(([kat, werte]) =>
+    `${kat}:\n` + werte.map(w => `  - ${w.name}${w.beschreibung ? ` (${w.beschreibung})` : ''}`).join('\n')
+  ).join('\n');
+
   const system = `Du bist Verpackungsentwickler und liest ein Foto eines Beauty-Packmittels.
-Beschreibe NUR das Packmittel (Huelle + Verschluss), nie Label, Text, Hintergrund oder Inhalt.
+Du beschreibst NUR das Packmittel — Huelle und Verschluss. Label, Aufdruck, Inhalt,
+Fluessigkeit und Hintergrund ignorierst du vollstaendig.
 
-Du antwortest in EINEM festen Vokabular — dem der Lieferantendatenbank. Andere
-Woerter sind wertlos, weil nichts sie findet. Nur exakte Schreibweisen:
+Du lieferst zwei Dinge in EINEM Urteil. Sie muessen zueinander passen: wenn der
+Koerper eckig ist, ist er nicht zylindrisch, und umgekehrt. Widerspruch ist ein
+Fehler.
 
+TEIL 1 — Tabellenfelder. Nur diese Schreibweisen:
 typ         Tiegel | Flasche | Tube | Airless | Pump | Spray | Stick | Dose
 form        rund | oval | eckig | quadratisch | schlank | breit | freeform | spezial
-            -> MEHRERE erlaubt und erwuenscht: Querschnitt UND Proportion.
-               Eine flache breite Rechteckflasche ist ["eckig","breit"],
-               ein hohes schmales Rundflakon ist ["rund","schlank"].
+            -> MEHRERE: Querschnitt UND Proportion. Flach und breit mit geraden
+               Kanten = ["eckig","breit"]. Hoch und schmal mit rundem Querschnitt
+               = ["rund","schlank"].
 verschluss  Schraubverschluss | Pump | Flip-top | Spray | Pipette | Airless | Stopfen | Snap-On
 material    Glas | PET | R-PET | HDPE | PP | Aluminium | Keramik | PETG | HDPE/LDPE
-volumen     5ml | 10ml | 15ml | 20ml | 30ml | 50ml | 75ml | 100ml | 125ml | 150ml | 200ml | 250ml | 300ml | 500ml | 1000ml
+volumen     5ml|10ml|15ml|20ml|30ml|50ml|75ml|100ml|125ml|150ml|200ml|250ml|300ml|500ml|1000ml
+            -> immer schaetzen, Kappe als Massstab (20-25 mm breit)
 
-Sicherheitsebenen: Geometrie (typ, form, verschluss) ist am Foto belegbar.
-Material ist geschlossen. Volumen ist geschaetzt — nimm die Kappe als Massstab,
-eine Standardkappe misst 20-25 mm, und waehle die naechste Groesse aus der Liste.
+TEIL 2 — Attribute. Pro Kategorie GENAU EINEN Wert aus der Liste oder null.
+Keine Mindestanzahl. Eine leere Kategorie ist ein gueltiges Ergebnis und besser
+als ein geratener Wert. Fuelle nicht auf.
+
+Sieh bei der Koerpergeometrie besonders genau hin. Zylindrisch, kubisch und
+facettiert sind an Silhouette, Kantenverlauf und Lichtreflexen klar zu trennen —
+dieser Unterschied entscheidet spaeter alles. Waehle nicht reflexhaft
+"Cylindrical", nur weil es bei Kosmetik haeufig ist. Eine Flasche mit geraden
+Seitenkanten und rechteckigem Grundriss ist kubisch, auch wenn die Ecken
+verrundet sind.
+
+${menue}
 
 Antworte NUR mit JSON, kein anderer Text:
 {"typ":"<Wert oder null>","form":["<Werte>"],"verschluss":"<Wert oder null>",
@@ -1076,9 +1104,8 @@ Antworte NUR mit JSON, kein anderer Text:
  "proportion":"<gedrungen|ausgewogen|schlank|null>",
  "transparenz":"<klar|getoent|opak|null>",
  "finish":"<matt|glaenzend|frosted|soft_touch|metallic|null>",
- "prosa":"<3-6 Woerter Formcharakter>","geraten":[]}
-
-Was du nicht siehst, ist null. Nur "volumen" schaetzt du immer.`;
+ "prosa":"<3-6 Woerter Formcharakter>",
+ "attribute":{"A1_Body_Geometry":"<Wert oder null>","A2_Body_Proportion":"<Wert oder null>", ...}}`;
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1089,12 +1116,14 @@ Was du nicht siehst, ist null. Nur "volumen" schaetzt du immer.`;
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5', max_tokens: 500, temperature: 0, system,
+        // Formunterscheidung ist die teuerste Sehleistung im Flow und laeuft
+        // einmal pro Suche. Haiku hat hier zu oft "Cylindrical" geraten.
+        model: 'claude-sonnet-5-5', max_tokens: 2000, temperature: 0, system,
         messages: [{
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
-            { type: 'text', text: 'Lies dieses Packmittel.' },
+            { type: 'text', text: 'Lies und tagge dieses Packmittel.' },
           ],
         }],
       }),
@@ -1102,8 +1131,8 @@ Was du nicht siehst, ist null. Nur "volumen" schaetzt du immer.`;
     if (!res.ok) return null;
     const j = await res.json();
     const txt = (j?.content || []).map((c: any) => c?.text || '').join('').trim();
-    const roh = txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-    const d = JSON.parse(roh);
+    const d = JSON.parse(txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim());
+
     const l = leerLesart();
     l.typ = alsText(d.typ);
     l.form = alsListe(d.form);
@@ -1115,20 +1144,20 @@ Was du nicht siehst, ist null. Nur "volumen" schaetzt du immer.`;
     l.finish = alsText(d.finish);
     l.volumen = alsText(d.volumen);
     l.prosa = alsText(d.prosa) || '';
-    l.geraten = alsListe(d.geraten);
-    // Unsicherheit gehoert nicht ins Modell-Ermessen. Ebene 1 (Geometrie)
-    // ist aus einem Foto belegbar, Ebene 2 (Material, Transparenz, Finish)
-    // ist geschlossen, Ebene 3 (Volumen) ist geschaetzt. Glas von schwerem
-    // PET zu unterscheiden, kann niemand am Bild — also steht es gestrichelt
-    // da, auch wenn das Modell sich sicher fuehlt.
-    const IMMER_UNSICHER = ['material', 'transparenz', 'finish', 'volumen'];
-    for (const f of IMMER_UNSICHER) if (!l.geraten.includes(f)) l.geraten.push(f);
-    return l;
+    for (const f of ['material', 'transparenz', 'finish', 'volumen']) l.geraten.push(f);
+
+    const tags = new Map<string, string>();
+    for (const [kat, wert] of Object.entries(d.attribute || {})) {
+      if (typeof wert !== 'string' || !wert || wert === 'null') continue;
+      const erlaubt = katMap.get(kat);
+      if (!erlaubt) continue;
+      const t = erlaubt.find(w => w.name.toLowerCase() === wert.toLowerCase());
+      if (t) tags.set(kat, t.name);
+    }
+    return { lesart: l, tags };
   } catch { return null; }
 }
 
-// Die Lesart als Suchsatz — damit Kategorie, Identitaet und Ranking
-// dieselbe Sprache bekommen wie bei einer getippten Suche.
 function lesartAlsQuery(l: Bildlesart): string {
   return [
     l.typ, l.form.join(' '), l.schulter ? `${l.schulter}e Schulter` : '',
@@ -1234,65 +1263,6 @@ function systemTags(werte: AttrWert[]): Map<string, Map<string, Set<string>>> {
   return m;
 }
 
-// Der Tagger: ein Foto, gelesen im Vokabular des Archivs. Pro Kategorie
-// hoechstens ein Wert, und lieber null als geraten.
-async function tagBild(dataUrl: string, katMap: Map<string, AttrWert[]>): Promise<Map<string, string>> {
-  const leer = new Map<string, string>();
-  if (!process.env.ANTHROPIC_API_KEY || katMap.size === 0) return leer;
-  const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([\s\S]+)$/.exec(dataUrl.trim());
-  if (!m) return leer;
-  const [, mediaType, b64] = m;
-
-  const menue = Array.from(katMap.entries()).map(([kat, werte]) =>
-    `${kat}:\n` + werte.map(w => `  - ${w.name}${w.beschreibung ? ` (${w.beschreibung})` : ''}`).join('\n')
-  ).join('\n');
-
-  const system = `Du bist Verpackungsentwickler und liest ein Foto eines Beauty-Packmittels.
-Du beschreibst NUR das Packmittel — Huelle und Verschluss. Label, Text, Inhalt und Hintergrund ignorierst du.
-
-Waehle pro Kategorie GENAU EINEN Wert aus der Liste, oder null, wenn du es am Foto nicht erkennen kannst.
-Erfinde keine Werte. Nur exakte Schreibweisen aus der Liste.
-Lieber null als geraten: ein falsches Tag kostet mehr als ein fehlendes.
-
-${menue}
-
-Antworte NUR mit einem JSON-Objekt {"<Kategorie>":"<Wert oder null>", ...}, kein anderer Text.`;
-
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5', max_tokens: 1200, temperature: 0, system,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
-            { type: 'text', text: 'Tagge dieses Packmittel.' },
-          ],
-        }],
-      }),
-    });
-    if (!res.ok) return leer;
-    const j = await res.json();
-    const txt = (j?.content || []).map((c: any) => c?.text || '').join('').trim();
-    const d = JSON.parse(txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim());
-    const raus = new Map<string, string>();
-    for (const [kat, wert] of Object.entries(d)) {
-      if (typeof wert !== 'string' || !wert || wert === 'null') continue;
-      const erlaubt = katMap.get(kat);
-      if (!erlaubt) continue;
-      // Nur was es wirklich gibt. Halluzinierte Werte fallen still weg.
-      const treffer = erlaubt.find(w => w.name.toLowerCase() === wert.toLowerCase());
-      if (treffer) raus.set(kat, treffer.name);
-    }
-    return raus;
-  } catch { return leer; }
-}
 
 // Gewichteter Attribut-Vergleich. Gezaehlt wird nur, wo BEIDE Seiten etwas
 // gesagt haben — ein System wird nicht dafuer bestraft, dass eine Kategorie
@@ -1450,15 +1420,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let lesart: Bildlesart | null = null;
     if (lesartKorrigiert) {
       lesart = { ...leerLesart(), ...lesartKorrigiert } as Bildlesart;
-    } else if (image) {
-      lesart = await leseBild(image);
-      if (!lesart) return res.status(422).json({ error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.' });
     }
-    const bildModus = lesart !== null;
+    // Bei image wird weiter unten gelesen — erst muss die Bibliothek da sein,
+    // weil Lesart und Attribute aus EINEM Aufruf kommen.
+    const bildModus = lesart !== null || !!image;
     // Getippter Text hat Vorrang; ohne ihn spricht das Bild.
     const eigeneWorte = (query || '').trim();
-    const effektiveQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : '');
-    if (!effektiveQuery) return res.status(400).json({ error: 'Kein lesbarer Suchinhalt' });
+    // Die endgueltige Query steht erst, wenn das Bild gelesen ist — das
+    // passiert nach dem Laden der Bibliothek, weil beides aus einem Aufruf
+    // kommt. Fuer das parallele Laden reicht solange, was schon da ist.
+    const vorlaeufigeQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : 'Packmittel');
 
     // 1. Produkte + Regeln + Aktiv-Codes parallel laden; Identität parallel
     //    ableiten. Code-Laden non-fatal: fällt es aus, laufen results normal
@@ -1469,7 +1440,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const [allProducts, produktRegeln, identity, activeCodes, attrWerte] = await Promise.all([
       airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
       airtableListAll(PRODUKT_REGELN_TABLE),
-      (bildModus && !eigeneWorte) ? Promise.resolve(null) : parseIdentity(effektiveQuery),
+      (bildModus && !eigeneWorte) ? Promise.resolve(null) : parseIdentity(vorlaeufigeQuery),
       airtableListAll(DESIGN_CODE_TABLE, "{Status}='Aktiv'").catch(() => [] as any[]),
       bildModus ? ladeAttributBibliothek().catch(() => [] as AttrWert[]) : Promise.resolve([] as AttrWert[]),
     ]);
@@ -1480,7 +1451,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     katMap.forEach((werte, kat) => katGewicht.set(kat, werte[0]?.gewicht ?? 0.03));
     const tags = systemTags(attrWerte);
     let bildTags = new Map<string, string>();
-    if (image && katMap.size > 0) bildTags = await tagBild(image, katMap);
+    if (image) {
+      const gelesen = await lesenUndTaggen(image, katMap);
+      if (!gelesen) return res.status(422).json({ error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.' });
+      lesart = gelesen.lesart;
+      bildTags = gelesen.tags;
+    }
+
+    const effektiveQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : '');
+    if (!effektiveQuery) return res.status(400).json({ error: 'Kein lesbarer Suchinhalt' });
 
     // 2. Spur B parsen + Client-Overrides (Chip-Removal)
     const parsedBase = parseQuery(effektiveQuery);
