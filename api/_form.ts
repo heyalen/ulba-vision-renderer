@@ -108,6 +108,21 @@ export async function profilVonPng(pngUrl: string): Promise<Profil | null> {
   }
   if (koerperStart >= suchEnde) koerperStart = minY; // keine klare Grenze -> nichts kappen
 
+  // ── Fussartefakte abtrennen ─────────────────────────────────────────
+  // Spiegelbild des Kappenschnitts, unten. Klare, dicke Glasboeden (Brigitte)
+  // verschluckt BiRefNet auf weissem Grund fast ganz — uebrig bleibt ein
+  // schmaler Lichtreflex, der das Profil in einen Stummel (0,16) enden liess
+  // und die Hoehe um ein Viertel aufblaehte. Dasselbe gilt fuer Spiegelungen
+  // und Schlagschatten unter dem Teil. Was am Fuss schmaler als ein Drittel
+  // der breitesten Stelle ist, ist kein Koerper. Gesucht nur im unteren
+  // Drittel, damit spitz zulaufende Formen (DROP) nicht beschnitten werden.
+  const fussGrenze = maxY - Math.floor(hoeheGesamt * 0.33);
+  while (maxY > fussGrenze) {
+    const sp = spannen[maxY];
+    if (sp && sp[1] - sp[0] + 1 >= maxZeilenBreite * 0.34) break;
+    maxY--;
+  }
+
   // Kennzahlen ab hier NUR ueber den Koerper
   minX = B; maxX = -1; flaeche = 0; summeY = 0;
   for (let y = koerperStart; y <= maxY; y++) {
