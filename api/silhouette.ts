@@ -181,8 +181,15 @@ async function airtableAlle(): Promise<any[]> {
   return raus;
 }
 
+// Airtable liefert Felder unter ihren NAMEN, nicht unter IDs — deshalb hier
+// dieselben Namen wie in search.ts, nicht die Feld-IDs von oben.
+function nameVon(rec: any): string {
+  const f = rec.fields || {};
+  return f['Page Titel'] || f['System ID'] || f[F.name] || rec.id;
+}
+
 function bildUrlVon(f: any): string | null {
-  for (const k of [F.bildHarmonisiert, F.bild, 'Bild_Harmonisiert']) {
+  for (const k of ['Bild_Harmonisiert', F.bildHarmonisiert, F.bild]) {
     const a = f[k];
     if (Array.isArray(a) && a[0]?.url) return a[0].url as string;
   }
@@ -212,7 +219,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const bericht: any[] = [];
       const updates: any[] = [];
       for (const rec of teil) {
-        const name = rec.fields[F.name] || rec.fields['System ID'] || rec.id;
+        const name = nameVon(rec);
         const url = bildUrlVon(rec.fields);
         if (!url) { bericht.push({ name, status: 'kein Bild' }); continue; }
         const frei = await falFreistellen(url);
@@ -270,7 +277,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       let p: Profil;
       try { p = JSON.parse(roh); } catch { continue; }
       treffer.push({
-        name: rec.fields[F.name] || rec.id,
+        name: nameVon(rec),
         id: rec.id,
         aehnlichkeit: aehnlichkeit(ref, p),
       });
