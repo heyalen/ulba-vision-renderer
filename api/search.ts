@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 // fal nimmt image_url auch als data-URI entgegen — das Referenzbild reist
 // ohnehin als data-URL vom Frontend an, kein Zwischenspeichern noetig.
-import { Profil, falFreistellen, profilVonPng, aehnlichkeit } from './_form';
+import { Profil, falFreistellen, profilVonPng, aehnlichkeit, letzterFalFehler } from './_form';
 
 // ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
@@ -614,6 +614,7 @@ function hardFilter(
 // ── Claude Ranking (Ebene 2 — wählt innerhalb der erlaubten Menge) ────
 interface RankedProduct extends ProductData {
   score: number;
+  formNaehe?: number | null; // v55 — Silhouetten-Naehe 0..100, null = nicht gemessen
   reasoning: string;
   // v47 — Bildpfad: wo dieses Teil vom Referenzbild abweicht. Jeder Treffer
   // sagt selbst, was nicht stimmt, statt es zu verschweigen.
@@ -1532,10 +1533,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // "Spherical" entscheiden musste und jeder Uebergang verloren ging.
     // Faellt fal aus, laeuft die Suche ohne sie weiter (non-fatal).
     let refProfil: Profil | null = null;
+    let formFehler = '';
     if (image) {
       const [gelesen, frei] = await Promise.all([
         lesenUndTaggen(image, katMap),
-        falFreistellen(image).catch(() => null),
+        falFreistellen(image).catch((e: any) => { formFehler = 'fal: ' + String(e?.message || e).slice(0, 120); return null; }),
       ]);
       if (!gelesen && !lesart) return res.status(422).json({
         error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.',
@@ -1547,7 +1549,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (!lesart) lesart = gelesen.lesart;
         bildTags = gelesen.tags;
       }
-      if (frei) refProfil = await profilVonPng(frei).catch(() => null);
+      if (frei) refProfil = await profilVonPng(frei).catch((e: any) => { formFehler = 'Profil: ' + String(e?.message || e).slice(0, 120); return null; });
+      else if (!formFehler) formFehler = 'fal lieferte kein Bild (' + (letzterFalFehler || 'ohne Meldung') + ')';
 
       // Geometrie wird GEMESSEN, nicht geraten. Haiku las denselben eckigen
       // Flakon morgens als "eckig/breit" und abends als "rund/schlank" —
@@ -1645,6 +1648,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               ? `Gleiche ${at.treffer.length} von ${bildTags.size} Bildmerkmalen${naeh.length ? `, abweichend in ${naeh.length}` : ''}.`
               : 'Passung ueber Typ, Form, Verschluss und Material.',
           abweichung: naeh.slice(0, 4),
+          formNaehe: sil,
         } as RankedProduct;
       }).sort((a, b) => b.score - a.score);
     } else {
@@ -1740,6 +1744,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // gestrichelt zu zeichnen sind. Korrektur zurueckschicken als
       // `bildlesart` — dann ordnet sich die Liste ohne neuen Vision-Call.
       bildlesart: lesart,
+      // Diagnose: wurde die Geometrie gemessen? Wenn nicht, warum.
+      form_messung: image ? (refProfil
+        ? { aktiv: true, seitenverhaeltnis: +refProfil.seitenverhaeltnis.toFixed(2), profil: refProfil.breiten.map(b => +b.toFixed(2)) }
+        : { aktiv: false, grund: formFehler || 'unbekannt' }) : null,
       bild_tags: Array.from(bildTags.entries()).map(([kat, wert]) => ({ kat, wert })),
       nah,
       aehnlich,
