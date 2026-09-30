@@ -1053,26 +1053,32 @@ async function leseBild(dataUrl: string): Promise<Bildlesart | null> {
   const system = `Du bist Verpackungsentwickler und liest ein Foto eines Beauty-Packmittels.
 Beschreibe NUR das Packmittel (Huelle + Verschluss), nie Label, Text, Hintergrund oder Inhalt.
 
-Trenne streng nach Sicherheit:
- SICHER   Geometrie: Typ, Grundform, Schulterverlauf, Proportion, Verschlusstyp.
- MITTEL   Anmutung: Material, Transparenz, Finish — aus Glanz, Kante, Lichtbrechung geschlossen.
- GERATEN  Masse: Volumen. Immer eine Schaetzung. Nenne sie, aber liste das Feld unter "geraten".
+Du antwortest in EINEM festen Vokabular — dem der Lieferantendatenbank. Andere
+Woerter sind wertlos, weil nichts sie findet. Nur exakte Schreibweisen:
+
+typ         Tiegel | Flasche | Tube | Airless | Pump | Spray | Stick | Dose
+form        rund | oval | eckig | quadratisch | schlank | breit | freeform | spezial
+            -> MEHRERE erlaubt und erwuenscht: Querschnitt UND Proportion.
+               Eine flache breite Rechteckflasche ist ["eckig","breit"],
+               ein hohes schmales Rundflakon ist ["rund","schlank"].
+verschluss  Schraubverschluss | Pump | Flip-top | Spray | Pipette | Airless | Stopfen | Snap-On
+material    Glas | PET | R-PET | HDPE | PP | Aluminium | Keramik | PETG | HDPE/LDPE
+volumen     5ml | 10ml | 15ml | 20ml | 30ml | 50ml | 75ml | 100ml | 125ml | 150ml | 200ml | 250ml | 300ml | 500ml | 1000ml
+
+Sicherheitsebenen: Geometrie (typ, form, verschluss) ist am Foto belegbar.
+Material ist geschlossen. Volumen ist geschaetzt — nimm die Kappe als Massstab,
+eine Standardkappe misst 20-25 mm, und waehle die naechste Groesse aus der Liste.
 
 Antworte NUR mit JSON, kein anderer Text:
-{"typ":"Flasche|Tiegel|Tube|Spender|Airless|Dose|null",
- "form":["rund|eckig|oval|konisch|zylindrisch"],
- "schulter":"weich|eckig|abfallend|keine|null",
- "proportion":"gedrungen|ausgewogen|schlank|null",
- "verschluss":"Pipette|Pumpe|Schraubkappe|Spruehkopf|Disc|Klappdeckel|keiner|null",
- "material":["Glas|PET|PP|HDPE|Aluminium|Keramik"],
- "transparenz":"klar|getoent|opak|null",
- "finish":"matt|glaenzend|frosted|soft_touch|metallic|null",
- "volumen":"<IMMER schaetzen, nie null — z. B. 15ml|30ml|50ml|100ml|200ml. Nutze das Verhaeltnis von Kappe zu Koerper als Massstab: eine Standardkappe ist 20-25 mm breit.>",
- "prosa":"<3-6 Woerter Formcharakter, z. B. gedrungen, weich, apothekenhaft>",
- "geraten":["<Feldnamen, die du geschaetzt hast>"]}
+{"typ":"<Wert oder null>","form":["<Werte>"],"verschluss":"<Wert oder null>",
+ "material":["<Werte>"],"volumen":"<Wert>",
+ "schulter":"<weich|eckig|abfallend|keine|null>",
+ "proportion":"<gedrungen|ausgewogen|schlank|null>",
+ "transparenz":"<klar|getoent|opak|null>",
+ "finish":"<matt|glaenzend|frosted|soft_touch|metallic|null>",
+ "prosa":"<3-6 Woerter Formcharakter>","geraten":[]}
 
-Was du nicht siehst, ist null — rate nicht, um das Feld zu fuellen.
-Einzige Ausnahme: "volumen" schaetzt du immer. Es wird als Schaetzung behandelt und filtert nichts weg.`;
+Was du nicht siehst, ist null. Nur "volumen" schaetzt du immer.`;
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1145,53 +1151,231 @@ function lesartKontext(l: Bildlesart): string {
   ` Das Volumen ist geraten und darf ein sonst perfektes Teil NICHT abwerten.`;
 }
 
-// Deterministischer Aufschlag auf den Claude-Score plus die ehrliche
-// Abweichungsliste. Bewusst klein gehalten: er korrigiert das Ranking,
-// er ersetzt es nicht.
-function bildAufschlag(p: ProductData, l: Bildlesart): { bonus: number; abweichung: string[] } {
+
+// ══ Attribut-Bibliothek ══════════════════════════════════════════════
+// 199 kuratierte Werte in 33 Kategorien, jede mit eigenem Gewicht — das
+// eigentliche Sehvokabular von ulba. Der Bildpfad liest ein Foto AUSSCHLIESS-
+// LICH in dieser Sprache, damit Foto und Archiv dasselbe meinen. Ein Modell,
+// das "gedrungen" sagt, waehrend die Tabelle "Squat / Wide" kennt, matcht nie.
+// Feld-IDs statt Namen: Namen koennen umbenannt werden, IDs nicht.
+const ATTR_TABLE = 'tblsWJ0q2sQ7sXwvk';
+const ATTR_F = {
+  kategorie: 'fldaRa8uT30LC4h5o',
+  name: 'fldkhYMbxvAtglzaI',
+  beschreibung: 'fldduSVAFumDEDziS',
+  gewicht: 'fldBUgInbJ8ec1sV1',
+  systeme: 'flddgNw5dJbydl7bE',
+};
+
+// G* (Label, Typografie, Umverpackung) und H1 (Nachhaltigkeit) sind nicht am
+// nackten Teil ablesbar und gehoeren zur Design-Ebene — der Tagger laesst sie aus.
+const SICHTBARE_PRAEFIXE = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+interface AttrWert {
+  id: string; kategorie: string; name: string; beschreibung: string;
+  gewicht: number; systeme: string[];
+}
+
+async function ladeAttributBibliothek(): Promise<AttrWert[]> {
+  const raus: AttrWert[] = [];
+  let offset: string | null = null;
+  do {
+    const p = new URLSearchParams({ pageSize: '100', returnFieldsByFieldId: 'true' });
+    Object.values(ATTR_F).forEach(f => p.append('fields[]', f));
+    if (offset) p.set('offset', offset);
+    const r = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${ATTR_TABLE}?${p}`,
+      { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } });
+    if (!r.ok) break;
+    const j = await r.json();
+    for (const rec of (j.records || [])) {
+      const f = rec.fields || {};
+      const kat = selectName(f[ATTR_F.kategorie]);
+      const name = typeof f[ATTR_F.name] === 'string' ? f[ATTR_F.name] : '';
+      if (!kat || !name) continue;
+      raus.push({
+        id: rec.id, kategorie: kat, name,
+        beschreibung: typeof f[ATTR_F.beschreibung] === 'string' ? f[ATTR_F.beschreibung] : '',
+        gewicht: typeof f[ATTR_F.gewicht] === 'number' ? f[ATTR_F.gewicht] : 0.03,
+        systeme: Array.isArray(f[ATTR_F.systeme]) ? f[ATTR_F.systeme] : [],
+      });
+    }
+    offset = j.offset || null;
+  } while (offset);
+  return raus;
+}
+
+// Nach Kategorie gruppiert — das ist zugleich das Menue fuer den Tagger und
+// die Struktur, in der spaeter verglichen wird.
+function nachKategorie(werte: AttrWert[]): Map<string, AttrWert[]> {
+  const m = new Map<string, AttrWert[]>();
+  for (const w of werte) {
+    if (!SICHTBARE_PRAEFIXE.includes(w.kategorie.charAt(0))) continue;
+    const l = m.get(w.kategorie) || [];
+    l.push(w);
+    m.set(w.kategorie, l);
+  }
+  return m;
+}
+
+// systemId -> Kategorie -> gesetzte Attributnamen. Der Link wird von der
+// Bibliothek aus gelesen, nicht vom System aus: eine Richtung genuegt, und
+// diese haengt an keiner Feldbenennung in der System-Tabelle.
+function systemTags(werte: AttrWert[]): Map<string, Map<string, Set<string>>> {
+  const m = new Map<string, Map<string, Set<string>>>();
+  for (const w of werte) {
+    for (const sysId of w.systeme) {
+      const proSys = m.get(sysId) || new Map<string, Set<string>>();
+      const proKat = proSys.get(w.kategorie) || new Set<string>();
+      proKat.add(w.name);
+      proSys.set(w.kategorie, proKat);
+      m.set(sysId, proSys);
+    }
+  }
+  return m;
+}
+
+// Der Tagger: ein Foto, gelesen im Vokabular des Archivs. Pro Kategorie
+// hoechstens ein Wert, und lieber null als geraten.
+async function tagBild(dataUrl: string, katMap: Map<string, AttrWert[]>): Promise<Map<string, string>> {
+  const leer = new Map<string, string>();
+  if (!process.env.ANTHROPIC_API_KEY || katMap.size === 0) return leer;
+  const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([\s\S]+)$/.exec(dataUrl.trim());
+  if (!m) return leer;
+  const [, mediaType, b64] = m;
+
+  const menue = Array.from(katMap.entries()).map(([kat, werte]) =>
+    `${kat}:\n` + werte.map(w => `  - ${w.name}${w.beschreibung ? ` (${w.beschreibung})` : ''}`).join('\n')
+  ).join('\n');
+
+  const system = `Du bist Verpackungsentwickler und liest ein Foto eines Beauty-Packmittels.
+Du beschreibst NUR das Packmittel — Huelle und Verschluss. Label, Text, Inhalt und Hintergrund ignorierst du.
+
+Waehle pro Kategorie GENAU EINEN Wert aus der Liste, oder null, wenn du es am Foto nicht erkennen kannst.
+Erfinde keine Werte. Nur exakte Schreibweisen aus der Liste.
+Lieber null als geraten: ein falsches Tag kostet mehr als ein fehlendes.
+
+${menue}
+
+Antworte NUR mit einem JSON-Objekt {"<Kategorie>":"<Wert oder null>", ...}, kein anderer Text.`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5', max_tokens: 1200, temperature: 0, system,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+            { type: 'text', text: 'Tagge dieses Packmittel.' },
+          ],
+        }],
+      }),
+    });
+    if (!res.ok) return leer;
+    const j = await res.json();
+    const txt = (j?.content || []).map((c: any) => c?.text || '').join('').trim();
+    const d = JSON.parse(txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim());
+    const raus = new Map<string, string>();
+    for (const [kat, wert] of Object.entries(d)) {
+      if (typeof wert !== 'string' || !wert || wert === 'null') continue;
+      const erlaubt = katMap.get(kat);
+      if (!erlaubt) continue;
+      // Nur was es wirklich gibt. Halluzinierte Werte fallen still weg.
+      const treffer = erlaubt.find(w => w.name.toLowerCase() === wert.toLowerCase());
+      if (treffer) raus.set(kat, treffer.name);
+    }
+    return raus;
+  } catch { return leer; }
+}
+
+// Gewichteter Attribut-Vergleich. Gezaehlt wird nur, wo BEIDE Seiten etwas
+// gesagt haben — ein System wird nicht dafuer bestraft, dass eine Kategorie
+// bei ihm ungetaggt ist, und das Bild nicht fuer das, was es nicht sieht.
+function attributScore(
+  sysId: string,
+  bildTags: Map<string, string>,
+  tags: Map<string, Map<string, Set<string>>>,
+  katGewicht: Map<string, number>
+): { score: number; treffer: string[]; differenz: string[] } {
+  const proSys = tags.get(sysId);
+  const treffer: string[] = [];
+  const differenz: string[] = [];
+  if (!proSys || bildTags.size === 0) return { score: 0, treffer, differenz };
+  let max = 0, punkte = 0;
+  for (const [kat, bildWert] of bildTags) {
+    const sysWerte = proSys.get(kat);
+    if (!sysWerte || sysWerte.size === 0) continue; // Kategorie ungetaggt -> zaehlt nicht
+    const g = katGewicht.get(kat) || 0.03;
+    max += g;
+    if (sysWerte.has(bildWert)) { punkte += g; treffer.push(kat); }
+    else differenz.push(`${kat.replace(/^[A-Z]\d_/, '')}: ${Array.from(sysWerte)[0]} statt ${bildWert}`);
+  }
+  return { score: max > 0 ? (punkte / max) * 100 : 0, treffer, differenz };
+}
+
+// Harte Fakten aus der System-Tabelle, im Vokabular der Tabelle selbst.
+// Typ und Form tragen das meiste Gewicht: sie sind am Foto belegbar.
+function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichung: string[] } {
   const ab: string[] = [];
-  let bonus = 0;
-  const norm = (x: string) => x.toLowerCase().trim();
-  const hat = (arr: string[], w: string) => arr.some(a => norm(a).includes(norm(w)) || norm(w).includes(norm(a)));
+  let max = 0, punkte = 0;
+  const kl = (x: string) => x.toLowerCase().trim();
 
   if (l.typ) {
-    if (p.type && hat([p.type], l.typ)) bonus += 14;
-    else if (p.type) { bonus -= 10; ab.push(`${p.type} statt ${l.typ}`); }
+    max += 30;
+    if (p.type && kl(p.type) === kl(l.typ)) punkte += 30;
+    else if (p.type) ab.push(`${p.type} statt ${l.typ}`);
   }
-  if (l.form.length && p.form.length) {
-    const treffer = l.form.filter(f => hat(p.form, f)).length;
-    if (treffer > 0) bonus += Math.min(12, treffer * 8);
-    else ab.push(`Form ${p.form.join('/')} statt ${l.form.join('/')}`);
-  }
-  if (l.verschluss && p.closure) {
-    // "Schraubverschluss" und "Schraubkappe" sind dasselbe Teil. Ohne die
-    // Alias-Normalisierung behauptet die Karte einen Unterschied, den es
-    // nicht gibt — und verliert damit das Vertrauen fuer die echten.
-    if (normalizeClosure(p.closure) === normalizeClosure(l.verschluss)) bonus += 8;
-    else ab.push(`${p.closure} statt ${l.verschluss}`);
-  }
-  if (l.material.length) {
-    const alle = [...p.material, ...p.availableMaterials];
-    if (l.material.some(mm => hat(alle, mm))) bonus += 5;
-    else if (alle.length) ab.push(`${alle.slice(0, 2).join('/')} statt ${l.material.join('/')}`);
-  }
-  if (l.volumen) {
-    const ziel = parseInt(l.volumen.replace(/[^0-9]/g, ''), 10);
-    const groessen = p.availableSizes.map(x => parseInt(x.replace(/[^0-9]/g, ''), 10)).filter(n => !isNaN(n));
-    if (!isNaN(ziel) && groessen.length) {
-      if (groessen.some(g => g === ziel)) bonus += 4;
-      else {
-        const naechste = groessen.reduce((a, b) => Math.abs(b - ziel) < Math.abs(a - ziel) ? b : a);
-        ab.push(`${naechste} ml statt geschaetzt ${ziel} ml`);
-        // Das Volumen ist geraten und darf deshalb nicht filtern. Aber ein
-        // 200er neben einer 100er-Referenz ist kein Nahtreffer — ein grober
-        // Groessensprung (Faktor 2) kostet, ohne das Teil zu verbannen.
-        const faktor = Math.max(naechste, ziel) / Math.max(1, Math.min(naechste, ziel));
-        if (faktor >= 2) bonus -= 6;
+  if (l.form.length) {
+    max += 25;
+    if (p.form.length) {
+      // Jaccard: [eckig, breit] gegen [eckig, schlank] ist ein halber Treffer,
+      // nicht "falsch". Form ist in dieser Tabelle mehrwertig.
+      const A = new Set(l.form.map(kl)), B = new Set(p.form.map(kl));
+      let schnitt = 0;
+      A.forEach(x => { if (B.has(x)) schnitt++; });
+      const union = new Set([...Array.from(A), ...Array.from(B)]).size;
+      const j = union > 0 ? schnitt / union : 0;
+      punkte += 25 * j;
+      if (j < 1) {
+        const fehlt = Array.from(A).filter(x => !B.has(x));
+        if (fehlt.length) ab.push(`${p.form.join('/')} statt ${l.form.join('/')}`);
       }
     }
   }
-  return { bonus, abweichung: ab };
+  if (l.verschluss) {
+    max += 15;
+    if (p.closure && normalizeClosure(p.closure) === normalizeClosure(l.verschluss)) punkte += 15;
+    else if (p.closure) ab.push(`${p.closure} statt ${l.verschluss}`);
+  }
+  if (l.material.length) {
+    max += 15;
+    const alle = [...p.material, ...p.availableMaterials].map(kl);
+    if (l.material.some(mm => alle.some(a => a === kl(mm) || a.startsWith(kl(mm))))) punkte += 15;
+    else if (alle.length) ab.push(`${[...p.material, ...p.availableMaterials].slice(0, 2).join('/')} statt ${l.material.join('/')}`);
+  }
+  if (l.volumen) {
+    max += 15;
+    const ziel = parseInt(l.volumen.replace(/[^0-9]/g, ''), 10);
+    const gr = p.availableSizes.map(x => parseInt(x.replace(/[^0-9]/g, ''), 10)).filter(n => !isNaN(n));
+    if (!isNaN(ziel) && gr.length) {
+      if (gr.some(g => g === ziel)) punkte += 15;
+      else {
+        const naechste = gr.reduce((a, b) => Math.abs(b - ziel) < Math.abs(a - ziel) ? b : a);
+        const faktor = Math.max(naechste, ziel) / Math.max(1, Math.min(naechste, ziel));
+        // Das Volumen ist geschaetzt — eine Nachbargroesse bleibt fast voll
+        // wertig, ein doppeltes Volumen ist ein anderes Produkt.
+        punkte += faktor < 1.35 ? 11 : faktor < 2 ? 5 : 0;
+        ab.push(`${naechste} ml statt geschaetzt ${ziel} ml`);
+      }
+    }
+  }
+  return { score: max > 0 ? (punkte / max) * 100 : 0, abweichung: ab };
 }
 
 // ── Zugangs-Riegel (v46) ──────────────────────────────────────────────
@@ -1273,12 +1457,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 1. Produkte + Regeln + Aktiv-Codes parallel laden; Identität parallel
     //    ableiten. Code-Laden non-fatal: fällt es aus, laufen results normal
     //    weiter, nur design_looks bleibt leer (wie Cache-Prinzip).
-    const [allProducts, produktRegeln, identity, activeCodes] = await Promise.all([
+    // Im reinen Bildmodus braucht es keine Identitaets-Ableitung: ein Foto
+    // stellt eine geometrische Frage, keine emotionale. Das spart einen
+    // Modell-Call pro Suche.
+    const [allProducts, produktRegeln, identity, activeCodes, attrWerte] = await Promise.all([
       airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
       airtableListAll(PRODUKT_REGELN_TABLE),
-      parseIdentity(effektiveQuery),
+      (bildModus && !eigeneWorte) ? Promise.resolve(null) : parseIdentity(effektiveQuery),
       airtableListAll(DESIGN_CODE_TABLE, "{Status}='Aktiv'").catch(() => [] as any[]),
+      bildModus ? ladeAttributBibliothek().catch(() => [] as AttrWert[]) : Promise.resolve([] as AttrWert[]),
     ]);
+
+    // Das Foto im Vokabular des Archivs taggen — 33 Kategorien, gewichtet.
+    const katMap = nachKategorie(attrWerte);
+    const katGewicht = new Map<string, number>();
+    katMap.forEach((werte, kat) => katGewicht.set(kat, werte[0]?.gewicht ?? 0.03));
+    const tags = systemTags(attrWerte);
+    let bildTags = new Map<string, string>();
+    if (image && katMap.size > 0) bildTags = await tagBild(image, katMap);
 
     // 2. Spur B parsen + Client-Overrides (Chip-Removal)
     const parsedBase = parseQuery(effektiveQuery);
@@ -1319,18 +1515,39 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let bildFallback = false;
     if (bildModus && filtered.length < 3) { filtered = products; bildFallback = true; }
 
-    // 7. Ranking (Ebene 2) — im Bildmodus mit der Lesart als Kontext
-    const rankQuery = lesart ? effektiveQuery + lesartKontext(lesart) : effektiveQuery;
-    const ranked = await claudeRank(rankQuery, filtered, category, identity, wall);
-
-    // 7a. Geometrie-Aufschlag + Abweichungen (deterministisch, nach Claude)
-    if (lesart) {
-      for (const r of ranked) {
-        const { bonus, abweichung } = bildAufschlag(r, lesart);
-        r.score = Math.max(0, Math.min(100, r.score + bonus));
-        r.abweichung = abweichung;
+    // 7. Ranking. Zwei Wege, je nachdem, was gefragt wurde.
+    let ranked: RankedProduct[];
+    if (bildModus && !eigeneWorte) {
+      // Reiner Bildmodus: rein deterministisch. Harte Fakten (60 %) und der
+      // gewichtete Attribut-Vergleich (40 %) entscheiden — nachvollziehbar,
+      // reproduzierbar, ohne Sprachmodell im Ranking.
+      ranked = filtered.map(p => {
+        const hf = hardfactScore(p, lesart!);
+        const at = attributScore(p.id, bildTags, tags, katGewicht);
+        const gesamt = at.score > 0 ? hf.score * 0.6 + at.score * 0.4 : hf.score;
+        const naeh = [...hf.abweichung, ...at.differenz];
+        return {
+          ...p,
+          score: Math.round(Math.max(0, Math.min(100, gesamt))),
+          reasoning: at.treffer.length
+            ? `Gleiche ${at.treffer.length} von ${bildTags.size} Bildmerkmalen${naeh.length ? `, abweichend in ${naeh.length}` : ''}.`
+            : 'Passung ueber Typ, Form, Verschluss und Material.',
+          abweichung: naeh.slice(0, 4),
+        } as RankedProduct;
+      }).sort((a, b) => b.score - a.score);
+    } else {
+      // Text dabei: Claude rankt weiter, die Bildlesart kommt als Kontext.
+      const rankQuery = lesart ? effektiveQuery + lesartKontext(lesart) : effektiveQuery;
+      ranked = await claudeRank(rankQuery, filtered, category, identity, wall);
+      if (lesart) {
+        for (const r of ranked) {
+          const hf = hardfactScore(r, lesart);
+          const at = attributScore(r.id, bildTags, tags, katGewicht);
+          r.score = Math.round(Math.max(0, Math.min(100, r.score * 0.5 + hf.score * 0.3 + at.score * 0.2)));
+          r.abweichung = [...hf.abweichung, ...at.differenz].slice(0, 4);
+        }
+        ranked.sort((a, b) => b.score - a.score);
       }
-      ranked.sort((a, b) => b.score - a.score);
     }
 
     // 7b. Caps für Top-Ergebnisse auflösen
@@ -1393,6 +1610,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // gestrichelt zu zeichnen sind. Korrektur zurueckschicken als
       // `bildlesart` — dann ordnet sich die Liste ohne neuen Vision-Call.
       bildlesart: lesart,
+      bild_tags: Array.from(bildTags.entries()).map(([kat, wert]) => ({ kat, wert })),
       bild_fallback: bildFallback,
       totalProducts: products.length,
       afterFilter: filtered.length,
