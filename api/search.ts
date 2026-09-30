@@ -1023,6 +1023,9 @@ interface Bildlesart {
   geraten: string[];             // Felder, die geschaetzt sind -> Frontend zeichnet sie gestrichelt
 }
 
+const CLOSURE_OPTIONEN = ['Schraubverschluss', 'Pump', 'Flip-top', 'Spray', 'Pipette', 'Airless', 'Stopfen', 'Snap-On'];
+const TYP_ALS_VERSCHLUSS = ['pump', 'spray', 'airless'];
+
 function leerLesart(): Bildlesart {
   return { typ: null, form: [], schulter: null, proportion: null, verschluss: null,
     material: [], transparenz: null, finish: null, volumen: null, prosa: '', geraten: [] };
@@ -1077,11 +1080,18 @@ Fehler.
 
 TEIL 1 — Tabellenfelder. Nur diese Schreibweisen:
 typ         Tiegel | Flasche | Tube | Airless | Pump | Spray | Stick | Dose
+            -> der BEHAELTER, nicht der Verschluss. Eine Flasche mit
+               Pumpspender ist "Flasche" mit verschluss "Pump", NICHT typ
+               "Pump". "Pump", "Spray" und "Airless" als TYP nur, wenn der
+               Behaelter selbst das System ist und sich nicht als Flasche,
+               Tiegel oder Tube beschreiben laesst.
 form        rund | oval | eckig | quadratisch | schlank | breit | freeform | spezial
             -> MEHRERE: Querschnitt UND Proportion. Flach und breit mit geraden
                Kanten = ["eckig","breit"]. Hoch und schmal mit rundem Querschnitt
                = ["rund","schlank"].
 verschluss  Schraubverschluss | Pump | Flip-top | Spray | Pipette | Airless | Stopfen | Snap-On
+            -> exakt eine dieser acht Schreibweisen. Nicht "Pump Dispenser",
+               nicht "Schraubkappe", nicht "Dropper".
 material    Glas | PET | R-PET | HDPE | PP | Aluminium | Keramik | PETG | HDPE/LDPE
 volumen     5ml|10ml|15ml|20ml|30ml|50ml|75ml|100ml|125ml|150ml|200ml|250ml|300ml|500ml|1000ml
             -> immer schaetzen, Kappe als Massstab (20-25 mm breit)
@@ -1150,7 +1160,12 @@ Antworte NUR mit JSON, kein anderer Text:
     l.form = alsListe(d.form);
     l.schulter = alsText(d.schulter);
     l.proportion = alsText(d.proportion);
-    l.verschluss = alsText(d.verschluss);
+    // Das Modell erfindet gelegentlich Varianten ("Pump Dispenser"). Die
+    // Alias-Tabelle gibt es ohnehin — hier wird sie zum Tuerwaechter.
+    const vRoh = alsText(d.verschluss);
+    l.verschluss = vRoh
+      ? (CLOSURE_OPTIONEN.find(o => normalizeClosure(o) === normalizeClosure(vRoh)) || vRoh)
+      : null;
     l.material = alsListe(d.material);
     l.transparenz = alsText(d.transparenz);
     l.finish = alsText(d.finish);
@@ -1337,7 +1352,15 @@ function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichu
   if (l.typ) {
     max += 30;
     if (p.type && kl(p.type) === kl(l.typ)) punkte += 30;
-    else if (p.type) { ab.push(`${p.type} statt ${l.typ}`); typBruch = true; }
+    else if (p.type) {
+      // Die Type-Liste mischt Behaelterformen mit Verschlussarten. Liest das
+      // Modell "Pump" als Typ und das Teil traegt tatsaechlich eine Pumpe,
+      // ist das keine falsche Antwort, sondern dieselbe in anderen Worten.
+      const verwechselt = TYP_ALS_VERSCHLUSS.includes(kl(l.typ))
+        && !!p.closure && normalizeClosure(p.closure) === normalizeClosure(l.typ);
+      if (verwechselt) punkte += 22;
+      else { ab.push(`${p.type} statt ${l.typ}`); typBruch = true; }
+    }
   }
   if (l.form.length) {
     max += 25;
