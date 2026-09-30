@@ -1067,11 +1067,12 @@ Antworte NUR mit JSON, kein anderer Text:
  "material":["Glas|PET|PP|HDPE|Aluminium|Keramik"],
  "transparenz":"klar|getoent|opak|null",
  "finish":"matt|glaenzend|frosted|soft_touch|metallic|null",
- "volumen":"<z. B. 30ml oder null>",
+ "volumen":"<IMMER schaetzen, nie null — z. B. 15ml|30ml|50ml|100ml|200ml. Nutze das Verhaeltnis von Kappe zu Koerper als Massstab: eine Standardkappe ist 20-25 mm breit.>",
  "prosa":"<3-6 Woerter Formcharakter, z. B. gedrungen, weich, apothekenhaft>",
  "geraten":["<Feldnamen, die du geschaetzt hast>"]}
 
-Was du nicht siehst, ist null — rate nicht, um das Feld zu fuellen. "volumen" gehoert IMMER in "geraten".`;
+Was du nicht siehst, ist null — rate nicht, um das Feld zu fuellen.
+Einzige Ausnahme: "volumen" schaetzt du immer. Es wird als Schaetzung behandelt und filtert nichts weg.`;
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1109,7 +1110,13 @@ Was du nicht siehst, ist null — rate nicht, um das Feld zu fuellen. "volumen" 
     l.volumen = alsText(d.volumen);
     l.prosa = alsText(d.prosa) || '';
     l.geraten = alsListe(d.geraten);
-    if (l.volumen && !l.geraten.includes('volumen')) l.geraten.push('volumen');
+    // Unsicherheit gehoert nicht ins Modell-Ermessen. Ebene 1 (Geometrie)
+    // ist aus einem Foto belegbar, Ebene 2 (Material, Transparenz, Finish)
+    // ist geschlossen, Ebene 3 (Volumen) ist geschaetzt. Glas von schwerem
+    // PET zu unterscheiden, kann niemand am Bild — also steht es gestrichelt
+    // da, auch wenn das Modell sich sicher fuehlt.
+    const IMMER_UNSICHER = ['material', 'transparenz', 'finish', 'volumen'];
+    for (const f of IMMER_UNSICHER) if (!l.geraten.includes(f)) l.geraten.push(f);
     return l;
   } catch { return null; }
 }
@@ -1157,7 +1164,10 @@ function bildAufschlag(p: ProductData, l: Bildlesart): { bonus: number; abweichu
     else ab.push(`Form ${p.form.join('/')} statt ${l.form.join('/')}`);
   }
   if (l.verschluss && p.closure) {
-    if (hat([p.closure], l.verschluss)) bonus += 8;
+    // "Schraubverschluss" und "Schraubkappe" sind dasselbe Teil. Ohne die
+    // Alias-Normalisierung behauptet die Karte einen Unterschied, den es
+    // nicht gibt — und verliert damit das Vertrauen fuer die echten.
+    if (normalizeClosure(p.closure) === normalizeClosure(l.verschluss)) bonus += 8;
     else ab.push(`${p.closure} statt ${l.verschluss}`);
   }
   if (l.material.length) {
@@ -1173,6 +1183,11 @@ function bildAufschlag(p: ProductData, l: Bildlesart): { bonus: number; abweichu
       else {
         const naechste = groessen.reduce((a, b) => Math.abs(b - ziel) < Math.abs(a - ziel) ? b : a);
         ab.push(`${naechste} ml statt geschaetzt ${ziel} ml`);
+        // Das Volumen ist geraten und darf deshalb nicht filtern. Aber ein
+        // 200er neben einer 100er-Referenz ist kein Nahtreffer — ein grober
+        // Groessensprung (Faktor 2) kostet, ohne das Teil zu verbannen.
+        const faktor = Math.max(naechste, ziel) / Math.max(1, Math.min(naechste, ziel));
+        if (faktor >= 2) bonus -= 6;
       }
     }
   }
