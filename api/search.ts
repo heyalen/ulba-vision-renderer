@@ -1325,7 +1325,12 @@ function attributScore(
   sysId: string,
   bildTags: Map<string, string>,
   tags: Map<string, Map<string, Set<string>>>,
-  katGewicht: Map<string, number>
+  katGewicht: Map<string, number>,
+  // true, wenn die Silhouette das Referenzbild gemessen hat: dann zaehlen
+  // die A-Kategorien (Geometrie) hier NICHT — eine Messung laesst sich
+  // nicht von einer Schaetzung ueberstimmen. Die Attribute behalten, was
+  // die Silhouette nicht sieht: Kappe, Verschluss, Material, Oberflaeche.
+  geometrieGemessen = false
 ): { score: number; treffer: string[]; differenz: string[]; geometrieBruch: boolean } {
   const proSys = tags.get(sysId);
   const treffer: string[] = [];
@@ -1334,6 +1339,7 @@ function attributScore(
   if (!proSys || bildTags.size === 0) return { score: 0, treffer, differenz, geometrieBruch };
   let max = 0, punkte = 0;
   for (const [kat, bildWert] of bildTags) {
+    if (geometrieGemessen && /^A\d/i.test(kat)) continue;
     const sysWerte = proSys.get(kat);
     if (!sysWerte || sysWerte.size === 0) continue; // Kategorie ungetaggt -> zaehlt nicht
     const g = katGewicht.get(kat) || 0.03;
@@ -1531,13 +1537,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         lesenUndTaggen(image, katMap),
         falFreistellen(image).catch(() => null),
       ]);
-      if (!gelesen) return res.status(422).json({
+      if (!gelesen && !lesart) return res.status(422).json({
         error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.',
         detail: letzterBildfehler || 'kein Detail',
       });
-      lesart = gelesen.lesart;
-      bildTags = gelesen.tags;
+      if (gelesen) {
+        // Eine vom Nutzer korrigierte Lesart schlaegt das Modell — der
+        // Aufruf liefert dann nur noch die Attribut-Tags.
+        if (!lesart) lesart = gelesen.lesart;
+        bildTags = gelesen.tags;
+      }
       if (frei) refProfil = await profilVonPng(frei).catch(() => null);
+
+      // Geometrie wird GEMESSEN, nicht geraten. Haiku las denselben eckigen
+      // Flakon morgens als "eckig/breit" und abends als "rund/schlank" —
+      // ein Wuerfel darf keine Chips beschriften. Seitenverhaeltnis 0,9
+      // heisst gedrungen, egal was das Sprachmodell meint. Nur Felder, die
+      // der Nutzer nicht selbst korrigiert hat, werden ueberschrieben.
+      if (refProfil && lesart) {
+        const sv = refProfil.seitenverhaeltnis;
+        const messProportion = sv < 0.45 ? 'schlank' : sv < 0.78 ? 'ausgewogen' : 'gedrungen';
+        if (!lesartKorrigiert?.proportion) lesart.proportion = messProportion;
+        if (!lesartKorrigiert?.form) {
+          const groesse = sv < 0.45 ? 'schlank' : sv > 0.78 ? 'breit' : null;
+          const basis = (lesart.form || []).filter(w => !/schlank|breit|gedrungen|ausgewogen/i.test(w));
+          lesart.form = groesse ? [...basis, groesse] : basis;
+        }
+        lesart.geraten = (lesart.geraten || []).filter(f => f !== 'proportion' && f !== 'form');
+      }
     }
 
     const effektiveQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : '');
@@ -1590,7 +1617,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // reproduzierbar, ohne Sprachmodell im Ranking.
       ranked = filtered.map(p => {
         const hf = hardfactScore(p, lesart!);
-        const at = attributScore(p.id, bildTags, tags, katGewicht);
+        const at = attributScore(p.id, bildTags, tags, katGewicht, refProfil !== null);
         // Arbeitsteilung (v55): die SILHOUETTE misst den Koerper als Zahl
         // und ersetzt die harte A1-Wand — sie kennt den Uebergang zwischen
         // bauchig und zylindrisch, den eine Kategorie nicht kennt. Die
