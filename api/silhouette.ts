@@ -115,6 +115,46 @@ async function profilVonPng(pngUrl: string): Promise<Profil | null> {
   }
   if (maxX < 0 || flaeche < 50) return null; // nichts erkannt
 
+  // ── Kappe abtrennen ─────────────────────────────────────────────────
+  // Die Kappe ist bei ulba ein EIGENES Teil mit eigener Tabelle. Ein
+  // Referenzfoto mit hohem Pumpkopf soll den Koerper finden — welcher
+  // Verschluss draufkommt, ist eine zweite, getrennte Frage. Ohne diesen
+  // Schnitt belegte ein Pumpkopf elf von 24 Baendern und die Silhouette
+  // matchte den Aufsatz statt des Koerpers.
+  //
+  // Regel: von oben faellt weg, was schmaler als 80 % der breitesten Stelle
+  // ist — gesucht nur in der oberen Haelfte, damit konisch zulaufende
+  // Koerper nicht versehentlich gekappt werden. Gleiche Regel auf beiden
+  // Seiten des Vergleichs, sonst ist er wertlos.
+  let maxZeilenBreite = 0;
+  for (let y = minY; y <= maxY; y++) {
+    const sp = spannen[y];
+    if (sp) maxZeilenBreite = Math.max(maxZeilenBreite, sp[1] - sp[0] + 1);
+  }
+  const hoeheGesamt = maxY - minY + 1;
+  let koerperStart = minY;
+  const suchEnde = minY + Math.floor(hoeheGesamt * 0.55);
+  for (let y = minY; y <= suchEnde; y++) {
+    const sp = spannen[y];
+    if (sp && sp[1] - sp[0] + 1 >= maxZeilenBreite * 0.8) { koerperStart = y; break; }
+    koerperStart = y + 1;
+  }
+  if (koerperStart >= suchEnde) koerperStart = minY; // keine klare Grenze -> nichts kappen
+
+  // Kennzahlen ab hier NUR ueber den Koerper
+  minX = B; maxX = -1; flaeche = 0; summeY = 0;
+  for (let y = koerperStart; y <= maxY; y++) {
+    const sp = spannen[y];
+    if (!sp) continue;
+    if (sp[0] < minX) minX = sp[0];
+    if (sp[1] > maxX) maxX = sp[1];
+    const w = sp[1] - sp[0] + 1;
+    flaeche += w;
+    summeY += w * y;
+  }
+  if (maxX < 0 || flaeche < 50) return null;
+  minY = koerperStart;
+
   const bw = maxX - minX + 1, bh = maxY - minY + 1;
 
   // Breitenprofil ueber die Hoehe — das Herzstueck. Eine bauchige Flasche
