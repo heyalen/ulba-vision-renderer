@@ -248,7 +248,10 @@ export function aehnlichkeit(a: Profil, b: Profil): number {
   // sonst neutral, damit Tiegel und alte Profile nicht bestraft werden.
   const sa = a.schulter, sb = b.schulter;
   if (typeof sa === 'number' && typeof sb === 'number') {
-    const schulterNaehe = Math.max(0, 1 - Math.abs(sa - sb) / 30);
+    // Totzone 10°: zwischen 73° und 83° liegt Messrauschen (Aufloesung,
+    // Kantenglaettung), kein Formunterschied. Erst darueber zaehlt es —
+    // flach (~80°) gegen rund (~40°) faellt voll auf 0.
+    const schulterNaehe = Math.max(0, 1 - Math.max(0, Math.abs(sa - sb) - 10) / 25);
     return Math.round(100 * (basis * 0.8 + schulterNaehe * 0.2));
   }
   return Math.round(100 * basis);
