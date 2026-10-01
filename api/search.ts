@@ -1460,6 +1460,11 @@ function attributScore(
   let max = 0, punkte = 0;
   for (const [kat, bildWert] of bildTags) {
     if (geometrieGemessen && /^A\d/i.test(kat)) continue;
+    // v57 — Verschlussmechanik zaehlt NUR in den Hardfacts: dort mit allen
+    // verknuepften Caps. Das Tagging sieht nur das Basisbild (meist mit
+    // Schraubkappe) und bestrafte Circus mit Pipetten-Cap als "Screw Thread
+    // statt Dropper". Ein Merkmal, eine Quelle.
+    if (/closure_mechanism/i.test(kat)) continue;
     const sysWerte = proSys.get(kat);
     if (!sysWerte || sysWerte.size === 0) continue; // Kategorie ungetaggt -> zaehlt nicht
     const g = katGewicht.get(kat) || 0.03;
