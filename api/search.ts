@@ -1762,7 +1762,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // zum besten und schlechtesten Kandidaten gedehnt, halb-halb mit dem
       // Rohwert, damit ein schwaches Feld nicht kuenstlich stark wirkt.
       const silRoh = new Map<string, number>();
-      if (refProfil) for (const p of filtered) if (p.silhouette) silRoh.set(p.id, aehnlichkeit(refProfil, p.silhouette));
+      // v57c — Schulter gibt es nur bei Flaschen. Ein schraeg fotografierter
+      // Tiegel zeigt den Deckelrand als Ellipse, das misst sich wie eine runde
+      // Schulter (Kupfertiegel: 35°) und hat ENVERS GLAS verdraengt. Ist eine
+      // Seite ein Tiegel, wird die Schulter auf beiden Seiten ausgeblendet.
+      const ohneSchulter = (pr: Profil): Profil => ({ ...pr, schulter: null, schulterEnde: null });
+      const refIstTiegel = /tiegel/i.test(lesart?.typ || '');
+      if (refProfil) for (const p of filtered) if (p.silhouette) {
+        const tiegel = refIstTiegel || /tiegel/i.test(p.type || '');
+        silRoh.set(p.id, tiegel
+          ? aehnlichkeit(ohneSchulter(refProfil), ohneSchulter(p.silhouette))
+          : aehnlichkeit(refProfil, p.silhouette));
+      }
       const silWerte = [...silRoh.values()];
       const silMax = silWerte.length ? Math.max(...silWerte) : 100;
       const silMin = silWerte.length ? Math.min(...silWerte) : 0;
