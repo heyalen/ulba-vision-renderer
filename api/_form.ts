@@ -181,7 +181,12 @@ export function aehnlichkeit(a: Profil, b: Profil): number {
   // 100-ml-Flasche derselben Linie), am Bildausschnitt und an der
   // Perspektive. Die Familie erkennt man an der Formsprache — Profil und
   // Fuellgrad. Deshalb tolerant und schwach gewichtet.
-  const svNaehe = Math.max(0, 1 - sv / 1.4);
+  // Nichtlinear: innerhalb einer Familie tolerant (Grossenvarianten,
+  // Ausschnitt, Perspektive — bis etwa Faktor 1,7 kostet es wenig), darueber
+  // steil, denn dann ist es ein anderer Koerper (LUXEA 1:3,5 gegen NUXE 1:1).
+  const svNaehe = sv <= 0.55
+    ? 1 - 0.25 * sv / 0.55
+    : Math.max(0, 0.75 * (1 - (sv - 0.55) / 0.55));
 
   const fg = Math.abs(a.fuellgrad - b.fuellgrad);
   const fgNaehe = Math.max(0, 1 - fg / 0.35);
@@ -189,6 +194,6 @@ export function aehnlichkeit(a: Profil, b: Profil): number {
   const sp = Math.abs(a.schwerpunkt - b.schwerpunkt);
   const spNaehe = Math.max(0, 1 - sp / 0.25);
 
-  return Math.round(100 * (profilNaehe * 0.62 + fgNaehe * 0.2 + svNaehe * 0.1 + spNaehe * 0.08));
+  return Math.round(100 * (profilNaehe * 0.56 + fgNaehe * 0.18 + svNaehe * 0.18 + spNaehe * 0.08));
 }
 
