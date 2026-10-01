@@ -448,6 +448,7 @@ interface ProductData {
   // gerechnet von api/silhouette.ts mit derselben Regel wie das Referenzbild.
   silhouette: Profil | null;
   querschnitt: Querschnitt | null; // v56 — aus Lieferantendaten
+  komplettsystem: boolean;         // v56 — Bauweise "system": Verschluss nicht austauschbar
 }
 
 function extractProduct(rec: any): ProductData {
@@ -478,6 +479,9 @@ function extractProduct(rec: any): ProductData {
     capImages: [],
     supplier: multiSelectNames(f['Lieferant'])[0] || '',
     querschnitt: querschnittVonSystem({ form: multiSelectNames(f['Form']) } as any, f),
+    // Feld "Bauweise" (base+cap_separat | system) — ueber den Wert erkannt,
+    // damit eine Umbenennung des Feldes nichts bricht.
+    komplettsystem: Object.values(f).some(v => v === 'system' || (v as any)?.name === 'system'),
     silhouette: (() => {
       const roh = f['Silhouette'];
       if (typeof roh !== 'string' || !roh) return null;
@@ -616,6 +620,7 @@ function hardFilter(
 // ── Claude Ranking (Ebene 2 — wählt innerhalb der erlaubten Menge) ────
 interface RankedProduct extends ProductData {
   score: number;
+  wand?: boolean; // v56 — an einer harten Identitaetsgrenze abgeprallt
   formNaehe?: number | null; // v55 — Silhouetten-Naehe 0..100, null = nicht gemessen
   reasoning: string;
   // v47 — Bildpfad: wo dieses Teil vom Referenzbild abweicht. Jeder Treffer
@@ -1119,10 +1124,10 @@ Bei echter Unsicherheit "unsicher". Antworte NUR mit JSON:
 // sagt "Round", Ø40 mm). Fallback: das Formfeld.
 function querschnittVonSystem(p: ProductData, roh: any): Querschnitt | null {
   const texte = Object.values(roh || {}).filter(v => typeof v === 'string').join('\n');
-  const m = /Shape[:\s]*(?:Wert:\s*)?(Square|Rectangular|Cubic|Round|Cylindrical|Oval|Elliptical)/i.exec(texte);
+  const m = /(?:Shape|Form)[:\s]*(?:Wert:\s*)?(Square|Rectangular|Cubic|Round|Cylindrical|Oval|Elliptical|Quadrat\w*|Rechteck\w*|Rund|Zylind\w*)/i.exec(texte);
   if (m) {
     const w = m[1].toLowerCase();
-    if (/square|rectangular|cubic/.test(w)) return 'eckig';
+    if (/square|rectangular|cubic|quadrat|rechteck/.test(w)) return 'eckig';
     if (/oval|elliptical/.test(w)) return 'oval';
     return 'rund';
   }
@@ -1715,7 +1720,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // ein eigenes, austauschbares Teil ist. Multiplikativ kann der
           // Rest die Form hoechstens um 30 % druecken.
           const rest = at.score > 0 ? at.score * 0.6 + hf.score * 0.4 : hf.score;
-          gesamt = sil * (0.7 + 0.3 * Math.max(0, Math.min(100, rest)) / 100);
+          gesamt = sil * (0.8 + 0.2 * Math.max(0, Math.min(100, rest)) / 100);
         } else {
           gesamt = at.score > 0 ? at.score * 0.7 + hf.score * 0.3 : hf.score;
           if (at.geometrieBruch) gesamt *= 0.45;
@@ -1734,7 +1739,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // ("rund/schlank statt rund/breit") Rauschen — ersetzt durch den
         // Querschnitt, der wirklich zaehlt.
         const hfAb = refProfil ? hf.abweichung.filter(x => !/schlank|breit|gedrungen|ausgewogen|eckig|rund/i.test(x)) : hf.abweichung;
-        const naeh = [...(qBruch ? [`${p.querschnitt} statt ${refQuerschnitt}`] : []), ...hfAb, ...at.differenz];
+        // Komplettsystem (Pump/Airless mit Refill): bei ulba ist die Kappe
+        // sonst ein eigenes, austauschbares Teil — darum ignoriert die
+        // Silhouette sie. Bei einem System ist sie Teil der Identitaet.
+        let sysBruch = false;
+        if (p.komplettsystem && lesart!.verschluss && p.closure
+            && normalizeClosure(p.closure) !== normalizeClosure(lesart!.verschluss)) {
+          gesamt *= 0.6; sysBruch = true;
+        }
+        // Material-Gattung, asymmetrisch: Glas SIEHT man — wird das Bild
+        // klar als Glas gelesen, ist Kunststoff kein Verwandter. Umgekehrt
+        // nicht: Metallic-Veredelung kann Glas verdecken (Kupfertiegel).
+        let matBruch = false;
+        const refMat = (lesart!.material || []).join(' ');
+        const sysMat = (p.material || []).join(' ');
+        if (/glas/i.test(refMat) && sysMat && !/glas|glass/i.test(sysMat)) {
+          gesamt *= 0.7; matBruch = true;
+        }
+        const naeh = [
+          ...(qBruch ? [`${p.querschnitt} statt ${refQuerschnitt}`] : []),
+          ...(sysBruch ? [`Komplettsystem (${p.closure})`] : []),
+          ...(matBruch ? [`${sysMat} statt Glas`] : []),
+          ...hfAb, ...at.differenz];
         return {
           ...p,
           score: Math.round(Math.max(0, Math.min(100, gesamt))),
@@ -1745,6 +1771,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               : 'Passung ueber Typ, Form, Verschluss und Material.',
           abweichung: naeh.slice(0, 4),
           formNaehe: silR ?? null,
+          wand: hf.typBruch || qBruch || sysBruch || matBruch,
         } as RankedProduct;
       }).sort((a, b) => b.score - a.score);
     } else {
@@ -1801,8 +1828,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Zweite Stufe — Alens Anforderung: gibt es keinen Volltreffer,
       // zeigt ulba trotzdem, was in der Form verwandt ist, klar als
       // "aehnlich" gekennzeichnet statt als Antwort behauptet.
-      aehnlich = ranked.filter(r => r.score >= Math.max(45, spitze - 20)).length - nah;
-      aehnlich = Math.min(Math.max(aehnlich, 0), 4);
+      // "Aehnlich" heisst: gleiche Gattung, andere Auspraegung — nicht das
+      // Beste vom Rest. Wer an einer Identitaetswand abgeprallt ist
+      // (Querschnitt, Typ, Komplettsystem, Material), gehoert nicht hierher.
+      // Lieber weniger zeigen als Falsches als verwandt verkaufen.
+      const kandidaten = ranked.slice(nah).filter(r => !r.wand && r.score >= Math.max(45, spitze - 20)).slice(0, 4);
+      if (kandidaten.length) {
+        const ids = new Set(kandidaten.map(r => r.id));
+        ranked = [...ranked.slice(0, nah), ...kandidaten, ...ranked.slice(nah).filter(r => !ids.has(r.id))];
+      }
+      aehnlich = kandidaten.length;
     }
 
     // Interne Felder nicht an Client leaken (capIds, excluded)
