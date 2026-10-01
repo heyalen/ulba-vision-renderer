@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 // fal nimmt image_url auch als data-URI entgegen — das Referenzbild reist
 // ohnehin als data-URL vom Frontend an, kein Zwischenspeichern noetig.
-import { Profil, falFreistellen, profilVonPng, aehnlichkeit, letzterFalFehler } from './_form';
+import { Profil, falFreistellen, profilVonPng, aehnlichkeit, letzterFalFehler, FORM_VERSION } from './_form';
 
 // ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
@@ -22,6 +22,40 @@ function selectName(field: any): string {
 function multiSelectNames(field: any): string[] {
   if (!Array.isArray(field)) return [];
   return field.map((f: any) => typeof f === 'string' ? f : f.name || '').filter(Boolean);
+}
+
+// v57 — Silhouetten heilen sich selbst. Systeme ohne Profil oder mit einer
+// aelteren Profilversion werden beim Bildsuchlauf parallel neu gerechnet und
+// nach Airtable zurueckgeschrieben. Kein manueller Batch-Aufruf mehr — weder
+// nach einer Aenderung der Profilrechnung noch fuer neu angelegte Systeme.
+// Non-fatal: was scheitert, behaelt sein altes Profil.
+async function silhouettenAuffrischen(records: any[]): Promise<number> {
+  const alt = records.filter(r => {
+    let v = 0;
+    try { v = JSON.parse(r.fields?.['Silhouette'] || '{}')?.v || 0; } catch { v = 0; }
+    return v < FORM_VERSION && !!imgUrl(r.fields?.['Bild_Harmonisiert']);
+  }).slice(0, 30);
+  if (alt.length === 0) return 0;
+  const neu = await Promise.all(alt.map(async r => {
+    try {
+      const frei = await falFreistellen(imgUrl(r.fields['Bild_Harmonisiert'])!);
+      if (!frei) return null;
+      const p = await profilVonPng(frei);
+      if (!p) return null;
+      const json = JSON.stringify(p);
+      r.fields['Silhouette'] = json; // gilt schon fuer diese Suche
+      return { id: r.id, fields: { Silhouette: json } };
+    } catch { return null; }
+  }));
+  const updates = neu.filter(Boolean) as Array<{ id: string; fields: any }>;
+  for (let i = 0; i < updates.length; i += 10) {
+    await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${SYSTEM_TABLE}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
+      body: JSON.stringify({ records: updates.slice(i, i + 10) }),
+    }).catch(() => null);
+  }
+  return updates.length;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -1620,6 +1654,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         lesenUndTaggen(image, katMap),
         querschnittLesen(image).catch(() => null),
         falFreistellen(image).catch((e: any) => { formFehler = 'fal: ' + String(e?.message || e).slice(0, 120); return null; }),
+        // v57 — an vierter Stelle, damit [gelesen, qs, frei] unveraendert bleibt
+        silhouettenAuffrischen(allProducts).catch(() => 0),
       ]);
       if (!gelesen && !lesart) return res.status(422).json({
         error: 'Bild konnte nicht gelesen werden. Beschreibe das Teil kurz in Worten.',
