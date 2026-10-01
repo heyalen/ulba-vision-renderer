@@ -73,7 +73,9 @@ function bildUrlVon(f: any): string | null {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const geheim = (req.headers['x-ulba-dev'] as string) || (req.query.key as string) || '';
+  // v58-Sicherheit: Secret NUR als Header. ?key= stand in Browser-URLs,
+  // Verlaeufen und Vercel-Logs — genau deshalb wird ULBA_DEV_SECRET rotiert.
+  const geheim = (req.headers['x-ulba-dev'] as string) || '';
   if (!process.env.ULBA_DEV_SECRET || geheim !== process.env.ULBA_DEV_SECRET) {
     return res.status(403).json({ error: 'Nur mit Dev-Secret' });
   }
