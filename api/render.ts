@@ -370,12 +370,6 @@ const REAL_BRAND_BLOCK = [
   'nivea', 'loreal', "l'oreal", 'garnier', 'dove', 'vichy', 'kerastase',
   'apple', 'nike', 'adidas', 'rolex', 'gillette',
 ];
-
-const FINISH_EN: Record<string, string> = {
-  gloss: 'a clean glossy finish',
-  matt: 'a premium matte finish',
-  soft_touch: 'a soft-touch matte coating',
-};
 const FINISH_DE: Record<string, string> = {
   gloss: 'Glanz-Finish',
   matt: 'Matt-Finish',
@@ -1524,16 +1518,6 @@ OUTPUT ONLY this JSON, no fences, no prose:
 
 // ── Main Handler ────────────────────────────────────────────────────
 export const config = { api: { bodyParser: true }, maxDuration: 300 };
-
-// ── v29 — Reflect: Rückspiegelung fürs geführte Briefing (Beat 1) ───────
-// Deterministisch = Wahrheit (Register/Laut/Wirkstoff kommen berechnet vom
-// Frontend), Haiku = Stimme. Ein kurzer Call — kein Airtable, kein fal.ai,
-// kein Cache. Kein RENDER_VERSION-Bump: der Render-Output bleibt unberührt,
-// also bleiben alle Bild-Cache-Keys gültig.
-// ── v30 — Referenzmarke: der Brief nennt eine Marke, das Archiv KENNT sie ──
-// "Biodance" ist bei uns "Pink Play". Der Treffer wird Kern-Anker der Welt;
-// widerspricht er dem restlichen Brief, wird das BENANNT, nicht still entschieden.
-type Marke = { name: string; polaritaet: 'liebt' | 'ablehnt' };
 type Referenz = { brand: string; name: string; id: string; register: string | null; tempLaut: number | null; compatible: boolean; umleitung: string | null; segments: string[] };
 /* Tippfehler kosten sonst das wichtigste Signal: "weloda" != "weleda".
    Distanz 1 ab 5 Zeichen, 2 ab 8 — eng genug, um Marken nicht zu verwechseln. */
@@ -1617,77 +1601,6 @@ async function ladeCodesLeicht(): Promise<CodeLeicht[]> {
   return v;
 }
 
-const REFLECT_REGISTER = ['clean-minimal', 'pharma-klinisch', 'natur-erdig', 'luxus-ritual', 'tech-premium', 'masse-funktional'];
-const REFLECT_WORTE = ['ruhig', 'laut', 'warm', 'kühl', 'klinisch', 'natürlich', 'edel', 'verspielt', 'mutig', 'reduziert', 'technisch', 'alltagsnah'];
-async function reflektiere(input: { brief: string; frage: string; register: string | null; laut: number | null; wirkstoff: string | null; runde: number; referenzen: Referenz[] }): Promise<{ lesart: string; weil: string; register: string | null; laut: number | null; worte: string[]; konflikt: string | null; marken: Marke[]; referenz: { brand: string; name: string; register: string | null } | null } | null> {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  const lautWort = input.laut == null ? 'noch offen'
-    : input.laut >= 7 ? 'laut' : input.laut >= 6 ? 'eher laut'
-    : input.laut <= 3 ? 'sehr leise' : input.laut <= 4 ? 'eher leise' : 'ausgewogen';
-  const system = `Du bist Kreativdirektorin einer renommierten Design-Agentur für Beauty-Verpackung. Ein Kunde brieft dich im Gespräch. Du spielst zurück, was du verstanden hast — kurz, warm, präzise, in seinen eigenen Worten, mit einem sichtbaren „weil".
-
-ANKER (vom System berechnet, verbindlich — nicht widersprechen, nicht erfinden):
-- Register/Welt: ${input.register || 'noch offen'}
-- Lautstärke: ${lautWort}${input.laut != null ? ` (${input.laut}/10)` : ''}
-- Wirkstoff/Produktwelt: ${input.wirkstoff || 'nicht genannt'}
-- Gesprächsrunde: ${input.runde} von 3${input.referenzen.length ? `
-
-MARKEN AUS UNSEREM ARCHIV (das ist unser Wissen — verbindlich):
-${input.referenzen.map(r => `- "${r.brand}" = Design-Code "${r.name}" (Welt: ${r.register || 'unbekannt'}, Lautstärke ${r.tempLaut ?? '?'}/10).`).join('\n')}
-ENTSCHEIDEND: Lies aus dem Brief, WELCHE Marke der Kunde liebt und welche er ABLEHNT ("X mag ich, Y nicht" heisst: X = Kompass, Y = Gegenteil). Nur die GELIEBTE Marke ist Kern-Anker für "register" — eine abgelehnte Marke ist NIE der Anker, ihre Welt ist eher zu meiden.
-Erwähne in "lesart" kurz, dass du die Marken kennst. Trage jede genannte Marke in "marken" ein, mit korrekter Schreibweise UND Polarität.
-SPANNT sich der Brief zwischen der geliebten Marke und der Positionierung (z.B. Kunde will Prestige/Luxus, seine Lieblingsmarke ist klinisch-nüchtern oder jung/Gen Z), dann ist das KEIN Widerspruch, den du dem Kunden zur Auflösung zurückgibst — das ist die Position selbst. Setze "konflikt" auf EINEN Satz, der wie eine Kreativdirektorin die MARKTPOSITION BENENNT, sie mit einer Referenz belegt, die der Kunde kennt, und ein Ja einholt. Nie eine Entweder-oder-Frage, nie zwei Optionen zur Auswahl.
-BEISPIEL (Weleda + Prestige-Regal): "Ich höre Weledas Ehrlichkeit für eine Douglas-Kundin — das ist Apotheken-Luxus, die Ecke von Augustinus Bader und Barbara Sturm: wissenschaftlich glaubwürdig, aber fürs Prestige-Regal gekleidet. Soll ich dahin?"
-Nenne eine reale Marke nur als Ortsangabe, nie als Vorlage zum Kopieren. Sonst konflikt = null.` : ''}
-
-Die Anker sind aus wörtlichen Stichwörtern berechnet. Echte Sätze enthalten diese Wörter selten — steht ein Anker auf "noch offen", LIES ihn aus dem Sinn des Briefs und gib ihn unten zurück.
-
-REGELN:
-1. Bedeutungs-Ebene nur. NIE Farben, Finishes, Materialien, Veredelungen, Typografie oder konkrete Design-Lösungen nennen.
-2. Zitiere oder spiegle die Worte des Kunden — er soll sich verstanden fühlen, nicht analysiert.
-3. "lesart": EIN Satz, beginnt mit „Verstanden —". Die Verdichtung dessen, was er gesagt hat.
-4. "weil": EIN Satz, beginnt mit „Weil". Die Konsequenz für die Richtung — nur laut/leise, ruhig/energisch, Nähe/Distanz, Ernst/Leichtigkeit. Keine Form.
-5. Ist ein Anker „noch offen", behaupte ihn nicht — bleib bei dem, was da ist.
-6. Keine Frage stellen. Keine Floskeln. Deutsch, du-Form.
-7. "register": die Welt, in der die Marke spielt — GENAU einer dieser Werte oder null: ${REFLECT_REGISTER.join(' | ')}. Nur setzen, wenn der Brief es hergibt.
-8. "laut": Lautstärke 0–10 (0 = Aesop-Flüstern, 5 = ausgewogen, 10 = Glossier-Pink-Schrei), oder null wenn unklar.
-9. "worte": 1–4 Wörter NUR aus dieser Liste, die zum Brief passen: ${REFLECT_WORTE.join(', ')}. Leeres Array, wenn keines passt.
-Bei 7–9 gilt: lieber null/leer als geraten.
-10. "konflikt": null, ausser eine Referenzmarke widerspricht dem Brief (siehe oben) — dann EIN nachfragender Satz.
-11. "marken": alle genannten Marken als Objekte {"name":"…","polaritaet":"liebt"|"ablehnt"} — Schreibweise korrigiert (z.B. "weloda" → "Weleda"). Leeres Array, wenn keine.
-
-ANTWORTE NUR mit diesem JSON, ohne Fences, ohne Prosa:
-{"lesart":"…","weil":"…","register":null,"laut":null,"worte":[],"konflikt":null,"marken":[{"name":"…","polaritaet":"liebt"}]}`;
-  const user = `Frage, die ich gestellt habe: ${input.frage}\n\nBisheriger Brief des Kunden (alle Antworten): ${input.brief}`;
-  try {
-    const res = await fetchT('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY || '', 'anthropic-version': '2023-06-01' },
-      timeoutMs: 15000, label: 'anthropic haiku reflect',
-      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 700, temperature: 0.4, system, messages: [{ role: 'user', content: user }] }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { content: Array<{ text: string }>; stop_reason?: string };
-    if (data.stop_reason === 'max_tokens') console.warn('[reflect] Antwort abgeschnitten — max_tokens zu klein');
-    const raw = (data.content?.[0]?.text || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim();
-    const p = JSON.parse(raw);
-    const lesart = typeof p?.lesart === 'string' ? p.lesart.trim() : '';
-    const weil = typeof p?.weil === 'string' ? p.weil.trim() : '';
-    if (!lesart || !weil) return null;
-    const register = typeof p?.register === 'string' && REFLECT_REGISTER.includes(p.register) ? p.register : null;
-    const lautRaw = typeof p?.laut === 'number' ? Math.round(p.laut) : null;
-    const laut = lautRaw != null && Number.isFinite(lautRaw) ? Math.max(0, Math.min(10, lautRaw)) : null;
-    const worte = Array.isArray(p?.worte) ? p.worte.filter((w: any) => typeof w === 'string' && REFLECT_WORTE.includes(w)).slice(0, 4) : [];
-    const konflikt = typeof p?.konflikt === 'string' && p.konflikt.trim() ? p.konflikt.trim() : null;
-    const marken: Marke[] = Array.isArray(p?.marken) ? p.marken
-      .filter((m: any) => m && typeof m.name === 'string' && m.name.trim())
-      .map((m: any) => ({ name: String(m.name).trim(), polaritaet: m.polaritaet === 'ablehnt' ? 'ablehnt' as const : 'liebt' as const }))
-      .slice(0, 6) : [];
-    const ref = input.referenzen[0] ? { brand: input.referenzen[0].brand, name: input.referenzen[0].name, register: input.referenzen[0].register } : null;
-    return { lesart, weil, register, laut, worte, konflikt, marken, referenz: ref };
-  } catch { return null; }
-}
-
 // ── Zugangs-Riegel (v46) ──────────────────────────────────────────────
 // Der Renderer stand offen: CORS '*', keine Auth, kein Limit. Jeder mit der
 // URL konnte auf ulbas fal.ai-/Anthropic-Guthaben rendern lassen. Ab hier
@@ -1732,43 +1645,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
   if (!taktOk(req, 30, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen — kurz warten.' });
 
-  // ── v29 — Reflect-Modus (Beat 1): nur die Stimme, keine Pipeline ──────
-  if ((req.body as any)?.reflect === true) {
-    const b = req.body as { brief?: string; frage?: string; register?: string | null; laut?: number | null; wirkstoff?: string | null; runde?: number };
-    const brief = (b.brief || '').trim();
-    if (!brief) return res.status(400).json({ error: 'brief ist erforderlich' });
-    // Kennt unser Archiv eine genannte Marke? (leichter Loader, kein Gate noetig)
-    let referenzen: Referenz[] = [];
-    let alleCodes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; segments: string[] }> = [];
-    try { alleCodes = await ladeCodesLeicht(); referenzen = findeReferenzen(brief, alleCodes); } catch { referenzen = []; }
-    const out = await reflektiere({
-      brief, frage: (b.frage || '').trim(),
-      register: b.register ?? null,
-      laut: typeof b.laut === 'number' ? b.laut : null,
-      wirkstoff: b.wirkstoff ?? null,
-      runde: typeof b.runde === 'number' ? b.runde : 1,
-      referenzen,
-    });
-    // Haiku aus → 200 mit null: das Frontend behält die deterministische Lesart.
-    // Polaritaet entscheidet: nur die GELIEBTE Marke wird Anker. Haiku liefert
-    // zugleich die korrigierte Schreibweise, deshalb hier der zweite Anlauf.
-    let ref2: { brand: string; name: string; register: string | null } | null = null;
-    let anti: { brand: string; name: string; register: string | null } | null = null;
-    if (out?.marken?.length) {
-      try {
-        const alle = alleCodes.length ? alleCodes : await ladeCodesLeicht();
-        const pick = (pol: 'liebt' | 'ablehnt') => {
-          const namen = out.marken.filter(m => m.polaritaet === pol).map(m => m.name);
-          if (!namen.length) return null;
-          const t = findeReferenzen(' ' + namen.join(' ') + ' ', alle)[0];
-          return t ? { brand: t.brand, name: t.name, register: t.register } : null;
-        };
-        ref2 = pick('liebt'); anti = pick('ablehnt');
-      } catch { /* Archiv nicht erreichbar — Lesart bleibt gueltig */ }
-    }
-    return res.status(200).json({ reflect: true, lesart: out?.lesart ?? null, weil: out?.weil ?? null, register: out?.register ?? null, laut: out?.laut ?? null, worte: out?.worte ?? [], konflikt: out?.konflikt ?? null, referenz: ref2, antiReferenz: anti });
-  }
-
   /* ── Das Board: die Referenz-Runde als Bild ────────────────────────
      Bakic fragt "brands and packagings you aspire to". ulba fragte das als
      Text — und bekam ein Wort zurueck, das erst gegen das Archiv gematcht
@@ -1785,9 +1661,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
      Geheimnis: 'passend' ist nur eine Vorsortierung, die Wand zeigt alles. */
   if ((req.body as any)?.codes === true) {
     try {
-      const b = req.body as { register?: string | null; wirkstoff?: string | null; segment?: string | null };
-      const alle = (await ladeCodesLeicht()).filter(c => c.bild);
-      const ws = (b.wirkstoff || '').toLowerCase().split(' ')[0];
+      const b = req.body as { register?: string | null; wirkstoff?: string | null; suche?: string | null; segment?: string | null };
+      const [alleRoh, wirkstoffListe] = await Promise.all([ladeCodesLeicht(), ladeWirkstoffe().catch(() => [] as WirkstoffRef[])]);
+      const alle = alleRoh.filter(c => c.bild);
+      // Wirkstoff aus der Suche, gegen die kuratierte Tabelle (eine Wahrheit).
+      const wsName = b.wirkstoff || wirkstoffTreffer(b.suche || '', wirkstoffListe)?.name || '';
+      const ws = wsName.toLowerCase().split(' ')[0];
       const punkte = (c: CodeLeicht) => {
         let p = 0;
         if (b.register && c.register === b.register) p += 3;
@@ -1816,40 +1695,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     } catch {
       return res.status(200).json({ codes: [], facetten: { register: [], segment: [], form: [], material: [], wirkstoff: [] } });
-    }
-  }
-
-  if ((req.body as any)?.board === true) {
-    try {
-      const b = req.body as { brief?: string; wirkstoff?: string | null; register?: string | null };
-      const brief = String(b.brief || '').toLowerCase();
-      const alle = (await ladeCodesLeicht()).filter(c => c.bild && c.brand);
-      const wsWelt = (b.wirkstoff || '').toLowerCase();
-      const punkte = (c: typeof alle[number]) => {
-        let p = 0;
-        // Passt die Wirkstoff-Welt des Codes zum Wirkstoff im Brief, ist das
-        // Produkt naeher an der Aufgabe — aber nie ausschlaggebend.
-        if (wsWelt && c.wirkstoffWelt.some(w => w.toLowerCase().replace(/_/g, ' ').includes(wsWelt.split(' ')[0]))) p += 3;
-        if (b.register && c.register === b.register) p += 2;
-        if (brief && c.brand && brief.includes(c.brand.toLowerCase())) p += 4;
-        return p;
-      };
-      // Streuung zuerst: pro Welt der staerkste Kandidat, dann auffuellen.
-      const welten = [...new Set(alle.map(c => c.register).filter(Boolean))] as string[];
-      const gewaehlt: typeof alle = [];
-      for (const w of welten) {
-        const best = alle.filter(c => c.register === w).sort((x, y) => punkte(y) - punkte(x))[0];
-        if (best) gewaehlt.push(best);
-      }
-      const rest = alle.filter(c => !gewaehlt.includes(c)).sort((x, y) => punkte(y) - punkte(x));
-      while (gewaehlt.length < 8 && rest.length) gewaehlt.push(rest.shift()!);
-      gewaehlt.sort((x, y) => (x.tempLaut ?? 5) - (y.tempLaut ?? 5));
-      return res.status(200).json({
-        board: true,
-        codes: gewaehlt.slice(0, 8).map(c => ({ id: c.id, name: c.name, brand: c.brand, bild: c.bild, register: c.register, laut: c.tempLaut })),
-      });
-    } catch (e: any) {
-      return res.status(200).json({ board: true, codes: [] });
     }
   }
 
