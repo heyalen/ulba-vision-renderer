@@ -254,6 +254,17 @@ const CLOSURE_ALIAS: Array<[RegExp, string]> = [
   [/snap/i, 'Snap'],                    // Substring von "Snap-On"
   [/disc/i, 'Disc'],                    // Substring von "Disc-Top"
 ];
+// v60 — Material-Chips kamen englisch ('Glass', 'Acrylic') und trafen die
+// deutschen Optionen (Glas, Acryl) nie → 0 Treffer trotz Glas im Grid.
+const MATERIAL_ALIAS: Array<[RegExp, string]> = [
+  [/^glass$|^glas$/i, 'Glas'], [/^acryl(ic)?$/i, 'Acryl'], [/^alu(minum|minium)?$/i, 'Aluminium'],
+  [/^ceramic$|^keramik$/i, 'Keramik'], [/^bamboo$|^bambus$/i, 'Bambus'], [/^wood$|^holz$/i, 'Holz'],
+];
+function normalizeMaterial(term: string): string {
+  const t = term.trim();
+  for (const [re, v] of MATERIAL_ALIAS) if (re.test(t)) return v;
+  return t;
+}
 function normalizeClosure(term: string): string {
   for (const [re, v] of CLOSURE_ALIAS) if (re.test(term)) return v;
   return term;
@@ -279,7 +290,7 @@ function applyActiveFilters<T extends ParsedQuery>(parsed: T, override: any, rem
   return {
     ...parsed,
     sizeMentions: merge(parsed.sizeMentions, 'sizes'),
-    materialMentions: merge(parsed.materialMentions, 'materials'),
+    materialMentions: uniq(merge(parsed.materialMentions, 'materials').map(normalizeMaterial)),
     typeMentions: merge(parsed.typeMentions, 'types'),
     closureMentions: merge(parsed.closureMentions, 'closures').map(normalizeClosure),
     formMentions: merge(parsed.formMentions, 'forms'),
