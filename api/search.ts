@@ -1620,6 +1620,9 @@ function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichu
 const ULBA_ORIGINS = new Set<string>([
   'https://ulba.vercel.app',
   'http://localhost:3000',
+  // Zusatz-Origins (Preview-Deploys, spaeter die eigene Domain) ohne
+  // Code-Deploy: ENV ULBA_ORIGINS = kommagetrennte Liste voller Origins.
+  ...String(process.env.ULBA_ORIGINS || '').split(',').map(o => o.trim()).filter(o => /^https?:\/\//.test(o)),
 ]);
 
 function riegel(req: VercelRequest, res: VercelResponse, opts?: { originOptional?: boolean }): boolean {
