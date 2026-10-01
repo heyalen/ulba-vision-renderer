@@ -176,7 +176,12 @@ export function aehnlichkeit(a: Profil, b: Profil): number {
   const profilNaehe = Math.max(0, 1 - abstand / BAENDER / 0.45);
 
   const sv = Math.abs(Math.log(Math.max(0.05, a.seitenverhaeltnis) / Math.max(0.05, b.seitenverhaeltnis)));
-  const svNaehe = Math.max(0, 1 - sv / 0.9);
+  // Proportion ist die UNZUVERLAESSIGSTE Groesse: sie haengt an der
+  // Groessenvariante (Alexandra 30 ml ist hoeher proportioniert als eine
+  // 100-ml-Flasche derselben Linie), am Bildausschnitt und an der
+  // Perspektive. Die Familie erkennt man an der Formsprache — Profil und
+  // Fuellgrad. Deshalb tolerant und schwach gewichtet.
+  const svNaehe = Math.max(0, 1 - sv / 1.4);
 
   const fg = Math.abs(a.fuellgrad - b.fuellgrad);
   const fgNaehe = Math.max(0, 1 - fg / 0.35);
@@ -184,6 +189,6 @@ export function aehnlichkeit(a: Profil, b: Profil): number {
   const sp = Math.abs(a.schwerpunkt - b.schwerpunkt);
   const spNaehe = Math.max(0, 1 - sp / 0.25);
 
-  return Math.round(100 * (profilNaehe * 0.55 + svNaehe * 0.25 + fgNaehe * 0.12 + spNaehe * 0.08));
+  return Math.round(100 * (profilNaehe * 0.62 + fgNaehe * 0.2 + svNaehe * 0.1 + spNaehe * 0.08));
 }
 
