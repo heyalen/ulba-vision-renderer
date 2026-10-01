@@ -1086,6 +1086,16 @@ let letzterBildfehler = '';
 // anderes als ein Formularfeld, das nebenbei angekreuzt wird — dort entstand
 // "Form: rund" fuer den eckigen NUXE-Flakon.
 type Querschnitt = 'rund' | 'eckig' | 'oval';
+
+// Was ein FOTO unterscheiden kann: einem geschlossenen Deckel sieht man
+// nicht an, ob er geschraubt, geschnappt oder gesteckt ist (selbst die
+// Lieferantendaten sind da uneinheitlich: ENVERS GLAS = "Schraubverschluss"
+// in der Tabelle, "Neck: Snap-On" im Text). Pumpe, Spray, Pipette,
+// Airless und Flip-Top dagegen sieht man.
+function verschlussKlasse(v: string): string {
+  const n = normalizeClosure(v);
+  return /schraub|snap|stopfen|screw|cork/i.test(n) ? 'deckel' : n;
+}
 async function querschnittLesen(dataUrl: string): Promise<Querschnitt | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([\s\S]+)$/.exec(dataUrl.trim());
@@ -1472,6 +1482,7 @@ function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichu
     max += 15;
     const hat = p.verschluesse && p.verschluesse.length ? p.verschluesse : (p.closure ? [normalizeClosure(p.closure)] : []);
     if (hat.includes(normalizeClosure(l.verschluss))) punkte += 15;
+    else if (hat.some(v => verschlussKlasse(v) === verschlussKlasse(l.verschluss!))) punkte += 12;
     else if (hat.length) ab.push(`${p.closure || hat[0]} statt ${l.verschluss}`);
   }
   if (l.material.length) {
@@ -1754,7 +1765,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         let sysBruch = false;
         const sysV = p.verschluesse && p.verschluesse.length ? p.verschluesse : (p.closure ? [normalizeClosure(p.closure)] : []);
         if (p.komplettsystem && lesart!.verschluss && sysV.length
-            && !sysV.includes(normalizeClosure(lesart!.verschluss))) {
+            && !sysV.some(v => verschlussKlasse(v) === verschlussKlasse(lesart!.verschluss!))) {
           gesamt *= 0.6; sysBruch = true;
         }
         const naeh = [
