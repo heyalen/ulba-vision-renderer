@@ -1598,7 +1598,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let formFehler = '';
     let refQuerschnitt: Querschnitt | null = null;
     if (image) {
-      const [gelesen, frei, qs] = await Promise.all([
+      const [gelesen, qs, frei] = await Promise.all([
         lesenUndTaggen(image, katMap),
         querschnittLesen(image).catch(() => null),
         falFreistellen(image).catch((e: any) => { formFehler = 'fal: ' + String(e?.message || e).slice(0, 120); return null; }),
