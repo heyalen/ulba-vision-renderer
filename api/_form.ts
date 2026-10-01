@@ -12,7 +12,7 @@ export const BAENDER = 24;
 
 /** v57 — Version der Profilrechnung. Gespeicherte Profile mit kleinerer
  *  Version rechnet search.ts beim naechsten Bildsuchlauf selbst neu. */
-export const FORM_VERSION = 2;
+export const FORM_VERSION = 3;
 
 export interface Profil {
   seitenverhaeltnis: number;  // Breite / Hoehe der Bounding Box
@@ -23,6 +23,11 @@ export interface Profil {
   // mit Absatz), ~40 = runde, auslaufende Schulter. null = keine Schulter
   // sichtbar (Tiegel mit breitem Deckel) -> zaehlt im Vergleich nicht.
   schulter?: number | null;
+  // v57b — Breite, bei der die Schulter endet (0..1). Ueber 0,80 endet sie
+  // nicht an einem Hals, sondern an einem breiten Deckel/Gewinde: Tiegel.
+  // Gespeichert statt im Profil entschieden, damit eine spaetere Regel-
+  // aenderung kein Neurechnen braucht.
+  schulterEnde?: number | null;
   v?: number;
 }
 
@@ -36,7 +41,7 @@ export interface Profil {
  */
 function schulterWinkel(
   spannen: Array<[number, number] | null>, minY: number, suchEnde: number, maxB: number, hoehe: number,
-): number | null {
+): { winkel: number; ende: number } | null {
   const w = (y: number) => { const sp = spannen[y]; return sp ? (sp[1] - sp[0] + 1) / maxB : 0; };
   let yK = -1;
   for (let y = minY; y <= suchEnde; y++) if (w(y) >= 0.95) { yK = y; break; }
@@ -58,7 +63,7 @@ function schulterWinkel(
   const abfall = wK - wE;
   if (abfall < 0.08) return null;               // keine erkennbare Schulter
   const dy = Math.max(0.5, yK - yE) / maxB;     // in Koerperbreiten
-  return Math.atan2(abfall / 2, dy) * 180 / Math.PI;
+  return { winkel: Math.atan2(abfall / 2, dy) * 180 / Math.PI, ende: wE };
 }
 
 export let letzterFalFehler = '';
@@ -206,7 +211,8 @@ export async function profilVonPng(pngUrl: string): Promise<Profil | null> {
     fuellgrad: flaeche / (bw * bh),
     schwerpunkt: (summeY / flaeche - minY) / bh,
     breiten: breiten.map(b => b / maxBreite),
-    schulter: schulter === null ? null : Math.round(schulter * 10) / 10,
+    schulter: schulter === null ? null : Math.round(schulter.winkel * 10) / 10,
+    schulterEnde: schulter === null ? null : Math.round(schulter.ende * 100) / 100,
     v: FORM_VERSION,
   };
 }
@@ -246,12 +252,16 @@ export function aehnlichkeit(a: Profil, b: Profil): number {
   // v57 — Schulter: das Breitenprofil sieht sie nicht (Kappenschnitt), also
   // eigener Term. Nur wenn BEIDE Seiten eine messbare Schulter haben —
   // sonst neutral, damit Tiegel und alte Profile nicht bestraft werden.
+  // Eine Schulter gibt es nur mit Hals: endet sie ueber 80 % Breite (Tiegel,
+  // breiter Deckel), ist sie keine Schulter und zaehlt nicht.
+  const echt = (p: Profil) => typeof p.schulter === 'number' && (p.schulterEnde ?? 0) <= 0.80;
   const sa = a.schulter, sb = b.schulter;
-  if (typeof sa === 'number' && typeof sb === 'number') {
-    // Totzone 10°: zwischen 73° und 83° liegt Messrauschen (Aufloesung,
-    // Kantenglaettung), kein Formunterschied. Erst darueber zaehlt es —
-    // flach (~80°) gegen rund (~40°) faellt voll auf 0.
-    const schulterNaehe = Math.max(0, 1 - Math.max(0, Math.abs(sa - sb) - 10) / 25);
+  if (echt(a) && echt(b) && typeof sa === 'number' && typeof sb === 'number') {
+    // Totzone 20°: Klarglas-Produktfotos und dekorierte Referenzfotos messen
+    // dieselbe Schulter systematisch verschieden (Brechung an dicken Waenden,
+    // weiche Maskenkanten; NUXE gegen Alexandra). Erst darueber zaehlt es —
+    // flach (~80°) gegen rund (~37°) bleibt klar getrennt.
+    const schulterNaehe = Math.max(0, 1 - Math.max(0, Math.abs(sa - sb) - 20) / 25);
     return Math.round(100 * (basis * 0.8 + schulterNaehe * 0.2));
   }
   return Math.round(100 * basis);
