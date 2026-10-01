@@ -65,6 +65,62 @@ async function silhouettenAuffrischen(records: any[]): Promise<number> {
   return updates.length;
 }
 
+// ── v58: Lieferanten-Profil ──────────────────────────────────────────
+// Modus { lieferant: "LUMSON" }: Profil + alle Teile des Lieferanten,
+// nach Typ gruppiert. Die Tabelle "Lieferanten" legt sich beim ersten
+// Aufruf selbst an (Meta-API) und saet pro Lieferant einen Record mit
+// Status "gelistet" — Alen fuellt nur Email/Standort/Website nach.
+const LIEFERANTEN_FELDER = [
+  { name: 'Name', type: 'singleLineText' },
+  { name: 'Kontakt_Email', type: 'email' },
+  { name: 'Standort', type: 'singleLineText' },
+  { name: 'Website', type: 'url' },
+  { name: 'Beschreibung', type: 'multilineText' },
+  { name: 'Status', type: 'singleSelect', options: { choices: [
+    { name: 'gelistet' }, { name: 'eingeladen' }, { name: 'bestätigt' }, { name: 'entfernt' },
+  ] } },
+  { name: 'Notizen', type: 'multilineText' },
+];
+let lieferantenTableId: string | null = null;
+async function lieferantenTabelle(): Promise<string | null> {
+  if (lieferantenTableId) return lieferantenTableId;
+  const h = { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` };
+  try {
+    const meta = await fetch(`https://api.airtable.com/v0/meta/bases/${AIRTABLE_BASE}/tables`, { headers: h });
+    if (!meta.ok) return null;
+    const da = ((await meta.json()).tables || []).find((t: any) => t.name === 'Lieferanten');
+    if (da) return (lieferantenTableId = da.id);
+    const neu = await fetch(`https://api.airtable.com/v0/meta/bases/${AIRTABLE_BASE}/tables`, {
+      method: 'POST', headers: h,
+      body: JSON.stringify({ name: 'Lieferanten',
+        description: 'Ein Record = ein Lieferant. Name exakt wie im System-Feld "Lieferant". Quelle der Profile im Frontend.',
+        fields: LIEFERANTEN_FELDER }),
+    });
+    if (!neu.ok) return null; // PAT ohne Schema-Recht: Profil laeuft ohne Kontaktdaten weiter
+    return (lieferantenTableId = (await neu.json()).id);
+  } catch { return null; }
+}
+async function lieferantProfil(name: string): Promise<Record<string, string>> {
+  const tbl = await lieferantenTabelle();
+  if (!tbl) return {};
+  const h = { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` };
+  try {
+    const f1 = encodeURIComponent(`LOWER({Name})=LOWER("${name.replace(/"/g, '')}")`);
+    const r = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${tbl}?filterByFormula=${f1}`, { headers: h });
+    const rec = r.ok ? ((await r.json()).records || [])[0] : null;
+    if (rec) {
+      const f = rec.fields || {};
+      const sel = (v: any) => (v && typeof v === 'object' ? v.name : v) || '';
+      return { email: f['Kontakt_Email'] || '', standort: f['Standort'] || '', website: f['Website'] || '',
+               beschreibung: f['Beschreibung'] || '', status: sel(f['Status']) };
+    }
+    // Saat: leeren Record anlegen, damit Alen ihn nur noch ausfuellt.
+    await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${tbl}`, { method: 'POST', headers: h,
+      body: JSON.stringify({ records: [{ fields: { Name: name, Status: 'gelistet' } }], typecast: true }) }).catch(() => null);
+    return {};
+  } catch { return {}; }
+}
+
 function imgUrl(attachmentField: any): string | null {
   if (Array.isArray(attachmentField) && attachmentField.length > 0) {
     return attachmentField[0].url || attachmentField[0].thumbnails?.full?.url || null;
@@ -1611,6 +1667,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     active_filters?: any;
     removed_filters?: any;
   };
+  // v58 — Lieferanten-Profil: eigener, leichter Modus ohne Modelle.
+  if (typeof (req.body as any)?.lieferant === 'string') {
+    try {
+      const name = String((req.body as any).lieferant).trim().slice(0, 80);
+      if (!name) return res.status(400).json({ error: 'lieferant ist leer' });
+      const [profil, recs] = await Promise.all([
+        lieferantProfil(name),
+        airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
+      ]);
+      const teile = recs.map(extractProduct).filter((p: ProductData) => p.supplier.toLowerCase() === name.toLowerCase());
+      const gruppen: Record<string, any[]> = {};
+      for (const p of teile) {
+        const k = p.type || 'Weitere';
+        (gruppen[k] = gruppen[k] || []).push({ id: p.id, name: p.name, image_url: p.imageUrl,
+          sizes: p.availableSizes, materials: p.material, closure: p.closure });
+      }
+      return res.status(200).json({ lieferant: name, profil, anzahl: teile.length,
+        gruppen: Object.entries(gruppen).map(([typ, produkte]) => ({ typ, produkte })) });
+    } catch (e: any) { return res.status(200).json({ lieferant: null, error: String(e?.message || e).slice(0, 160) }); }
+  }
+
   if (!query && !image && !lesartKorrigiert) {
     return res.status(400).json({ error: 'query oder image ist erforderlich' });
   }
