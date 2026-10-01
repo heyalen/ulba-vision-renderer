@@ -449,6 +449,7 @@ interface ProductData {
   silhouette: Profil | null;
   querschnitt: Querschnitt | null; // v56 — aus Lieferantendaten
   komplettsystem: boolean;         // v56 — Bauweise "system": Verschluss nicht austauschbar
+  verschluesse?: string[];         // v56 — Basis + alle verknuepften Caps
 }
 
 function extractProduct(rec: any): ProductData {
@@ -1469,8 +1470,9 @@ function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichu
   }
   if (l.verschluss) {
     max += 15;
-    if (p.closure && normalizeClosure(p.closure) === normalizeClosure(l.verschluss)) punkte += 15;
-    else if (p.closure) ab.push(`${p.closure} statt ${l.verschluss}`);
+    const hat = p.verschluesse && p.verschluesse.length ? p.verschluesse : (p.closure ? [normalizeClosure(p.closure)] : []);
+    if (hat.includes(normalizeClosure(l.verschluss))) punkte += 15;
+    else if (hat.length) ab.push(`${p.closure || hat[0]} statt ${l.verschluss}`);
   }
   if (l.material.length) {
     // Material ist am Foto oft nicht das Material: eine metallisierte
@@ -1670,11 +1672,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 5b. Cap-Verschlussarten nur laden, wenn ein Verschluss-Filter aktiv ist
     //     (spart den Extra-Call im Normalfall). Der Verschluss hängt am Cap,
     //     nicht am Base → ohne diese Map filtert "Pump" alle Bases weg.
-    const capClosures = parsed.closureMentions.length > 0
+    // Im Bildmodus immer: ein System traegt meist mehrere Verschluesse
+    // (Basis + verknuepfte Caps) — nur den Basis-Verschluss zu vergleichen
+    // erklaerte Carmen faelschlich zu "Schraubverschluss statt Pump".
+    const capClosures = (parsed.closureMentions.length > 0 || !!image || !!lesart)
       ? await loadCapClosureMap()
       : new Map<string, string>();
 
     // 6. Hard Filter (Spur B + Regeln + Formel-Wand)
+    for (const p of products) {
+      const alle = [p.closure, ...p.capIds.map(id => capClosures.get(id) || '')].filter(Boolean);
+      p.verschluesse = [...new Set(alle.map(normalizeClosure))];
+    }
     let filtered = hardFilter(products, parsed, category, wall, capClosures);
 
     // 6b. Nie eine leere Liste ohne Erklaerung. Greift der Filter im
@@ -1743,23 +1752,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // sonst ein eigenes, austauschbares Teil — darum ignoriert die
         // Silhouette sie. Bei einem System ist sie Teil der Identitaet.
         let sysBruch = false;
-        if (p.komplettsystem && lesart!.verschluss && p.closure
-            && normalizeClosure(p.closure) !== normalizeClosure(lesart!.verschluss)) {
+        const sysV = p.verschluesse && p.verschluesse.length ? p.verschluesse : (p.closure ? [normalizeClosure(p.closure)] : []);
+        if (p.komplettsystem && lesart!.verschluss && sysV.length
+            && !sysV.includes(normalizeClosure(lesart!.verschluss))) {
           gesamt *= 0.6; sysBruch = true;
-        }
-        // Material-Gattung, asymmetrisch: Glas SIEHT man — wird das Bild
-        // klar als Glas gelesen, ist Kunststoff kein Verwandter. Umgekehrt
-        // nicht: Metallic-Veredelung kann Glas verdecken (Kupfertiegel).
-        let matBruch = false;
-        const refMat = (lesart!.material || []).join(' ');
-        const sysMat = (p.material || []).join(' ');
-        if (/glas/i.test(refMat) && sysMat && !/glas|glass/i.test(sysMat)) {
-          gesamt *= 0.7; matBruch = true;
         }
         const naeh = [
           ...(qBruch ? [`${p.querschnitt} statt ${refQuerschnitt}`] : []),
           ...(sysBruch ? [`Komplettsystem (${p.closure})`] : []),
-          ...(matBruch ? [`${sysMat} statt Glas`] : []),
           ...hfAb, ...at.differenz];
         return {
           ...p,
@@ -1771,7 +1771,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               : 'Passung ueber Typ, Form, Verschluss und Material.',
           abweichung: naeh.slice(0, 4),
           formNaehe: silR ?? null,
-          wand: hf.typBruch || qBruch || sysBruch || matBruch,
+          wand: hf.typBruch || qBruch || sysBruch,
         } as RankedProduct;
       }).sort((a, b) => b.score - a.score);
     } else {
