@@ -1666,6 +1666,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     active_filters?: any;
     removed_filters?: any;
   };
+  // v60 — Auffrischen gespeicherter Teile (Favoriten/Projekte im Browser):
+  // liefert pro ID nur die Felder, die veralten koennen. Keine Modelle.
+  if (Array.isArray((req.body as any)?.ids)) {
+    try {
+      const ids = Array.from(new Set(((req.body as any).ids as unknown[]).filter((x): x is string => typeof x === 'string' && /^rec[A-Za-z0-9]{14}$/.test(x)))).slice(0, 400);
+      if (!ids.length) return res.status(200).json({ frisch: [] });
+      const will = new Set(ids);
+      const recs = await airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()');
+      const teile = recs.filter((r: any) => will.has(r.id)).map(extractProduct);
+      try {
+        const capMap = await resolveCaps(Array.from(new Set(teile.flatMap(t => t.capIds))));
+        for (const t of teile) {
+          t.caps = t.capIds.map(id => { const c = capMap.get(id); return c ? { id, name: c.name, imageUrl: c.url } : null; })
+            .filter((c): c is CapRef => c !== null);
+          t.capImages = t.caps.map(c => c.imageUrl);
+          t.capCount = t.caps.length;
+        }
+      } catch { /* Caps optional */ }
+      return res.status(200).json({ frisch: teile.map(t => ({ id: t.id, name: t.name, supplier: t.supplier, imageUrl: t.imageUrl, type: t.type, material: t.material, availableSizes: t.availableSizes, closure: t.closure, caps: t.caps, capImages: t.capImages, capCount: t.capCount })),
+        fehlt: ids.filter(id => !teile.some(t => t.id === id)) });
+    } catch (e: any) { return res.status(200).json({ frisch: [], error: String(e?.message || e).slice(0, 160) }); }
+  }
+
   // v59 — Lieferanten-Profil: leichter Modus ohne Modelle. Liefert die
   // Teile im selben Format wie die Suche, damit das Frontend sie direkt im
   // Detail-Panel oeffnen kann.
