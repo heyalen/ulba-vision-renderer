@@ -447,6 +447,7 @@ interface ProductData {
   // v55 — gespeichertes Silhouettenprofil (Feld "Silhouette", JSON),
   // gerechnet von api/silhouette.ts mit derselben Regel wie das Referenzbild.
   silhouette: Profil | null;
+  querschnitt: Querschnitt | null; // v56 — aus Lieferantendaten
 }
 
 function extractProduct(rec: any): ProductData {
@@ -476,6 +477,7 @@ function extractProduct(rec: any): ProductData {
     caps: [],
     capImages: [],
     supplier: multiSelectNames(f['Lieferant'])[0] || '',
+    querschnitt: querschnittVonSystem({ form: multiSelectNames(f['Form']) } as any, f),
     silhouette: (() => {
       const roh = f['Silhouette'];
       if (typeof roh !== 'string' || !roh) return null;
@@ -1071,6 +1073,66 @@ function alsText(v: any): string | null {
 // Widerspruch ist damit strukturell ausgeschlossen.
 let letzterBildfehler = '';
 
+// v56 — Querschnitt. Von vorne ist ein Zylinder dasselbe Rechteck wie ein
+// Quader: die Silhouette kann rund/eckig PRINZIPIELL nicht sehen. Diese
+// Tatsache kommt aus einer einzigen, eng gefassten Frage an ein staerkeres
+// Modell, mit Pflicht zum sichtbaren Beleg. Eine Frage mit Beleg ist etwas
+// anderes als ein Formularfeld, das nebenbei angekreuzt wird — dort entstand
+// "Form: rund" fuer den eckigen NUXE-Flakon.
+type Querschnitt = 'rund' | 'eckig' | 'oval';
+async function querschnittLesen(dataUrl: string): Promise<Querschnitt | null> {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([\s\S]+)$/.exec(dataUrl.trim());
+  if (!m) return null;
+  const [, mediaType, b64] = m;
+  const system = `Du bestimmst nur EINE Sache: den waagrechten Querschnitt des
+KOERPERS eines Kosmetik-Packmittels. Kappe, Pumpe und Etikett ignorieren.
+- "eckig": quadratisch/rechteckig. Belege: senkrechte Kanten, flache Seitenflaechen,
+  Lichtreflexe brechen an den Kanten ab, Ecken sichtbar (auch abgerundete Ecken).
+- "rund": Zylinder/Kugel. Belege: durchlaufende, gebogene Reflexe, keine senkrechten
+  Kanten, Etikett biegt sich um den Koerper.
+- "oval": elliptisch, flach gedrueckter Zylinder ohne Kanten.
+Bei echter Unsicherheit "unsicher". Antworte NUR mit JSON:
+{"beleg":"<was du konkret siehst, ein Satz>","querschnitt":"rund|eckig|oval|unsicher"}`;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5', max_tokens: 150, temperature: 0, system,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+          { type: 'text', text: 'Querschnitt des Koerpers?' },
+        ] }],
+      }),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const txt = (j?.content || []).map((c: any) => c?.text || '').join('');
+    const q = (/"querschnitt"\s*:\s*"(rund|eckig|oval)"/i.exec(txt) || [])[1];
+    return q ? (q.toLowerCase() as Querschnitt) : null;
+  } catch { return null; }
+}
+
+// Querschnitt eines Systems — aus den LIEFERANTENDATEN ("Shape: Square"),
+// die verlaesslicher sind als jedes Tagging (Brigitte: Tag "eckig", Lumson
+// sagt "Round", Ø40 mm). Fallback: das Formfeld.
+function querschnittVonSystem(p: ProductData, roh: any): Querschnitt | null {
+  const texte = Object.values(roh || {}).filter(v => typeof v === 'string').join('\n');
+  const m = /Shape[:\s]*(?:Wert:\s*)?(Square|Rectangular|Cubic|Round|Cylindrical|Oval|Elliptical)/i.exec(texte);
+  if (m) {
+    const w = m[1].toLowerCase();
+    if (/square|rectangular|cubic/.test(w)) return 'eckig';
+    if (/oval|elliptical/.test(w)) return 'oval';
+    return 'rund';
+  }
+  const f = (p.form || []).join(' ').toLowerCase();
+  if (/eckig|square/.test(f)) return 'eckig';
+  if (/oval/.test(f)) return 'oval';
+  if (/rund|round/.test(f)) return 'rund';
+  return null;
+}
+
 async function lesenUndTaggen(
   dataUrl: string,
   katMap: Map<string, AttrWert[]>
@@ -1534,9 +1596,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Faellt fal aus, laeuft die Suche ohne sie weiter (non-fatal).
     let refProfil: Profil | null = null;
     let formFehler = '';
+    let refQuerschnitt: Querschnitt | null = null;
     if (image) {
-      const [gelesen, frei] = await Promise.all([
+      const [gelesen, frei, qs] = await Promise.all([
         lesenUndTaggen(image, katMap),
+        querschnittLesen(image).catch(() => null),
         falFreistellen(image).catch((e: any) => { formFehler = 'fal: ' + String(e?.message || e).slice(0, 120); return null; }),
       ]);
       if (!gelesen && !lesart) return res.status(422).json({
@@ -1549,6 +1613,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (!lesart) lesart = gelesen.lesart;
         bildTags = gelesen.tags;
       }
+      refQuerschnitt = qs as Querschnitt | null;
       if (frei) refProfil = await profilVonPng(frei).catch((e: any) => { formFehler = 'Profil: ' + String(e?.message || e).slice(0, 120); return null; });
       else if (!formFehler) formFehler = 'fal lieferte kein Bild (' + (letzterFalFehler || 'ohne Meldung') + ')';
 
@@ -1563,7 +1628,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (!lesartKorrigiert?.proportion) lesart.proportion = messProportion;
         if (!lesartKorrigiert?.form) {
           const groesse = sv < 0.45 ? 'schlank' : sv > 0.78 ? 'breit' : null;
-          const basis = (lesart.form || []).filter(w => !/schlank|breit|gedrungen|ausgewogen/i.test(w));
+          let basis = (lesart.form || []).filter(w => !/schlank|breit|gedrungen|ausgewogen/i.test(w));
+          if (refQuerschnitt) basis = [refQuerschnitt, ...basis.filter(w => !/rund|eckig|oval/i.test(w))];
           lesart.form = groesse ? [...basis, groesse] : basis;
         }
         lesart.geraten = (lesart.geraten || []).filter(f => f !== 'proportion' && f !== 'form');
@@ -1618,6 +1684,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Reiner Bildmodus: rein deterministisch. Harte Fakten (60 %) und der
       // gewichtete Attribut-Vergleich (40 %) entscheiden — nachvollziehbar,
       // reproduzierbar, ohne Sprachmodell im Ranking.
+      // Spreizung: Rechteckige Umrisse liegen alle bei 89–98 % — als
+      // Rohwert sieht 98 gegen 91 wie Gleichstand aus. Pro Suche relativ
+      // zum besten und schlechtesten Kandidaten gedehnt, halb-halb mit dem
+      // Rohwert, damit ein schwaches Feld nicht kuenstlich stark wirkt.
+      const silRoh = new Map<string, number>();
+      if (refProfil) for (const p of filtered) if (p.silhouette) silRoh.set(p.id, aehnlichkeit(refProfil, p.silhouette));
+      const silWerte = [...silRoh.values()];
+      const silMax = silWerte.length ? Math.max(...silWerte) : 100;
+      const silMin = silWerte.length ? Math.min(...silWerte) : 0;
+      const silSpreiz = (v: number) => silMax - silMin < 1 ? v : Math.round(0.5 * v + 0.5 * 100 * (v - silMin) / (silMax - silMin));
+
       ranked = filtered.map(p => {
         const hf = hardfactScore(p, lesart!);
         const at = attributScore(p.id, bildTags, tags, katGewicht, refProfil !== null);
@@ -1627,7 +1704,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // ATTRIBUTE steuern bei, was die Silhouette nicht sieht: Kappe,
         // Kappen-Koerper-Verhaeltnis, Verschluss, Oberflaeche. HARDFACTS
         // filtern (Typ-Wand bleibt) und ergaenzen Volumen.
-        const sil = (refProfil && p.silhouette) ? aehnlichkeit(refProfil, p.silhouette) : null;
+        const silR = silRoh.get(p.id);
+        const sil = silR !== undefined ? silSpreiz(silR) : null;
         let gesamt: number;
         if (sil !== null) {
           // Die Form ENTSCHEIDET, der Rest ORDNET nur. Als Summe konnten
@@ -1643,7 +1721,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           if (at.geometrieBruch) gesamt *= 0.45;
         }
         if (hf.typBruch) gesamt *= 0.5;
-        const naeh = [...hf.abweichung, ...at.differenz];
+        // Querschnitt-Wand (v56): rund vs. eckig ist eine harte Tatsache,
+        // die der Umriss nicht sehen kann. Kein Ausschluss — die Teile
+        // rutschen nur hinter alle mit passendem Querschnitt.
+        let qBruch = false;
+        if (refQuerschnitt && p.querschnitt && refQuerschnitt !== p.querschnitt) {
+          const nah = (refQuerschnitt === 'oval' || p.querschnitt === 'oval');
+          gesamt *= nah ? 0.8 : 0.6;
+          qBruch = true;
+        }
+        // Mit gemessener Form sind die alten Formtext-Vergleiche
+        // ("rund/schlank statt rund/breit") Rauschen — ersetzt durch den
+        // Querschnitt, der wirklich zaehlt.
+        const hfAb = refProfil ? hf.abweichung.filter(x => !/schlank|breit|gedrungen|ausgewogen|eckig|rund/i.test(x)) : hf.abweichung;
+        const naeh = [...(qBruch ? [`${p.querschnitt} statt ${refQuerschnitt}`] : []), ...hfAb, ...at.differenz];
         return {
           ...p,
           score: Math.round(Math.max(0, Math.min(100, gesamt))),
@@ -1653,7 +1744,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               ? `Gleiche ${at.treffer.length} von ${bildTags.size} Bildmerkmalen${naeh.length ? `, abweichend in ${naeh.length}` : ''}.`
               : 'Passung ueber Typ, Form, Verschluss und Material.',
           abweichung: naeh.slice(0, 4),
-          formNaehe: sil,
+          formNaehe: silR ?? null,
         } as RankedProduct;
       }).sort((a, b) => b.score - a.score);
     } else {
