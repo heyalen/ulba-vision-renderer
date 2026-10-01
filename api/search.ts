@@ -65,60 +65,45 @@ async function silhouettenAuffrischen(records: any[]): Promise<number> {
   return updates.length;
 }
 
-// ── v58: Lieferanten-Profil ──────────────────────────────────────────
-// Modus { lieferant: "LUMSON" }: Profil + alle Teile des Lieferanten,
-// nach Typ gruppiert. Die Tabelle "Lieferanten" legt sich beim ersten
-// Aufruf selbst an (Meta-API) und saet pro Lieferant einen Record mit
-// Status "gelistet" — Alen fuellt nur Email/Standort/Website nach.
-const LIEFERANTEN_FELDER = [
-  { name: 'Name', type: 'singleLineText' },
-  { name: 'Kontakt_Email', type: 'email' },
-  { name: 'Standort', type: 'singleLineText' },
-  { name: 'Website', type: 'url' },
-  { name: 'Beschreibung', type: 'multilineText' },
-  { name: 'Status', type: 'singleSelect', options: { choices: [
-    { name: 'gelistet' }, { name: 'eingeladen' }, { name: 'bestätigt' }, { name: 'entfernt' },
-  ] } },
-  { name: 'Notizen', type: 'multilineText' },
-];
-let lieferantenTableId: string | null = null;
-async function lieferantenTabelle(): Promise<string | null> {
-  if (lieferantenTableId) return lieferantenTableId;
-  const h = { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` };
+// ── v59: Lieferanten ─────────────────────────────────────────────────
+// System.Lieferant ist ein VERKNUEPFTES Feld auf die Tabelle "Lieferant"
+// (tblsy3CHZbAo6GraB) — die API liefert Record-IDs, keine Namen. Darum:
+// Tabelle einmal laden (5-Min-Cache), IDs → Namen aufloesen. Dieselbe
+// Tabelle traegt das Profil (Logo, Titelbild, Beschreibung, Standort, Land,
+// Website, MOQ, Lieferzeit, Zertifikat, Status). Keine Zweittabelle mehr.
+const LIEFERANT_TABLE = 'tblsy3CHZbAo6GraB';
+let LIEF: Map<string, any> = new Map();
+let liefStand = 0;
+async function lieferantenLaden(): Promise<void> {
+  if (Date.now() - liefStand < 300000 && LIEF.size) return;
   try {
-    const meta = await fetch(`https://api.airtable.com/v0/meta/bases/${AIRTABLE_BASE}/tables`, { headers: h });
-    if (!meta.ok) return null;
-    const da = ((await meta.json()).tables || []).find((t: any) => t.name === 'Lieferanten');
-    if (da) return (lieferantenTableId = da.id);
-    const neu = await fetch(`https://api.airtable.com/v0/meta/bases/${AIRTABLE_BASE}/tables`, {
-      method: 'POST', headers: h,
-      body: JSON.stringify({ name: 'Lieferanten',
-        description: 'Ein Record = ein Lieferant. Name exakt wie im System-Feld "Lieferant". Quelle der Profile im Frontend.',
-        fields: LIEFERANTEN_FELDER }),
-    });
-    if (!neu.ok) return null; // PAT ohne Schema-Recht: Profil laeuft ohne Kontaktdaten weiter
-    return (lieferantenTableId = (await neu.json()).id);
-  } catch { return null; }
+    const recs = await airtableListAll(LIEFERANT_TABLE);
+    LIEF = new Map(recs.map((r: any) => [r.id, r.fields || {}]));
+    liefStand = Date.now();
+  } catch { /* ohne Map: Namen bleiben leer statt Record-ID */ }
 }
-async function lieferantProfil(name: string): Promise<Record<string, string>> {
-  const tbl = await lieferantenTabelle();
-  if (!tbl) return {};
-  const h = { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` };
-  try {
-    const f1 = encodeURIComponent(`LOWER({Name})=LOWER("${name.replace(/"/g, '')}")`);
-    const r = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${tbl}?filterByFormula=${f1}`, { headers: h });
-    const rec = r.ok ? ((await r.json()).records || [])[0] : null;
-    if (rec) {
-      const f = rec.fields || {};
+function lieferantName(feld: any): string {
+  const id = Array.isArray(feld) ? feld[0] : feld;
+  if (typeof id !== 'string' || !id) return '';
+  if (!id.startsWith('rec')) return id; // falls Feld je wieder Text wird
+  return String(LIEF.get(id)?.['Name'] || '');
+}
+function lieferantProfil(name: string): { id: string; profil: Record<string, any> } | null {
+  const n = name.trim().toLowerCase();
+  for (const [id, f] of Array.from(LIEF.entries())) {
+    if (id === name || String(f['Name'] || '').trim().toLowerCase() === n) {
       const sel = (v: any) => (v && typeof v === 'object' ? v.name : v) || '';
-      return { email: f['Kontakt_Email'] || '', standort: f['Standort'] || '', website: f['Website'] || '',
-               beschreibung: f['Beschreibung'] || '', status: sel(f['Status']) };
+      return { id, profil: {
+        name: f['Name'] || name, land: sel(f['Land']), standort: f['Standort'] || '',
+        website: f['Website'] || '', beschreibung: f['Beschreibung'] || '', status: sel(f['Status']) || 'gelistet',
+        logo: imgUrl(f['Logo']), titelbild: imgUrl(f['Titelbild']),
+        moq: typeof f['Standard_MOQ'] === 'number' ? f['Standard_MOQ'] : null,
+        lieferzeit_wochen: typeof f['Standard_Lieferzeit_Wochen'] === 'number' ? f['Standard_Lieferzeit_Wochen'] : null,
+        zertifikat: f['Nachhaltigkeits_Zertifikat'] || '', eu: !!f['EU_Konformitaet'],
+      } };
     }
-    // Saat: leeren Record anlegen, damit Alen ihn nur noch ausfuellt.
-    await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${tbl}`, { method: 'POST', headers: h,
-      body: JSON.stringify({ records: [{ fields: { Name: name, Status: 'gelistet' } }], typecast: true }) }).catch(() => null);
-    return {};
-  } catch { return {}; }
+  }
+  return null;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -131,13 +116,23 @@ function imgUrl(attachmentField: any): string | null {
 async function airtableListAll(table: string, formula?: string): Promise<any[]> {
   const params = new URLSearchParams({ pageSize: '100' });
   if (formula) params.set('filterByFormula', formula);
-  const res = await fetch(
-    `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}?${params}`,
-    { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
-  );
-  if (!res.ok) throw new Error(`Airtable list ${table}: ${res.status}`);
-  const data = await res.json();
-  return data.records || [];
+  // v59 — paginiert. Vorher kam nur die erste Seite (100 Records) zurueck:
+  // ab Teil 101 waere der Katalog fuer die Suche unsichtbar geworden.
+  const alle: any[] = [];
+  let offset = '';
+  for (let seite = 0; seite < 50; seite++) {
+    if (offset) params.set('offset', offset);
+    const res = await fetch(
+      `https://api.airtable.com/v0/${AIRTABLE_BASE}/${table}?${params}`,
+      { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } }
+    );
+    if (!res.ok) throw new Error(`Airtable list ${table}: ${res.status}`);
+    const data = await res.json();
+    alle.push(...(data.records || []));
+    if (!data.offset) break;
+    offset = data.offset;
+  }
+  return alle;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -575,7 +570,7 @@ function extractProduct(rec: any): ProductData {
     capIds,
     caps: [],
     capImages: [],
-    supplier: multiSelectNames(f['Lieferant'])[0] || '',
+    supplier: lieferantName(f['Lieferant']),
     querschnitt: querschnittVonSystem({ form: multiSelectNames(f['Form']) } as any, f),
     // Feld "Bauweise" (base+cap_separat | system) — ueber den Wert erkannt,
     // damit eine Umbenennung des Feldes nichts bricht.
@@ -1659,6 +1654,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
   if (!taktOk(req, 40, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen — kurz warten.' });
+  await lieferantenLaden();
 
   const { query, image, bildlesart: lesartKorrigiert, active_filters, removed_filters } = req.body as {
     query?: string;
@@ -1670,24 +1666,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     active_filters?: any;
     removed_filters?: any;
   };
-  // v58 — Lieferanten-Profil: eigener, leichter Modus ohne Modelle.
+  // v59 — Lieferanten-Profil: leichter Modus ohne Modelle. Liefert die
+  // Teile im selben Format wie die Suche, damit das Frontend sie direkt im
+  // Detail-Panel oeffnen kann.
   if (typeof (req.body as any)?.lieferant === 'string') {
     try {
       const name = String((req.body as any).lieferant).trim().slice(0, 80);
       if (!name) return res.status(400).json({ error: 'lieferant ist leer' });
-      const [profil, recs] = await Promise.all([
-        lieferantProfil(name),
-        airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
-      ]);
-      const teile = recs.map(extractProduct).filter((p: ProductData) => p.supplier.toLowerCase() === name.toLowerCase());
-      const gruppen: Record<string, any[]> = {};
-      for (const p of teile) {
-        const k = p.type || 'Weitere';
-        (gruppen[k] = gruppen[k] || []).push({ id: p.id, name: p.name, image_url: p.imageUrl,
-          sizes: p.availableSizes, materials: p.material, closure: p.closure });
-      }
-      return res.status(200).json({ lieferant: name, profil, anzahl: teile.length,
-        gruppen: Object.entries(gruppen).map(([typ, produkte]) => ({ typ, produkte })) });
+      const treffer = lieferantProfil(name);
+      const profil = treffer?.profil || { name, status: 'gelistet' };
+      const recs = profil.status === 'entfernt' ? [] : await airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()');
+      const teile = recs.map(extractProduct).filter((p: ProductData) => p.supplier.toLowerCase() === String(profil.name).toLowerCase());
+      try {
+        const capMap = await resolveCaps(Array.from(new Set(teile.flatMap(t => t.capIds))));
+        for (const t of teile) {
+          t.caps = t.capIds.map(id => { const c = capMap.get(id); return c ? { id, name: c.name, imageUrl: c.url } : null; })
+            .filter((c): c is CapRef => c !== null);
+          t.capImages = t.caps.map(c => c.imageUrl);
+          t.capCount = t.caps.length;
+        }
+      } catch { /* Caps optional */ }
+      teile.sort((x, y) => (x.type || '').localeCompare(y.type || '') || x.name.localeCompare(y.name));
+      return res.status(200).json({ lieferant: profil.name, profil, anzahl: teile.length,
+        teile: teile.map(({ capIds, excluded, ...rest }) => ({ ...rest, score: 0, reasoning: '' })) });
     } catch (e: any) { return res.status(200).json({ lieferant: null, error: String(e?.message || e).slice(0, 160) }); }
   }
 
