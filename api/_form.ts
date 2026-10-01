@@ -10,11 +10,55 @@ import sharp from 'sharp';
 
 export const BAENDER = 24;
 
+/** v57 — Version der Profilrechnung. Gespeicherte Profile mit kleinerer
+ *  Version rechnet search.ts beim naechsten Bildsuchlauf selbst neu. */
+export const FORM_VERSION = 2;
+
 export interface Profil {
   seitenverhaeltnis: number;  // Breite / Hoehe der Bounding Box
   fuellgrad: number;          // Flaeche / Bounding Box — rund vs. eckig
   schwerpunkt: number;        // 0 = Masse oben, 1 = Masse unten
   breiten: number[];          // BAENDER Werte, 0..1, relativ zur groessten Breite
+  // v57 — Schulterwinkel in Grad: ~90 = flache, kantige Schulter (Zylinder
+  // mit Absatz), ~40 = runde, auslaufende Schulter. null = keine Schulter
+  // sichtbar (Tiegel mit breitem Deckel) -> zaehlt im Vergleich nicht.
+  schulter?: number | null;
+  v?: number;
+}
+
+/**
+ * Die Schulter liegt genau in der Zone, die der Kappenschnitt entfernt —
+ * deshalb wird sie VOR dem Schnitt am vollen Umriss gemessen. Von der
+ * Oberkante des vollen Koerpers (erste Zeile >= 95 % Breite) nach oben, bis
+ * die Breite 80 % unterschreitet oder ein Plateau (Hals, Kragen) beginnt.
+ * Gemessen wird nur, was beide Seiten zeigen: der Abschnitt 95 -> 80 %
+ * liegt bei Flasche mit und ohne Verschluss frei.
+ */
+function schulterWinkel(
+  spannen: Array<[number, number] | null>, minY: number, suchEnde: number, maxB: number, hoehe: number,
+): number | null {
+  const w = (y: number) => { const sp = spannen[y]; return sp ? (sp[1] - sp[0] + 1) / maxB : 0; };
+  let yK = -1;
+  for (let y = minY; y <= suchEnde; y++) if (w(y) >= 0.95) { yK = y; break; }
+  if (yK <= minY) return null;
+  const plateau = Math.max(3, Math.round(hoehe * 0.04));
+  const wK = w(yK);
+  let yE = yK, wE = wK;
+  for (let y = yK - 1; y >= minY; y--) {
+    const wy = w(y);
+    if (wy > wE + 0.03) break;                 // wird wieder breiter: Kragen
+    yE = y; wE = Math.min(wE, wy);
+    if (wy <= 0.80) break;
+    let flach = true;
+    for (let k = 1; k <= plateau; k++) {
+      if (y - k < minY || Math.abs(w(y - k) - wy) > 0.02) { flach = false; break; }
+    }
+    if (flach) break;                           // Plateau: Hals erreicht
+  }
+  const abfall = wK - wE;
+  if (abfall < 0.08) return null;               // keine erkennbare Schulter
+  const dy = Math.max(0.5, yK - yE) / maxB;     // in Koerperbreiten
+  return Math.atan2(abfall / 2, dy) * 180 / Math.PI;
 }
 
 export let letzterFalFehler = '';
@@ -107,6 +151,7 @@ export async function profilVonPng(pngUrl: string): Promise<Profil | null> {
     koerperStart = y + 1;
   }
   if (koerperStart >= suchEnde) koerperStart = minY; // keine klare Grenze -> nichts kappen
+  const schulter = schulterWinkel(spannen, minY, suchEnde, maxZeilenBreite, hoeheGesamt);
 
   // ── Fussartefakte abtrennen ─────────────────────────────────────────
   // Spiegelbild des Kappenschnitts, unten. Klare, dicke Glasboeden (Brigitte)
@@ -161,6 +206,8 @@ export async function profilVonPng(pngUrl: string): Promise<Profil | null> {
     fuellgrad: flaeche / (bw * bh),
     schwerpunkt: (summeY / flaeche - minY) / bh,
     breiten: breiten.map(b => b / maxBreite),
+    schulter: schulter === null ? null : Math.round(schulter * 10) / 10,
+    v: FORM_VERSION,
   };
 }
 
@@ -194,6 +241,16 @@ export function aehnlichkeit(a: Profil, b: Profil): number {
   const sp = Math.abs(a.schwerpunkt - b.schwerpunkt);
   const spNaehe = Math.max(0, 1 - sp / 0.25);
 
-  return Math.round(100 * (profilNaehe * 0.56 + fgNaehe * 0.18 + svNaehe * 0.18 + spNaehe * 0.08));
+  const basis = profilNaehe * 0.56 + fgNaehe * 0.18 + svNaehe * 0.18 + spNaehe * 0.08;
+
+  // v57 — Schulter: das Breitenprofil sieht sie nicht (Kappenschnitt), also
+  // eigener Term. Nur wenn BEIDE Seiten eine messbare Schulter haben —
+  // sonst neutral, damit Tiegel und alte Profile nicht bestraft werden.
+  const sa = a.schulter, sb = b.schulter;
+  if (typeof sa === 'number' && typeof sb === 'number') {
+    const schulterNaehe = Math.max(0, 1 - Math.abs(sa - sb) / 30);
+    return Math.round(100 * (basis * 0.8 + schulterNaehe * 0.2));
+  }
+  return Math.round(100 * basis);
 }
 
