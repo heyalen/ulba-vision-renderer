@@ -36,18 +36,25 @@ async function silhouettenAuffrischen(records: any[]): Promise<number> {
     return v < FORM_VERSION && !!imgUrl(r.fields?.['Bild_Harmonisiert']);
   }).slice(0, 30);
   if (alt.length === 0) return 0;
-  const neu = await Promise.all(alt.map(async r => {
-    try {
-      const frei = await falFreistellen(imgUrl(r.fields['Bild_Harmonisiert'])!);
-      if (!frei) return null;
-      const p = await profilVonPng(frei);
-      if (!p) return null;
-      const json = JSON.stringify(p);
-      r.fields['Silhouette'] = json; // gilt schon fuer diese Suche
-      return { id: r.id, fields: { Silhouette: json } };
-    } catch { return null; }
-  }));
-  const updates = neu.filter(Boolean) as Array<{ id: string; fields: any }>;
+  // fal erlaubt 10 gleichzeitige Anfragen — und die Freistellung des
+  // REFERENZBILDS laeuft parallel zu dieser Funktion. Deshalb: kurz warten,
+  // damit die Referenz zuerst durch ist, dann in Dreiergruppen.
+  await new Promise(r => setTimeout(r, 1500));
+  const updates: Array<{ id: string; fields: any }> = [];
+  for (let i = 0; i < alt.length; i += 3) {
+    const neu = await Promise.all(alt.slice(i, i + 3).map(async r => {
+      try {
+        const frei = await falFreistellen(imgUrl(r.fields['Bild_Harmonisiert'])!);
+        if (!frei) return null;
+        const p = await profilVonPng(frei);
+        if (!p) return null;
+        const json = JSON.stringify(p);
+        r.fields['Silhouette'] = json; // gilt schon fuer diese Suche
+        return { id: r.id, fields: { Silhouette: json } };
+      } catch { return null; }
+    }));
+    updates.push(...(neu.filter(Boolean) as Array<{ id: string; fields: any }>));
+  }
   for (let i = 0; i < updates.length; i += 10) {
     await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${SYSTEM_TABLE}`, {
       method: 'PATCH',
