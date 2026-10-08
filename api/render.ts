@@ -894,7 +894,6 @@ async function assemblePrompt(
   // Leere Checkbox = ungetaggt, nicht "nein". Kunststoff ist industriell immer
   // einfärbbar (Masterbatch) → default true; Glas/Metall nur bei explizitem Tag.
   const colorable = koerperFarbe() === 'ok';
-  const decoProfile = String(sysFields['Decoration_Profile'] || '').trim();
 
   // Emotions-Label-Set = Union der Emotion_Tags der Kandidaten-Paletten.
   const emotionTagSet = [...new Set(candidates.flatMap(p => multiSelectNames(p.fields['Emotion_Tags'])))];
@@ -1293,7 +1292,6 @@ OUTPUT ONLY this JSON, no fences, no prose:
     dekoration: [
       ...(AKZENT_DE[akzent] ? [AKZENT_DE[akzent]] : []),
       ...(colorable ? ['Einfärbung Primärbehälter'] : ['Farbe via Label/Cap (Behälter nicht einfärbbar)']),
-      ...(decoProfile ? [decoProfile.slice(0, 120)] : []),
     ],
     grafik_label: brandname
       ? `Wortmarke "${brandname}" + "${kategorie}", reduzierte Typo`
