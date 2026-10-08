@@ -585,7 +585,8 @@ async function resolveCaps(capIds: string[]): Promise<Map<string, { url: string;
   const capRecords = await airtableListAll(CAP_TABLE);
   for (const rec of capRecords) {
     const url = imgUrl(rec.fields['Cap_Bild_Harmonisiert']) || imgUrl(rec.fields['Cap_Bild']);
-    const name = rec.fields['Cap_Name'] || rec.fields['Artikelnummer'] || '';
+    // v64: Anzeigename = Verschlussart ("Pump", "Pipette"), nicht "XY — Cap 1".
+    const name = selectName(rec.fields['Closure_Type']) || rec.fields['Cap_Name'] || '';
     if (url) map.set(rec.id, { url, name });
   }
   return map;
