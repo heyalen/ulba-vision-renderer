@@ -8,7 +8,6 @@ const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
 const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
 const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
 const CAP_TABLE = 'tblQvnXPhiKGMoqDp'; // Cap-Tabelle — 1 Record = 1 Verschluss
-const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ'; // Design-Look-Rezepte (nur Status=Aktiv)
 
 export const config = { api: { bodyParser: true } };
 
@@ -87,23 +86,6 @@ function lieferantName(feld: any): string {
   if (typeof id !== 'string' || !id) return '';
   if (!id.startsWith('rec')) return id; // falls Feld je wieder Text wird
   return String(LIEF.get(id)?.['Name'] || '');
-}
-function lieferantProfil(name: string): { id: string; profil: Record<string, any> } | null {
-  const n = name.trim().toLowerCase();
-  for (const [id, f] of Array.from(LIEF.entries())) {
-    if (id === name || String(f['Name'] || '').trim().toLowerCase() === n) {
-      const sel = (v: any) => (v && typeof v === 'object' ? v.name : v) || '';
-      return { id, profil: {
-        name: f['Name'] || name, land: sel(f['Land']), standort: f['Standort'] || '',
-        website: f['Website'] || '', beschreibung: f['Beschreibung'] || '', status: sel(f['Status']) || 'gelistet',
-        logo: imgUrl(f['Logo']), titelbild: imgUrl(f['Titelbild']),
-        moq: typeof f['Standard_MOQ'] === 'number' ? f['Standard_MOQ'] : null,
-        lieferzeit_wochen: typeof f['Standard_Lieferzeit_Wochen'] === 'number' ? f['Standard_Lieferzeit_Wochen'] : null,
-        zertifikat: f['Nachhaltigkeits_Zertifikat'] || '', eu: !!f['EU_Konformitaet'],
-      } };
-    }
-  }
-  return null;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -854,279 +836,6 @@ reasoning: MAXIMAL 6 Wörter. Laenger sprengt das Antwortlimit und das Ranking f
   }
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  DESIGN-CODE-ENGINE — löst "gleiche Query → nur 1 Look".
-//  Ein Design_Code ist ein LOOK-REZEPT (Register+Temp-Achsen, Farben,
-//  Body-Behandlung, Gate-Anforderungen), losgelöst vom Base. Die Suche
-//  matcht Query-Achsen ↔ Code-Zone-0 und JOINT dann Code.Anforderungen
-//  ↔ reale Base-Fähigkeiten. Ein Code, der kein reales Base findet, das
-//  ihn tragen kann, wird gedroppt (Gate = Integrität). Ergebnis: mehrere
-//  Looks pro Query — DE-Code (laut/GenZ) UND F've-Code (getönt/klinisch)
-//  für dieselbe "laut bunt Vitamin C"-Query.
-// ════════════════════════════════════════════════════════════════════
-interface DesignCode {
-  id: string;
-  name: string;
-  segment: string[];
-  wirkstoffWelt: string[]; // v28 — Herkunfts-Wirkstoff des Codes (Airtable Wirkstoff_Welt)
-  // Zone 0 — Achsen (steuern Match + später Nudge)
-  register: string;
-  tempLaut: number | null;
-  tempTon: number | null;
-  farbtemp: number | null;
-  dekoDichte: number | null;
-  // Zone 1 — Render-Rezept
-  bodyBehandlung: string;
-  farbort: string;
-  farbTraeger: string;
-  bodyHex: string;
-  bodyHex2: string;
-  farbverlauf: string;
-  akzentHex: string;
-  finishBody: string;
-  capFinish: string;
-  capHex: string;
-  capDetail: string;
-  typoHaltung: string;
-  // Zone 3 — Brief (reist mit Musteranfrage)
-  briefGrafik: string;
-  briefBadgeDichte: string;
-  // Gate + Identität
-  anforderungen: string[]; // braucht_klarglas/einfaerbbar/cap_weiss/frostbar/opak/metallcap
-  brand: string;
-  produkt: string;
-}
-
-function num(v: any): number | null {
-  return typeof v === 'number' && !isNaN(v) ? v : null;
-}
-
-function extractDesignCode(rec: any): DesignCode {
-  const f = rec.fields;
-  return {
-    id: rec.id,
-    name: f['Name'] || rec.id,
-    segment: multiSelectNames(f['Segment']),
-    wirkstoffWelt: multiSelectNames(f['Wirkstoff_Welt']),
-    register: selectName(f['Register']),
-    tempLaut: num(f['Temp_Laut']),
-    tempTon: num(f['Temp_Ton']),
-    farbtemp: num(f['Farbtemp']),
-    dekoDichte: num(f['Deko_Dichte']),
-    bodyBehandlung: selectName(f['Body_Behandlung']),
-    farbort: selectName(f['Farbort']),
-    // ACHTUNG: Feld 'Farb_Traeger' existiert in tbl24ezzCjRQDYRnJ NICHT
-    // (verifiziert 12.08.26). Bleibt für den Frontend-Kontrakt als leerer
-    // String erhalten — entweder Feld anlegen+taggen oder Slot entfernen.
-    farbTraeger: selectName(f['Farb_Traeger']),
-    bodyHex: f['Body_Hex'] || '',
-    bodyHex2: f['Body_Hex_2'] || '',
-    farbverlauf: selectName(f['Farbverlauf']),
-    akzentHex: f['Akzent_Hex'] || '',
-    finishBody: selectName(f['Finish_Body']),
-    capFinish: selectName(f['Cap_Finish']),
-    capHex: f['Cap_Hex'] || '',
-    capDetail: selectName(f['Cap_Detail']),
-    typoHaltung: selectName(f['Typo_Haltung']),
-    briefGrafik: f['Brief_Grafik'] || '',
-    briefBadgeDichte: ((v: any) => v == null ? '' : typeof v === 'object' ? selectName(v) : String(v))(f['Brief_Badge_Dichte']),
-    anforderungen: multiSelectNames(f['Anforderungen']),
-    brand: f['Brand'] || '',
-    produkt: f['Produkt'] || '',
-  };
-}
-
-// Query-Achsen sind seit v20 direkt 0–10 (parseIdentity). Die alten
-// Kategorie→Pol-Mapper (lautToNum/tonToNum) sind entfallen: sie haben jede
-// Query auf exakt 2 oder 8 gerastet und damit die Skala auf drei Punkte
-// reduziert — die Wolke konnte nie als Cursor-Startposition dienen.
-const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
-
-// v28 — Brief-Wirkstoff → Wirkstoff_Welt-Präfix. parseIdentity liefert
-// hero_ingredient als Freitext ("vitamin c"); hier wird er auf das
-// Tag-Präfix der Codes gemappt (startsWith, tolerant gegen Suffix-Varianten
-// wie Vitamin_C_Glow). Deterministisch — kein LLM ("Berechne, was
-// berechenbar ist").
-const WIRKSTOFF_PREFIX: [RegExp, string][] = [
-  [/vitamin\s*c|ascorb/i, 'vitamin_c'],
-  [/retinol/i, 'retinol'],
-  [/hyaluron|hydrat/i, 'hyaluron'],
-  [/sensitiv|barriere/i, 'sensitiv'],
-  [/akne|kl(ä|ae)rung|salicyl|bha/i, 'akne'],
-  [/botani|pflanz/i, 'botanisch'],
-  [/sonne|spf|\buv\b/i, 'sonne'],
-  [/haar|shampoo/i, 'haar'],
-  [/duft|parfum/i, 'duft'],
-];
-function wirkstoffTag(hero: string | null | undefined): string | null {
-  if (!hero) return null;
-  for (const [re, pre] of WIRKSTOFF_PREFIX) if (re.test(hero)) return pre;
-  return null;
-}
-
-// Register → weicher Segment-Hint (NUR Boost, kein Filter — siehe Handoff-
-// Abweichung: hartes Segment-Gate würde den Payoff killen).
-const REGISTER_SEGMENT: Record<string, string> = {
-  'pharma-klinisch': 'Klinisch_Derma', 'tech-premium': 'Klinisch_Derma',
-  'clean-minimal': 'Clean_Botanical', 'natur-erdig': 'Clean_Botanical',
-  'luxus-ritual': 'Quiet_Luxury', 'masse-funktional': 'GenZ_DTC',
-};
-
-// ── Trägt der Code laute Farbe? ─────────────────────────────────────
-// NICHT über Body_Behandlung entscheiden. Ein klarer Body kann sehr wohl
-// laut sein: Pink Liquid = Body #FFFFFF / Farbort 'liquid' / Cap+Akzent
-// #FF007F — die Farbe sitzt in der Flüssigkeit und am Cap, nicht im
-// Material. Zwei unabhängige Belege zählen: Sättigung in irgendeinem
-// Farb-Slot ODER ein Farbort ausserhalb des Körpers.
-function hexSaturation(hex: string): number {
-  const m = /^#?([0-9a-f]{6})$/i.exec((hex || '').trim());
-  if (!m) return 0;
-  const n = parseInt(m[1], 16);
-  const r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  if (max === 0) return 0;
-  return (max - min) / max; // HSV-S: #FF007F → 1.0, #FFFFFF → 0
-}
-function codeCarriesColor(code: DesignCode): boolean {
-  const satt = [code.bodyHex, code.bodyHex2, code.akzentHex, code.capHex]
-    .some(h => hexSaturation(h) >= 0.45);
-  const farbortTraegt = !!code.farbort && !/koerper|körper/i.test(code.farbort);
-  return satt || farbortTraegt;
-}
-
-// Achsen-Distanz Query ↔ Code-Zone-0 → Fit-Score 0–100.
-function axisMatchScore(code: DesignCode, identity: Identity | null): { score: number; why: string } {
-  let s = 50; const notes: string[] = [];
-  // v28 — Welt vor Laut. Der alte Kommentar („Register schwaches Signal,
-  // Haiku-Register schwankt") stammte aus der Zeit verschmutzter Labels;
-  // seit Skript 5 v3.0 sind die Register sauber, und die WELT ist das
-  // Primärsignal: Spanne 30 (+20/−10) gegen Laut-Spanne 16. Ein Code in der
-  // falschen Welt kann nicht mehr über die Laut-Achse gewinnen.
-  if (identity?.register && code.register) {
-    if (identity.register === code.register) { s += 20; notes.push('register✓'); }
-    else s -= 10;
-  }
-  // Lautstärke: Feinposition INNERHALB der Welt — bewusst unter Register.
-  const ql = identity?.temp_laut ?? null;
-  if (ql !== null && code.tempLaut !== null) {
-    const d = Math.abs(code.tempLaut - ql);
-    s += (1 - d / 10) * 16 - 6; notes.push(`laut·Δ${d}`);
-  }
-  // Ton
-  const qt = identity?.temp_ton ?? null;
-  if (qt !== null && code.tempTon !== null) {
-    const d = Math.abs(code.tempTon - qt);
-    s += (1 - d / 10) * 16 - 8;
-  }
-  // Segment-Boost (weich)
-  const segHint = identity?.register ? REGISTER_SEGMENT[identity.register] : null;
-  if (segHint && code.segment.includes(segHint)) { s += 6; notes.push('seg+'); }
-  // v28 — Wirkstoff-Boost: nennt der Brief eine Wirkstoff-Welt, gewinnen
-  // Codes aus dieser Welt (+10). 'Universal' zählt schwach (+4). Kein
-  // Wirkstoff im Brief → neutral, keine Strafe für andere Welten.
-  const wtag = wirkstoffTag(identity?.hero_ingredient);
-  if (wtag && code.wirkstoffWelt.length) {
-    if (code.wirkstoffWelt.some(w => w.toLowerCase().startsWith(wtag))) { s += 10; notes.push('wirkstoff✓'); }
-    else if (code.wirkstoffWelt.includes('Universal')) { s += 4; }
-  }
-  return { score: clamp(s), why: notes.join(' ') };
-}
-
-// ── GATE-JOIN — Code.Anforderungen ↔ reale Base-Fähigkeit ────────────
-// Tolerant/normalisiert (Muster deiner Guardrails), nicht enum-hart.
-// Body-Level-Anforderungen sind bindend (droppen), Cap-Level sind soft.
-function baseSatisfies(base: ProductData, anforderung: string): boolean {
-  const a = anforderung.toLowerCase();
-  const capHas = (t: string) => base.capabilities.some(c => c.toLowerCase().includes(t));
-  const isGlas = base.material.some(m => m.toLowerCase().includes('glas'));
-  if (a.includes('klarglas')) return isGlas;
-  if (a.includes('einfaerb') || a.includes('einfärb'))
-    return capHas('einfaerb') || capHas('einfärb') || base.material.some(m => OPAQUE_MATERIALS.includes(m));
-  if (a.includes('frost')) {
-    // Angleich an render.ts-Tristate: Plastik ist industriell mattierbar;
-    // Glas-Mattierung NUR bei belegtem 'mattierbar' — "Glas ist frostbar"
-    // war zu tolerant und bot Looks an, die der Render korrekt verweigert.
-    const isPlastic = base.material.some(m => /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/i.test(m));
-    return isPlastic || capHas('mattierbar');
-  }
-  if (a.includes('opak')) return canCarryLoudColor(base);
-  if (a.includes('cap_weiss') || a.includes('metallcap')) return true; // Cap-Level: soft
-  return true; // unbekannte Anforderung blockiert nicht
-}
-function baseRealizesCode(base: ProductData, code: DesignCode): boolean {
-  return code.anforderungen.every(a => baseSatisfies(base, a));
-}
-
-// Ein Look = Code-Rezept + bestes reales Base, das den Gate erfüllt.
-interface DesignLook {
-  code_id: string; code_name: string; brand: string; produkt: string;
-  register: string; temp_laut: number | null; temp_ton: number | null;
-  farbtemp: number | null; deko_dichte: number | null;
-  body_behandlung: string; farbort: string; farb_traeger: string;
-  body_hex: string; body_hex_2: string; farbverlauf: string; akzent_hex: string;
-  finish_body: string; cap_finish: string; cap_hex: string; cap_detail: string;
-  typo_haltung: string; brief_grafik: string; brief_badge_dichte: string;
-  anforderungen: string[]; segment: string[];
-  axis_score: number; axis_why: string;
-  matched_base: {
-    id: string; name: string; type: string; material: string[];
-    form: string[]; closure: string; image_url: string | null; supplier: string;
-  };
-}
-
-function buildDesignLooks(
-  codes: DesignCode[],
-  rankedBases: RankedProduct[],
-  identity: Identity | null,
-  wall: FormulaWall,
-): DesignLook[] {
-  const looks: DesignLook[] = [];
-  for (const code of codes) {
-    // rankedBases ist score-sortiert → .find nimmt das query-beste Gate-Base.
-    const base = rankedBases.find(b => baseRealizesCode(b, code));
-    if (!base) continue; // kein reales Base trägt diesen Look → Gate-Integrität
-    let { score, why } = axisMatchScore(code, identity);
-
-    // ── Look × Formel-Wand koppeln ──────────────────────────────────
-    // Die Wand gilt für die QUERY, nicht für den Ursprungs-Look. Ein
-    // "klar"-Look auf Glas widerspricht force_tint (z.B. Vit-C-Query:
-    // Klarglas schützt lichtempfindlichen Wirkstoff nicht). Semantik wie
-    // im Render-Gate: TÖNEN, nicht entfernen — Look bleibt, wird konform.
-    let bodyBeh = code.bodyBehandlung;
-    const isKlar = /klar/i.test(bodyBeh);
-    const baseIsGlas = base.material.some(m => m.toLowerCase().includes('glas'));
-    if (wall.forceTintIfGlass && isKlar && baseIsGlas) {
-      bodyBeh = 'getoent'; why += ' [wand→getönt]';
-    }
-    // "laut" braucht Farbe — aber die Farbe kann am Cap, im Akzent oder in
-    // der Flüssigkeit sitzen statt im Material. Der alte pauschale Malus auf
-    // isKlar hat genau die Codes bestraft, die die Lautstärke so tragen:
-    // Pink Liquid (laut 8) verlor dadurch um 1 Punkt gegen F've (laut 5).
-    // Jetzt greift er nur noch bei wirklich farblosen klar-Looks.
-    if (wall.preferOpaque && isKlar && !codeCarriesColor(code)) {
-      score = Math.max(0, score - 15); why += ' [-klar-farblos@laut]';
-    }
-
-    looks.push({
-      code_id: code.id, code_name: code.name, brand: code.brand, produkt: code.produkt,
-      register: code.register, temp_laut: code.tempLaut, temp_ton: code.tempTon,
-      farbtemp: code.farbtemp, deko_dichte: code.dekoDichte,
-      body_behandlung: bodyBeh, farbort: code.farbort, farb_traeger: code.farbTraeger,
-      body_hex: code.bodyHex, body_hex_2: code.bodyHex2, farbverlauf: code.farbverlauf,
-      akzent_hex: code.akzentHex, finish_body: code.finishBody, cap_finish: code.capFinish,
-      cap_hex: code.capHex, cap_detail: code.capDetail, typo_haltung: code.typoHaltung,
-      brief_grafik: code.briefGrafik, brief_badge_dichte: code.briefBadgeDichte,
-      anforderungen: code.anforderungen, segment: code.segment,
-      axis_score: score, axis_why: why,
-      matched_base: {
-        id: base.id, name: base.name, type: base.type, material: base.material,
-        form: base.form, closure: base.closure, image_url: base.imageUrl, supplier: base.supplier,
-      },
-    });
-  }
-  return looks.sort((a, b) => b.axis_score - a.axis_score);
-}
-
 // ── Main Handler ────────────────────────────────────────────────────
 // ══ Bildpfad (v47) ═══════════════════════════════════════════════════
 // Foto rein -> bestellbare Teile raus. Drei Ebenen, nach Verlaesslichkeit
@@ -1700,32 +1409,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     } catch (e: any) { return res.status(200).json({ frisch: [], error: String(e?.message || e).slice(0, 160) }); }
   }
 
-  // v59 — Lieferanten-Profil: leichter Modus ohne Modelle. Liefert die
-  // Teile im selben Format wie die Suche, damit das Frontend sie direkt im
-  // Detail-Panel oeffnen kann.
-  if (typeof (req.body as any)?.lieferant === 'string') {
-    try {
-      const name = String((req.body as any).lieferant).trim().slice(0, 80);
-      if (!name) return res.status(400).json({ error: 'lieferant ist leer' });
-      const treffer = lieferantProfil(name);
-      const profil = treffer?.profil || { name, status: 'gelistet' };
-      const recs = profil.status === 'entfernt' ? [] : await airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()');
-      const teile = recs.map(extractProduct).filter((p: ProductData) => p.supplier.toLowerCase() === String(profil.name).toLowerCase());
-      try {
-        const capMap = await resolveCaps(Array.from(new Set(teile.flatMap(t => t.capIds))));
-        for (const t of teile) {
-          t.caps = t.capIds.map(id => { const c = capMap.get(id); return c ? { id, name: c.name, imageUrl: c.url } : null; })
-            .filter((c): c is CapRef => c !== null);
-          t.capImages = t.caps.map(c => c.imageUrl);
-          t.capCount = t.caps.length;
-        }
-      } catch { /* Caps optional */ }
-      teile.sort((x, y) => (x.type || '').localeCompare(y.type || '') || x.name.localeCompare(y.name));
-      return res.status(200).json({ lieferant: profil.name, profil, anzahl: teile.length,
-        teile: teile.map(({ capIds, excluded, ...rest }) => ({ ...rest, score: 0, reasoning: '' })) });
-    } catch (e: any) { return res.status(200).json({ lieferant: null, error: String(e?.message || e).slice(0, 160) }); }
-  }
-
   if (!query && !image && !lesartKorrigiert) {
     return res.status(400).json({ error: 'query oder image ist erforderlich' });
   }
@@ -1749,17 +1432,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // kommt. Fuer das parallele Laden reicht solange, was schon da ist.
     const vorlaeufigeQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : 'Packmittel');
 
-    // 1. Produkte + Regeln + Aktiv-Codes parallel laden; Identität parallel
-    //    ableiten. Code-Laden non-fatal: fällt es aus, laufen results normal
-    //    weiter, nur design_looks bleibt leer (wie Cache-Prinzip).
+    // 1. Produkte + Regeln parallel laden; Identität parallel ableiten.
+    //    (v64: Design-Codes werden hier nicht mehr geladen — der Design-Raum
+    //    holt sie über /api/render; design_looks hatte 0 Leser im Frontend.)
     // Im reinen Bildmodus braucht es keine Identitaets-Ableitung: ein Foto
     // stellt eine geometrische Frage, keine emotionale. Das spart einen
     // Modell-Call pro Suche.
-    const [allProducts, produktRegeln, identity, activeCodes, attrWerte] = await Promise.all([
+    const [allProducts, produktRegeln, identity, attrWerte] = await Promise.all([
       airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
       airtableListAll(PRODUKT_REGELN_TABLE),
       (bildModus && !eigeneWorte) ? Promise.resolve(null) : parseIdentity(vorlaeufigeQuery),
-      airtableListAll(DESIGN_CODE_TABLE, "{Status}='Aktiv'").catch(() => [] as any[]),
       bildModus ? ladeAttributBibliothek().catch(() => [] as AttrWert[]) : Promise.resolve([] as AttrWert[]),
     ]);
 
@@ -1993,14 +1675,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       } catch { /* Cap-Daten optional */ }
     }
 
-    // 7c. Design-Looks bauen: Aktiv-Codes × gerankte Bases (Gate-Join).
-    //     Löst "gleiche Query → nur 1 Look" — mehrere Codes ⇒ mehrere Looks.
-    let designLooks: DesignLook[] = [];
-    try {
-      const codes = activeCodes.map(extractDesignCode);
-      designLooks = buildDesignLooks(codes, ranked, identity, wall);
-    } catch { /* Looks optional — results shippen immer */ }
-
     // Wie viele Treffer sind wirklich nah? Eine Suchmaschine, die 18 Teile
     // ausbreitet, obwohl zwei passen, ist wieder ein Katalog. Nah heisst:
     // innerhalb von 12 Punkten zur Spitze und mindestens 50 Punkte absolut.
@@ -2052,9 +1726,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json({
       results: publicResults,
-      // NEU: Look-zentrierte Ebene — jeder Eintrag = Design-Rezept + reales
-      // Gate-Base. Frontend rendert daraus die Style-Frames (Grid-Vielfalt).
-      design_looks: designLooks,
       query: effektiveQuery,
       // v47 — korrigierbare Chips. `geraten` sagt dem Frontend, welche
       // gestrichelt zu zeichnen sind. Korrektur zurueckschicken als
@@ -2070,8 +1741,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bild_fallback: bildFallback,
       totalProducts: products.length,
       afterFilter: filtered.length,
-      activeCodes: activeCodes.length,
-      designLooks: designLooks.length,
       categoryMatch: category?.category || null,
       // v30 — Kompetenz-Satz fuer den Chat (vor den Kacheln)
       hinweis: formelHinweis(category, effektiveQuery),
