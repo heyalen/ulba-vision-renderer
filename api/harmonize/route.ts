@@ -125,11 +125,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await uploadAttachment(TABLE_ID, recordId, 'Bild_Harmonisiert', jpg, `harm_${recordId}_trim.jpg`);
     await setDone(recordId);
 
-    // Caps desselben Systems mit-trimmen (nur bei base+cap_separat, sharp only).
-    let caps = { ok: 0, skip: 0, fail: 0 };
-    if (bildTyp === 'base+cap_separat') {
-      caps = await processCaps(recordId, sharp);
-    }
+    // Caps desselben Systems mit-trimmen — fuer JEDEN Bild_Typ (v64).
+    // Vorher nur bei base+cap_separat: Caps von "system"-Teilen bekamen nie
+    // Cap_Bild_Harmonisiert, und das Cap-Tagging wartet genau darauf.
+    // processCaps ist idempotent und sharp-only (keine fal-Kosten).
+    const caps = await processCaps(recordId, sharp);
 
     return res.status(200).json({ ok: true, recordId, caps });
 
