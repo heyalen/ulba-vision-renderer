@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 
-/* ── render.ts v46 — der vereinfachte Renderer ────────────────────────────
+/* ── render.ts v47 — der vereinfachte Renderer ────────────────────────────
    Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
    (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
    was nur dem alten Mehr-Runden-Briefing diente, ist raus:
@@ -16,7 +16,15 @@ import { createHash } from 'crypto';
    Render_Rezept: prompt-fertiger englischer Text, verbatim in den Prompt,
    VOR den mechanischen Farb-/Finish-Zeilen; leer -> heutiges Verhalten.
    Dazu haerterer Geometrie-Lock (strict recolor of the SAME object) und
-   das Seitenverhaeltnis des Produktfotos statt 'auto'. */
+   das Seitenverhaeltnis des Produktfotos statt 'auto'.
+   v47 (Re-Test XTAG: Pumpkopf-Drift trotz Text-Lock): (1) Geometrie-Anker
+   aus den DATEN — die getaggten Attribute des Teils (Attribute/Cap_Attribute,
+   Form, Neck_Norm, Closure) werden zur teil-spezifischen Preserve-Aufzaehlung;
+   (2) Recolor-spezifischer Cap-Lock ("a chrome part painted white keeps
+   chrome's exact geometry"); (3) optionaler Body-Param engine ('seedream'
+   default | 'gemini') fuer den A/B-Vergleich der Formtreue — fliesst in den
+   Cache-Key; (4) volles fal-Preset-Set fuer aspect_ratio (9:21 etc. — 9:16
+   hatte schlanke Flaschen gestreckt). */
 
 // ── fetch mit hartem Timeout ──────────────────────────────────────────────
 // Ohne dies wartet ein haengender externer Call (fal.ai / Airtable) bis
@@ -52,24 +60,31 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-const RENDER_VERSION = 'v46';
-// EIN Modell fuer alles (A/B-Test 04.08.: Seedream hielt Detail + Matt-Haptik
-// besser als Gemini). Multi-Image via image_urls[].
+const RENDER_VERSION = 'v47';
+// Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
+// Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
+// (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
+// Struktur-Parameter: Seedream v5 edit kennt laut Doku (geprueft 10/2026)
+// KEINE strength/guidance/denoise-Regler — Inputs sind nur prompt, images,
+// aspect_ratio, resolution, output_format. Formtreue muss deshalb ueber
+// Prompt-Locks + Geometrie-Anker + Engine-Vergleich kommen.
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
+const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
+type Engine = 'seedream' | 'gemini';
 
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
 
 // Ein fal-Edit-Aufruf → Bild-URL. aspect_ratio: Preset aus dem Eingabefoto
 // (aspectFromAttachment), 'auto' nur als letzter Fallback.
-async function falEdit(imageUrls: string[], prompt: string, aspectRatio: string = 'auto'): Promise<string> {
-  const r = await fetchT(FAL_SEEDREAM_EDIT, {
+async function falEdit(imageUrls: string[], prompt: string, aspectRatio: string = 'auto', endpoint: string = FAL_SEEDREAM_EDIT): Promise<string> {
+  const r = await fetchT(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
     body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: aspectRatio }),
     timeoutMs: 120000, label: 'fal.ai edit',
   });
-  if (!r.ok) throw new Error(`fal.ai edit: ${await r.text()}`);
+  if (!r.ok) throw new Error(`fal.ai edit (${endpoint}): ${await r.text()}`);
   const d = await r.json() as { images?: Array<{ url: string }> };
   const url = d.images?.[0]?.url;
   if (!url) throw new Error('Kein Bild von fal zurückgekommen');
@@ -81,10 +96,11 @@ function queryHash(q: string): string {
   return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
 }
 
-function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, codeId: string | null): string {
+function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, codeId: string | null, engine: Engine): string {
   // RENDER_VERSION zuerst: aendert sich der Render-Code, aendert sich jeder Key.
-  // codeId trennt verschiedene Looks auf DEMSELBEN Base+Query.
-  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${codeId ? `_c${codeId.slice(-6)}` : ''}`;
+  // codeId trennt verschiedene Looks auf DEMSELBEN Base+Query; engine trennt
+  // den A/B-Vergleich (sonst liefert der Seedream-Cache das Gemini-Ergebnis).
+  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${codeId ? `_c${codeId.slice(-6)}` : ''}${engine === 'gemini' ? '_g' : ''}`;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -100,9 +116,12 @@ function imgUrl(attachmentField: any): string | null {
 // wird auf das naechstliegende fal-Preset (dasselbe Preset-Set, das der
 // fruehere Gemini-Edit-Endpoint dokumentiert — Seedream teilt bei fal das
 // I/O-Schema). 'auto' nur, wenn keine Masse vorliegen.
+// Volles dokumentiertes Preset-Set (Seedream v5 edit). v46 kannte nur 8
+// Presets — eine 1:2.3-Flasche landete auf 9:16 und wurde gestreckt.
 const FAL_RATIOS: Array<[string, number]> = [
-  ['21:9', 21 / 9], ['16:9', 16 / 9], ['3:2', 3 / 2], ['4:3', 4 / 3],
-  ['1:1', 1], ['3:4', 3 / 4], ['2:3', 2 / 3], ['9:16', 9 / 16],
+  ['21:9', 21 / 9], ['3:1', 3], ['2:1', 2], ['16:9', 16 / 9], ['3:2', 3 / 2],
+  ['4:3', 4 / 3], ['5:4', 5 / 4], ['1:1', 1], ['4:5', 4 / 5], ['3:4', 3 / 4],
+  ['2:3', 2 / 3], ['9:16', 9 / 16], ['1:2', 1 / 2], ['9:21', 9 / 21], ['1:3', 1 / 3],
 ];
 function aspectFromAttachment(attachmentField: any): string {
   const a = Array.isArray(attachmentField) && attachmentField[0] ? attachmentField[0] : null;
@@ -539,18 +558,34 @@ async function assemblePrompt(
 }> {
   const designCodesAll = await airtableListAll(DESIGN_CODE_TABLE);
 
-  // ── Attribut-Ground-Truth (Render_Constraint) — positive Fixierung ─
+  // ── Attribut-Ground-Truth — Constraints UND Geometrie-Namen ────────
+  // v47: Die getaggten Attribut-NAMEN (System + Cap) werden zum teil-
+  // spezifischen Geometrie-Anker im Prompt. Nur vorhandene Tags, nichts
+  // erfunden; fehlende Attribute fallen einfach weg.
   const attrIds: string[] = Array.isArray(sysFields['Attribute']) ? sysFields['Attribute'] : [];
+  const capAttrIds: string[] = (capFields && Array.isArray(capFields['Cap_Attribute'])) ? capFields['Cap_Attribute'] : [];
+  const holeAttr = async (ids: string[]): Promise<any[]> => {
+    if (!ids.length) return [];
+    const formula = `OR(${ids.slice(0, 25).map(id => `RECORD_ID()='${id}'`).join(',')})`;
+    return airtableQuery(ATTRIBUT_TABLE, formula, ['A_Name (Wert)', 'Render_Constraint'], 25);
+  };
   let attrConstraints: string[] = [];
-  if (attrIds.length > 0) {
-    try {
-      const formula = `OR(${attrIds.slice(0, 25).map(id => `RECORD_ID()='${id}'`).join(',')})`;
-      const recs = await airtableQuery(ATTRIBUT_TABLE, formula, ['A_Name (Wert)', 'Render_Constraint'], 25);
-      attrConstraints = recs
-        .map(r => String(r.fields['Render_Constraint'] || '').trim())
-        .filter(Boolean);
-    } catch { attrConstraints = []; }
-  }
+  let attrNamen: string[] = [];
+  let capAttrNamen: string[] = [];
+  try {
+    const [sysRecs, capRecs] = await Promise.all([holeAttr(attrIds), holeAttr(capAttrIds).catch(() => [] as any[])]);
+    attrConstraints = sysRecs.map(r => String(r.fields['Render_Constraint'] || '').trim()).filter(Boolean);
+    attrNamen = sysRecs.map(r => String(r.fields['A_Name (Wert)'] || '').trim()).filter(Boolean);
+    capAttrNamen = capRecs.map(r => String(r.fields['A_Name (Wert)'] || '').trim()).filter(Boolean);
+  } catch { attrConstraints = []; attrNamen = []; capAttrNamen = []; }
+
+  // Geometrie-Filter: nur FORM-Attribute in den Anker. Farb-/Finish-/Material-
+  // Tags ("High Gloss", "Metallic Silver", "Colorless / Clear") beschreiben den
+  // IST-Zustand, den der Recolor aendern darf — die wuerden das Umfaerben
+  // blockieren oder die alte Farbe zurueckholen. Ausschluss gewinnt.
+  const GEO_JA = /cylindric|cubical|square|tall|narrow|elongat|balanced|slim|wide|neck|straight|taper|shoulder|bottom|flat top|double.?wall|thick|thin|wall|edge|smaller than body|larger than body|round|step|ring|plinth|collar|actuator/i;
+  const GEO_NEIN = /gloss|matt|metallic|silver|gold|chrome|chrom|lacquer|colou?r|transparent|opaque|clear|frost|visible|hidden|contrast|continuous|untreated|white|black|pcr|plastic|aluminum|aluminium|glass|none/i;
+  const geoFilter = (n: string) => GEO_JA.test(n) && !GEO_NEIN.test(n);
 
   // ── SF-Faehigkeitsmodell (bestätigt / unbekannt / ausgeschlossen) ──
   // Quelle: belegpflichtig getaggte SF_-Felder. Ausnahme: Kunststoff-
@@ -753,6 +788,38 @@ async function assemblePrompt(
   const attrLine = attrConstraints.length
     ? `Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`
     : '';
+  // ── Geometrie-Anker aus den Daten (v47) ────────────────────────────
+  // Teil-spezifische Preserve-Aufzaehlung statt generischem "keep the shape":
+  // Form + Neck_Norm + Closure + die getaggten Form-Attribute. Der erzwungene
+  // Umlack (Chrom -> Weiss) laesst das Modell die Pumpform sonst aus seinem
+  // Prior neu erfinden — der Anker benennt jedes Teil, das bleiben muss.
+  const FORM_EN: Record<string, string> = {
+    rund: 'round', schlank: 'slim', eckig: 'angular', oval: 'oval',
+    konisch: 'conical', flach: 'flat', breit: 'wide', quadratisch: 'square',
+  };
+  const formEnStr = multiSelectNames(sysFields['Form'])
+    .map(f => FORM_EN[f.toLowerCase()] || '').filter(Boolean).join(', ');
+  const neckNorm = multiSelectNames(sysFields['Neck_Norm']).filter(Boolean).join(', ');
+  const geoTraits = [...new Set(attrNamen.filter(geoFilter))].slice(0, 12);
+  const geoBits: string[] = [];
+  if (formEnStr) geoBits.push(`the ${formEnStr} body silhouette`);
+  if (neckNorm) geoBits.push(`the ${neckNorm} neck finish`);
+  if (closureCoverage.length) geoBits.push(`the complete ${closureCoverage.join('/')} mechanism with its slim actuator and every collar ring and step`);
+  if (geoTraits.length) geoBits.push(`its tagged build: ${geoTraits.join(', ')}`);
+  const geoAnkerLine = geoBits.length
+    ? `Preserve exactly as in the photo, part by part: ${geoBits.join('; ')}. Keep wall thickness, the visible gap between outer wall and inner cartridge where present, the cartridge's own shoulder, the base, and the overall height-to-width ratio unchanged.`
+    : '';
+  // Cap-Anker: eigene Aufzaehlung fuer den Split-Cap-Prompt.
+  const capGeoTraits = [...new Set(capAttrNamen.filter(geoFilter))].slice(0, 10);
+  const capClosureEn = capFields
+    ? multiSelectNames(capFields['Closure_Type']).concat(selectName(capFields['Closure_Type']) || []).filter(Boolean).join('/')
+    : '';
+  const capAnkerLine = (capClosureEn || capGeoTraits.length)
+    ? `Preserve exactly as in the photo, part by part: the complete ${capClosureEn || 'closure'} mechanism — slim actuator, every collar ring, step and seam${capGeoTraits.length ? `; its tagged build: ${capGeoTraits.join(', ')}` : ''}. Keep part count, part sizes and the height-to-width ratio unchanged.`
+    : '';
+  // Recolor-spezifischer Lock (v47): der Umlack selbst ist der Trigger der
+  // Form-Drift — deshalb steht die Regel direkt an der Farb-Anweisung.
+  const capRepaintLock = `Repaint ONLY the surface of this exact closure — every ring, step, seam and the slim actuator keep their identical shape, size and count; a chrome part painted white keeps chrome's exact geometry, only its colour changes.`;
   const materialLine = `The body is ${matEN}${isPlastic ? ' — it must clearly read as a plastic container, never as solid metal, aluminium, steel, glass or ceramic' : ''}.`;
   const capMaterialLine = capMaterial ? `The cap is ${capMaterial}.` : '';
   const avoidLine = doNotZeile((traegerOrt === 'Material')
@@ -785,6 +852,7 @@ async function assemblePrompt(
   // ── Vollbild-Prompt (Fall A/B, ein Render) ─────────────────────────
   const fullLines: string[] = [];
   fullLines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
+  if (geoAnkerLine) fullLines.push(geoAnkerLine);
   if (attrLine) fullLines.push(attrLine);
   if (fall === 'B') {
     fullLines.push(`Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap.`);
@@ -797,10 +865,11 @@ async function assemblePrompt(
     fullLines.push(rezeptBlock);
     if (ankerLine) fullLines.push(ankerLine);
     if (!rezeptGewinnt) fullLines.push(bodyLineEn);
+    fullLines.push(capRepaintLock);
   } else {
     fullLines.push(bodyLineEn);
     if (code.capHex) {
-      fullLines.push(`Color the closure/cap as ONE single solid ${code.capHex} tone with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt} — never the body colour on the cap.`);
+      fullLines.push(`Color the closure/cap as ONE single solid ${code.capHex} tone with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt} — never the body colour on the cap. ${capRepaintLock}`);
     }
     if (codeAkzentEn) fullLines.push(`Add ${codeAkzentEn}.`);
     if (farbsys.regelEn) fullLines.push(farbsys.regelEn);
@@ -817,6 +886,7 @@ async function assemblePrompt(
   // (bewiesen, 2x reproduziert). Beide Prompts zitieren DENSELBEN Code.
   const baseLines: string[] = [];
   baseLines.push(`Keep the exact same body shape, silhouette and proportions as reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck.`);
+  if (geoAnkerLine) baseLines.push(geoAnkerLine);
   if (attrLine) baseLines.push(attrLine);
   baseLines.push(materialLine);
   if (rezept) {
@@ -842,8 +912,10 @@ async function assemblePrompt(
   const capTailLock = `If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in reference image 1; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
   const capRezeptPrompt = [
     `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish.`,
+    capAnkerLine,
     rezeptBlock,
     `Apply to this closure exactly the closure treatment the recipe describes — and nothing beyond it.${code.capHex ? ` Its closure anchor colour is ${code.capHex} with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}; the recipe wins on any conflict.` : ''}`,
+    capRepaintLock,
     capGeoLock,
     capMaterialLine,
     avoidLine,
@@ -851,6 +923,8 @@ async function assemblePrompt(
   ].filter(Boolean).join(' ');
   const capRecolorPrompt = [
     `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish. Color the closure as ONE single solid ${code.capHex} tone across the whole closure with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}.${akzentLine} Do NOT split it into multiple colored segments and do NOT use more than this one accent on it.`,
+    capAnkerLine,
+    capRepaintLock,
     capGeoLock,
     capMaterialLine,
     avoidLine,
@@ -1037,6 +1111,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     tier = 'lite',
     forceCodeId = null,
     nocache: nocacheRoh = false,
+    engine: engineRoh = 'seedream',
   } = req.body as {
     systemId: string;
     query: string;
@@ -1044,7 +1119,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     tier?: Tier;
     forceCodeId?: string | null;
     nocache?: boolean;
+    // A/B-Schalter (v47): 'gemini' rendert mit Gemini 2.5 Flash Image —
+    // bekannt stark bei Identitaets-/Formtreue in Edits. Frontend sendet
+    // nichts -> Default seedream, kein Frontend-Change noetig.
+    engine?: Engine;
   };
+  const engine: Engine = engineRoh === 'gemini' ? 'gemini' : 'seedream';
+  const falEndpoint = engine === 'gemini' ? FAL_GEMINI_EDIT : FAL_SEEDREAM_EDIT;
 
   if (!systemId || !query) {
     return res.status(400).json({ error: 'systemId und query sind erforderlich' });
@@ -1066,7 +1147,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId);
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId, engine);
     let cached: any[] = [];
     if (!nocache) try {
       cached = await airtableQuery(
@@ -1158,8 +1239,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (useSplitRender) {
       const [baseUrl, capUrl] = await Promise.all([
-        falEdit([primaryUrl], basePrompt, primaryAspect),
-        falEdit([capImageUrl!], capPrompt!, capAspect).catch((e) => {
+        falEdit([primaryUrl], basePrompt, primaryAspect, falEndpoint),
+        falEdit([capImageUrl!], capPrompt!, capAspect, falEndpoint).catch((e) => {
           // Cap-Recolor darf nie den Gesamt-Render killen: Fallback = Roh-Cap.
           console.error('Cap-Recolor fehlgeschlagen — zeige Roh-Cap:', e);
           return capImageUrl!;
@@ -1170,7 +1251,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       capPromptUsed = capPrompt;
     } else {
       const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
-      renderingUrl = await falEdit(imgs, fullPrompt, primaryAspect);
+      renderingUrl = await falEdit(imgs, fullPrompt, primaryAspect, falEndpoint);
     }
 
     // ── 7. AUSLIEFERN ZUERST, cachen danach ─────────────────────────
