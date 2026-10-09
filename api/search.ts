@@ -1279,7 +1279,7 @@ function merkmalZeile(m: Map<string, Set<string>>): string {
 // das Ranking von Haiku die Reihenfolge behaelt und nur geschaerft wird.
 const SYNONYME: [RegExp, string, string][] = [
   [/\b(eckig|kubisch|quadratisch|square|cubic)/i, 'A1_Body_Geometry', 'Cubical / Square'],
-  [/\b(zylind|cylind)/i, 'A1_Body_Geometry', 'Cylindrical'],
+  [/\b(zylind|cylind|rund(e|er|es)?\b)/i, 'A1_Body_Geometry', 'Cylindrical'],
   [/\b(bauchig|kugel|spherical|bulbous)/i, 'A1_Body_Geometry', 'Spherical / Bulbous'],
   [/\b(facett|hexagon|sechseck)/i, 'A1_Body_Geometry', 'Hexagonal / Faceted'],
   [/\b(tropfen|teardrop)/i, 'A1_Body_Geometry', 'Teardrop'],
@@ -1327,14 +1327,63 @@ const SYNONYME: [RegExp, string, string][] = [
 // sind damit ohne Code-Änderung suchbar. Pro Kategorie gewinnt der erste Treffer
 // (Synonym vor Label), damit "konisch" nicht zugleich oben und unten heisst.
 const norm = (t: string) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+const woerter = (t: string) => norm(t).split(/[^a-z0-9&]+/).filter(Boolean);
+// Tippfehler-tolerant: Levenshtein-Abstand, erlaubt 1 (ab 4 Zeichen) bzw. 2 (ab 8).
+function abstand(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]; let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+const aehnlichWort = (q: string, w: string) => {
+  if (q === w) return true;
+  if (w.length < 5 || q[0] !== w[0]) return false;   // Anfangsbuchstabe muss stimmen
+  const max = w.length >= 10 ? 2 : 1;
+  return abstand(q, w, max) <= max;
+};
+// Kommt die Wortfolge `label` (tippfehler-tolerant, zusammenhängend) in der Query vor?
+function enthaeltFolge(qw: string[], label: string[], frei: boolean[]): number {
+  if (!label.length || label.length > qw.length) return -1;
+  for (let i = 0; i + label.length <= qw.length; i++) {
+    let ok = true;
+    for (let j = 0; j < label.length; j++) if (!frei[i + j] || !aehnlichWort(qw[i + j], label[j])) { ok = false; break; }
+    if (ok) return i;
+  }
+  return -1;
+}
+const FUELL = new Set(['und', 'mit', 'in', 'aus', 'der', 'die', 'das', 'ein', 'eine', 'fuer', 'bitte', 'ich', 'will', 'suche', 'brauche', 'nach', 'oben', 'unten']);
 function gewollteMerkmale(query: string, attrWerte: AttrWert[]): [string, string][] {
-  const q = ` ${norm(query).replace(/[^a-z0-9&]+/g, ' ')} `;
+  const qw = woerter(query);
   const raus = new Map<string, string>();
-  for (const [re, kat, wert] of SYNONYME) if (re.test(query) && !raus.has(kat)) raus.set(kat, wert);
-  for (const w of attrWerte) {
+  const frei = qw.map(() => true);
+  for (const [re, kat, wert] of SYNONYME) {
+    if (!re.test(query) || raus.has(kat)) continue;
+    raus.set(kat, wert);
+    qw.forEach((w, i) => { if (re.test(w)) frei[i] = false; });
+  }
+  // Längere Labels zuerst, damit "nach unten verjuengend" vor "verjuengend"-Teiltreffern gewinnt.
+  // Nur der deutsche Bibliotheks-Label zaehlt (der englische Name waere zu
+  // nah an anderen Woertern: "Glas" ≈ "Glass Cap"). Kappen-Kategorien nur,
+  // wenn die Query von der Kappe spricht — "matt" meint sonst den Koerper.
+  const kappeGemeint = /(kappe|cap|deckel|verschluss)/i.test(query);
+  const kandidaten = attrWerte.map(w => ({ w, folge: woerter((w.beschreibung || '').split('·')[0]) }))
+    .filter(({ w, folge }) => folge.length && folge.join('').length >= 4 && !(folge.length === 1 && FUELL.has(folge[0])) && (kappeGemeint || !CAP_KAT.test(w.kategorie)))
+    .sort((x, y) => (y.folge.join(' ').length - x.folge.join(' ').length) || (+CAP_KAT.test(x.w.kategorie) - +CAP_KAT.test(y.w.kategorie)));
+  // Jedes Suchwort wird nur einmal vergeben: "matt" gehoert dem Koerper, nicht zusaetzlich der Kappe.
+  for (const { w, folge } of kandidaten) {
     if (raus.has(w.kategorie)) continue;
-    const label = norm((w.beschreibung || '').split('·')[0].trim()).replace(/[^a-z0-9&]+/g, ' ').trim();
-    if (label.length >= 5 && q.includes(` ${label} `)) raus.set(w.kategorie, w.name);
+    const i = enthaeltFolge(qw, folge, frei);
+    if (i < 0) continue;
+    raus.set(w.kategorie, w.name);
+    for (let j = 0; j < folge.length; j++) frei[i + j] = false;
   }
   return Array.from(raus.entries());
 }
@@ -1880,15 +1929,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Interne Felder nicht an Client leaken (capIds, excluded)
     const publicResults = ranked.map(({ capIds, excluded, ...rest }) => ({ ...rest, merkmale: merkmalListe(rest.id, capIds) }));
-    // v67 — Form/Proportion/Wandung, die die Query wörtlich nennt, kommen als
-    // vorgewählte Eingrenz-Chips zurück: der Ranker sortiert nur, die Liste
-    // soll aber zeigen, was gefragt ist. Nur Identität (A*), nie Veredelung —
-    // ein Lieferantenfoto in Klarglas ist dasselbe Teil wie mattiert. Und nur,
-    // wenn mindestens ein Ergebnis passt — sonst lieber alles zeigen.
+    // v67 — Merkmale, die die Query (tippfehler-tolerant) nennt, kommen als
+    // aktive Filter-Pillen zurück (wie Typ/Material). Nur, wenn mindestens
+    // ein Ergebnis passt — sonst lieber alles zeigen als nichts.
     const merkmalWahl = gewollt
-      .filter(([kat]) => /^A[125]_/.test(kat))
-      .map(([kat, wert]) => `${kat}::${wert}`)
-      .filter(k => publicResults.some(r => r.merkmale.some(m => `${m.kat}::${m.wert}` === k)));
+      .map(([kat, wert]) => ({ key: `${kat}::${wert}`, label: labelVon.get(`${kat}::${wert}`) || wert }))
+      .filter(x => publicResults.some(r => r.merkmale.some(m => `${m.kat}::${m.wert}` === x.key)));
 
     // 8. Log (fire-and-forget)
     const SEARCH_LOG_TABLE = 'tbljh9GowT7JkJcn4';
