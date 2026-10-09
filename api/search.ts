@@ -169,10 +169,10 @@ function parseQuery(query: string): ParsedQuery & { freeHints: FreeHints } {
     [/tiegel|jar/, 'Tiegel'],
     [/\bdose\b/, 'Dose'],
     [/tube|tuben/, 'Tube'],
-    [/airless/, 'Airless'],
-    [/\bpump(e|en)?\b/, 'Pump'],
-    [/spray|sprüh|spruh/, 'Spray'],
     [/\bstick\b/, 'Stick'],
+    // v68 — Airless/Pumpe/Spray sind MECHANIK, kein Behaelter: sie stehen nur
+    // als Verschluss-Filter. Sonst fiel jede Airless-Flasche bei "flasche"
+    // raus und "pumpe" fand 0 Systeme (kein System hat Typ "Pump").
   ];
   const typeMentions = typeMap.filter(([re]) => re.test(q)).map(([, v]) => v)
     .filter((v, i, a) => a.indexOf(v) === i);
@@ -657,7 +657,11 @@ function hardFilter(
       if (!hit) return false;
     }
     if (parsed.typeMentions.length > 0) {
-      if (!parsed.typeMentions.some(t => inc(p.type, t))) return false;
+      // Alte Projekte schicken noch "Typ: Airless/Pump/Spray" als Pill —
+      // Mechanik sitzt am Verschluss (Base oder Cap), nicht am Typ.
+      const mechanik = (t: string) => /^(airless|pump|spray)$/i.test(t);
+      if (!parsed.typeMentions.some(t => inc(p.type, t) || (mechanik(t) && (inc(p.closure, t) ||
+        p.capIds.some(cid => { const cc = capClosures.get(cid); return cc ? inc(cc, t) : false; }))))) return false;
     }
     if (parsed.closureMentions.length > 0) {
       // Verschluss sitzt am Base ODER an einem Cap. UNIQUE-Base ist
@@ -682,7 +686,8 @@ function hardFilter(
     if (category) {
       if (category.nichtMaterial.some(nm => p.material.some(pm => matchMat(pm, nm)))) return false;
       if (category.nichtClosure.some(nc => inc(p.closure, nc))) return false;
-      if (category.nichtType.some(nt => inc(p.type, nt))) return false;
+      // Mechanik-Woerter in Nicht_Typen ("Airless") gelten fuer den Verschluss.
+      if (category.nichtType.some(nt => inc(p.type, nt) || (/^(airless|pump|pumpe|spray)$/i.test(nt.trim()) && inc(p.closure, nt.trim().replace(/e$/i, ''))))) return false;
       if ((category.volumeMin !== null || category.volumeMax !== null) && p.availableSizes.length > 0) {
         const mls = p.availableSizes.map(s => parseInt(s.replace(/[^0-9]/g, ''), 10)).filter(n => !isNaN(n));
         if (mls.length > 0) {
@@ -1360,6 +1365,21 @@ function enthaeltFolge(qw: string[], label: string[], frei: boolean[]): number {
   return -1;
 }
 const FUELL = new Set(['und', 'mit', 'in', 'aus', 'der', 'die', 'das', 'ein', 'eine', 'fuer', 'bitte', 'ich', 'will', 'suche', 'brauche', 'nach', 'oben', 'unten']);
+// v68 — Tippfehler in Grundbegriffen ("flashe", "tigel", "pipete", "aluminum")
+// werden VOR dem Parsen auf das Fachwort gezogen. Gleiche Regel wie bei den
+// Merkmalen: Anfangsbuchstabe muss stimmen, 1 Fehler (2 ab 10 Zeichen).
+const GRUNDWOERTER = ['flasche', 'flaschen', 'tiegel', 'tuben', 'airless', 'pumpe', 'spray', 'pipette',
+  'tropfer', 'schraubverschluss', 'stopfen', 'aluminium', 'keramik', 'kunststoff', 'plastik', 'recycling',
+  'eckig', 'quadratisch', 'schlank', 'organisch', 'flip-top'];
+function korrigiere(query: string): string {
+  return query.replace(/[a-zäöüß-]{5,}/gi, wort => {
+    const w = norm(wort);
+    if (GRUNDWOERTER.includes(w)) return wort;
+    const treffer = GRUNDWOERTER.find(g => aehnlichWort(w, g));
+    return treffer || wort;
+  });
+}
+
 function gewollteMerkmale(query: string, attrWerte: AttrWert[]): [string, string][] {
   const qw = woerter(query);
   const raus = new Map<string, string>();
@@ -1638,7 +1658,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Die endgueltige Query steht erst, wenn das Bild gelesen ist — das
     // passiert nach dem Laden der Bibliothek, weil beides aus einem Aufruf
     // kommt. Fuer das parallele Laden reicht solange, was schon da ist.
-    const vorlaeufigeQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : 'Packmittel');
+    const vorlaeufigeQuery = (eigeneWorte ? korrigiere(eigeneWorte) : '') || (lesart ? lesartAlsQuery(lesart) : 'Packmittel');
 
     // 1. Produkte + Regeln parallel laden; Identität parallel ableiten.
     //    (v64: Design-Codes werden hier nicht mehr geladen — der Design-Raum
@@ -1710,7 +1730,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    const effektiveQuery = eigeneWorte || (lesart ? lesartAlsQuery(lesart) : '');
+    const effektiveQuery = (eigeneWorte ? korrigiere(eigeneWorte) : '') || (lesart ? lesartAlsQuery(lesart) : '');
     if (!effektiveQuery) return res.status(400).json({ error: 'Kein lesbarer Suchinhalt' });
 
     // 2. Spur B parsen + Client-Overrides (Chip-Removal)
@@ -1932,7 +1952,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // v67 — Merkmale, die die Query (tippfehler-tolerant) nennt, kommen als
     // aktive Filter-Pillen zurück (wie Typ/Material). Nur, wenn mindestens
     // ein Ergebnis passt — sonst lieber alles zeigen als nichts.
+    // Keine Doppel-Pille: Material/Verschluss stehen schon als harte Filter oben.
     const merkmalWahl = gewollt
+      .filter(([kat]) => !(kat.startsWith('D1_') && parsed.materialMentions.length) && !(kat.startsWith('F1_') && parsed.closureMentions.length))
       .map(([kat, wert]) => ({ key: `${kat}::${wert}`, label: labelVon.get(`${kat}::${wert}`) || wert }))
       .filter(x => publicResults.some(r => r.merkmale.some(m => `${m.kat}::${m.wert}` === x.key)));
 
