@@ -1843,8 +1843,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       aehnlich = kandidaten.length;
     }
 
+    // v66 — Merkmale fuer das Frontend: Datenblatt + Eingrenz-Chips. Label
+    // ist der deutsche Untertitel aus der Bibliothek ("Kubisch · gerade
+    // Kanten" -> "Kubisch"), Kappen-Werte aus allen Caps des Systems.
+    const labelVon = new Map<string, string>();
+    for (const w of attrWerte) {
+      const kurz = (w.beschreibung || '').split('·')[0].trim();
+      labelVon.set(`${w.kategorie}::${w.name}`, kurz && kurz.length <= 28 ? kurz : w.name);
+    }
+    const merkmalListe = (sysId: string, capIds: string[]) => {
+      const out: { kat: string; wert: string; label: string }[] = [];
+      merkmaleVon(sysId, capIds, tags, kappenTags).forEach((werte, kat) =>
+        werte.forEach(wert => out.push({ kat, wert, label: labelVon.get(`${kat}::${wert}`) || wert })));
+      return out;
+    };
+
     // Interne Felder nicht an Client leaken (capIds, excluded)
-    const publicResults = ranked.map(({ capIds, excluded, ...rest }) => rest);
+    const publicResults = ranked.map(({ capIds, excluded, ...rest }) => ({ ...rest, merkmale: merkmalListe(rest.id, capIds) }));
 
     // 8. Log (fire-and-forget)
     const SEARCH_LOG_TABLE = 'tbljh9GowT7JkJcn4';
