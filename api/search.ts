@@ -529,6 +529,7 @@ interface ProductData {
   excluded: string[];       // SF_Ausgeschlossen (intern für Ranking-Hinweis)
   availableSizes: string[];
   availableMaterials: string[];
+  neck: string[];           // Neck_Norm (z. B. 24/410) — fuers Datenblatt, kein Filter
   capCount: number;
   capIds: string[];
   caps: CapRef[];
@@ -564,6 +565,7 @@ function extractProduct(rec: any): ProductData {
     excluded,
     availableSizes: multiSelectNames(f['Available_Sizes']),
     availableMaterials: multiSelectNames(f['Available_Materials']),
+    neck: multiSelectNames(f['Neck_Norm']),
     capCount: capIds.length,
     capIds,
     caps: [],
