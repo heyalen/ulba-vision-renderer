@@ -1,11 +1,23 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 
+/* ── render.ts v45 — der vereinfachte Renderer ────────────────────────────
+   Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
+   (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
+   was nur dem alten Mehr-Runden-Briefing diente, ist raus:
+   kein Haiku-Call (die Code-Wahl trifft der Nutzer, nicht das LLM),
+   kein dryRun, keine Nudges, kein Board, keine Referenzmarken-Suche,
+   keine Farbpaletten-/Produkt_Regeln-Ladung, keine Szenen.
+   Geblieben: das SF-Faehigkeitsmodell (Produzierbarkeit by construction),
+   die deterministische Prompt-Assembly, das Farb-Rollensystem, der Cache.
+   NEU: das Referenz_Bild des gewaehlten Codes reist als Style-Referenz
+   in image_urls[] mit — Farbe/Finish/Anmutung aus dem echten Marktprodukt,
+   nie dessen Form. */
+
 // ── fetch mit hartem Timeout ──────────────────────────────────────────────
-// Ohne dies wartet ein haengender externer Call (fal.ai / Airtable / Anthropic)
-// bis Vercel die Funktion bei 60s killt -> Client sieht nur "Failed to fetch",
-// das Log zeigt "No outgoing requests" (der Call war nie abgeschlossen). Mit
-// Timeout bricht der einzelne Call ab und der Fehler NENNT den Dienst, der haengt.
+// Ohne dies wartet ein haengender externer Call (fal.ai / Airtable) bis
+// Vercel die Funktion killt -> Client sieht nur "Failed to fetch". Mit
+// Timeout bricht der einzelne Call ab und der Fehler NENNT den Dienst.
 async function fetchT(
   url: string,
   init: RequestInit & { timeoutMs?: number; label?: string } = {}
@@ -30,84 +42,44 @@ const CAP_TABLE = 'tblQvnXPhiKGMoqDp';
 const CACHE_TABLE = 'tblsOp1WKPGIquBKQ';
 const CACHE_IMAGE_FIELD = 'fldFd5qi64yELhKna';
 const CACHE_CAP_IMAGE_FIELD = 'fld1aoVYgaUtHsiWC'; // Cap_Bild (Anhang, symmetrisch zu Bild)
-const PRODUKT_REGELN_TABLE = 'tblrL5tEpvvUh6OEj';
-const FARBPALETTEN_TABLE = 'tblTIeUTyVptGIpKp';
-
-// Positionierungs-Welten. Harter Gate für Palettenwahl. Identisch zu
-// Farbpaletten.Segment / Stil.Segment in Airtable.
-const SEGMENTS = ['Klinisch_Derma', 'GenZ_DTC', 'Quiet_Luxury', 'Clean_Botanical'] as const;
-
-// Ein Modell für alles: Gemini 2.5 Flash Image (Nano Banana) via fal.ai.
-// Kann Einzelbild-Recolor (Fall A) UND Multi-Image-Komposition (B/C/D), $0.039/Bild, kein Tier.
-// Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen. Fliesst in
-// den Cache-Key -> alte Eintraege werden automatisch ungueltig, kein manuelles Loeschen.
-const RENDER_VERSION = 'v44-board';
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
-const FAL_GEMINI_EDIT = 'https://fal.run/fal-ai/gemini-25-flash-image/edit';
+const ATTRIBUT_TABLE = 'tblsWJ0q2sQ7sXwvk';
+const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
+
+// Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
+// Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
+const RENDER_VERSION = 'v45';
+// EIN Modell fuer alles (A/B-Test 04.08.: Seedream hielt Detail + Matt-Haptik
+// besser als Gemini). Multi-Image via image_urls[].
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
-// Modell-Wahl pro Render-Teil (A/B-Test 04.08.: Seedream hielt Detail + Matt-Haptik
-// besser als Gemini). Beide nutzen bei fal dasselbe I/O-Schema -> nur Endpoint tauschen.
-// Zum Zurückschalten einzeln auf FAL_GEMINI_EDIT setzen.
-const FAL_BASE_ENDPOINT = FAL_SEEDREAM_EDIT;
-const FAL_CAP_ENDPOINT = FAL_SEEDREAM_EDIT;
 
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
 
-// Der Cap SCHWEBT über der Base — kein Aufsetzen (Hals-Innengeometrie unbekannt),
-// keine erfundene Passung, echte Proportionen: Cap-Kragen wird auf Base-Hals
-// skaliert (in Wirklichkeit gleicher Durchmesser → Proportion by construction).
-// Base bleibt voll sichtbar. Beide sind "behaltene Pixel" → Gemini färbt nur um.
-// Getestet in Sandbox (Pixel-Asserts: Hals/Kragen-Messung, Schwebe-Lücke, Proportion).
-// Freistellen v1 = Weiß-Schwelle (Katalog-Caps auf Weiß); robuster: birefnet vorschalten.
-
-
-// Cap deterministisch in Palette einfärben: RGB × Palette (weiß→Palette, Schatten
-// bleiben proportional). Form + Highlights + Transparenz bleiben pixel-exakt.
-
-// Ein Gemini-Edit-Aufruf (fal.ai) → Bild-URL.
-async function falEdit(imageUrls: string[], prompt: string, endpoint: string = FAL_GEMINI_EDIT): Promise<string> {
-  const r = await fetchT(endpoint, {
+// Ein fal-Edit-Aufruf → Bild-URL.
+async function falEdit(imageUrls: string[], prompt: string): Promise<string> {
+  const r = await fetchT(FAL_SEEDREAM_EDIT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
     body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: 'auto' }),
     timeoutMs: 120000, label: 'fal.ai edit',
   });
-  if (!r.ok) throw new Error(`fal.ai edit (${endpoint}): ${await r.text()}`);
+  if (!r.ok) throw new Error(`fal.ai edit: ${await r.text()}`);
   const d = await r.json() as { images?: Array<{ url: string }> };
   const url = d.images?.[0]?.url;
   if (!url) throw new Error('Kein Bild von fal zurückgekommen');
   return url;
 }
-// Rueckwaerts-kompatibler Alias (Fall A/B nutzen weiter geminiEdit ohne Endpoint-Arg).
-const geminiEdit = (imageUrls: string[], prompt: string) => falEdit(imageUrls, prompt, FAL_GEMINI_EDIT);
-
-
-// ── Szenen-Presets (handkuratiert, kein Korpus, kein Airtable) ──────
-// Haiku wählt genau EINE ID passend zur Emotion. Nur Backdrop/Licht-Stimmung —
-// nie Form/Material. Ergänzbar ohne Deploy-Risiko.
-const SCENE_PRESETS: { id: string; en: string }[] = [
-  { id: 'studio_soft',      en: 'minimal seamless studio, soft neutral off-white backdrop, gentle gradient' },
-  { id: 'concrete_cool',    en: 'dark micro-cement surface, cool blue-grey side light, engineered technical mood' },
-  { id: 'highkey_bright',   en: 'bright high-key set, clean pastel backdrop, playful and fresh' },
-  { id: 'stone_luxe',       en: 'honed stone or marble surface, warm directional light, quiet-luxury mood' },
-  { id: 'botanical_warm',   en: 'warm linen surface, soft daylight, a hint of out-of-focus greenery' },
-  { id: 'vanity_editorial', en: 'glossy dark vanity surface with a soft reflection, editorial beauty lighting' },
-];
 
 // ── Helpers ─────────────────────────────────────────────────────────
 function queryHash(q: string): string {
   return createHash('md5').update(q.toLowerCase().trim()).digest('hex').slice(0, 12);
 }
 
-function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, segment: string | null = null, codeId: string | null = null, lautNudge: string | null = null, farbortNudge: string | null = null): string {
+function cacheKey(systemId: string, q: string, capId: string | null, tier: Tier, codeId: string | null): string {
   // RENDER_VERSION zuerst: aendert sich der Render-Code, aendert sich jeder Key.
-  // codeId trennt verschiedene Looks auf DEMSELBEN Base+Query (sonst kollidiert
-  // der Cache und liefert allen Looks denselben Render).
-  // lautNudge: der Nudge leitet einen ANDEREN Code ab als forceCodeId (der
-  // Cursor haengt am alten Code). Ohne den Nudge im Key kollidiert der
-  // Vor-Nudge-Render mit dem Nach-Nudge-Render unter demselben forceCodeId.
-  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${segment ? `_${segment}` : ''}${codeId ? `_c${codeId.slice(-6)}` : ''}${lautNudge ? `_n${lautNudge[0]}` : ''}${farbortNudge ? `_f${farbortNudge[0]}` : ''}`;
+  // codeId trennt verschiedene Looks auf DEMSELBEN Base+Query.
+  return `${RENDER_VERSION}_${systemId}_${queryHash(q)}_${capId || 'none'}_${tier}${codeId ? `_c${codeId.slice(-6)}` : ''}`;
 }
 
 function imgUrl(attachmentField: any): string | null {
@@ -154,15 +126,14 @@ async function airtableListAll(table: string): Promise<any[]> {
 // ── Determine Rendering Fall ────────────────────────────────────────
 function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; hasMultipleCaps: boolean } {
   const bildRohBase = imgUrl(sys.fields['Bild_Roh_Base']);
-  // v5: Bild_Harmonisiert ist der bevorzugte Anker (neutrales Studio-Foto),
-  // Bild_System nur Fallback. Fall C/D (Base+Cap-Komposition) bleibt auf Roh_Base.
+  // Bild_Harmonisiert ist der bevorzugte Anker (neutrales Studio-Foto),
+  // Bild_System nur Fallback. Fall C/D (Base+Cap) bleibt auf Roh_Base.
   const bildSystem = imgUrl(sys.fields['Bild_Harmonisiert']) || imgUrl(sys.fields['Bild_System']);
   const caps = sys.fields['Caps'] as any[] | undefined;
   const capCount = caps?.length || 0;
 
   if (!bildRohBase && !bildSystem) throw new Error('Kein Bild vorhanden');
 
-  // Harmonisiertes Ganzfoto ist bevorzugter Anker für Fall A/B; C/D komponieren auf Roh_Base.
   if (bildSystem && capCount === 0) {
     return { fall: 'A', primaryUrl: bildSystem, hasMultipleCaps: false };
   }
@@ -193,21 +164,26 @@ function multiSelectNames(field: any): string[] {
   return field.map((f: any) => typeof f === 'string' ? f : f.name || '').filter(Boolean);
 }
 
-function queryMatchesKeywords(query: string, keywordText: string | undefined): boolean {
-  if (!keywordText) return false;
-  const q = query.toLowerCase();
-  const keywords = keywordText.split(/[,\n]/).map(k => k.trim().toLowerCase()).filter(Boolean);
-  return keywords.some(k => q.includes(k));
+// Feldnamen-Fallback: statt eine Schreibweise zu raten und still null zu
+// liefern, probieren wir die plausiblen Namen durch.
+function fieldAny(f: any, names: string[]): any {
+  for (const n of names) {
+    const v = f[n];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
 }
 
 // ── Gates: Material + Closure ───────────────────────────────────────
+// Der Brief (Suchtext) kann Materialien/Verschluesse nennen, die dieses Teil
+// nicht hat — die landen als harte Verbote im Prompt (Demand-Signal bleibt).
 type LexEntry = { label: string; en: string; tokens: string[] };
 
 const MATERIAL_LEXICON: LexEntry[] = [
   { label: 'Bambus', en: 'bamboo', tokens: ['bambus', 'bamboo'] },
   { label: 'Holz', en: 'wood', tokens: ['holz', 'wood', 'wooden', 'timber', 'oak', 'eiche'] },
   { label: 'Kork', en: 'cork', tokens: ['kork', 'cork'] },
-  { label: 'Papier', en: 'paper or cardboard',tokens: ['papier', 'paper', 'karton', 'cardboard', 'pappe'] },
+  { label: 'Papier', en: 'paper or cardboard', tokens: ['papier', 'paper', 'karton', 'cardboard', 'pappe'] },
   { label: 'Glas', en: 'glass', tokens: ['glas', 'glass'] },
   { label: 'Keramik', en: 'ceramic', tokens: ['keramik', 'ceramic', 'porzellan', 'porcelain'] },
   { label: 'Stein', en: 'stone or marble', tokens: ['stein', 'stone', 'marmor', 'marble', 'terrazzo'] },
@@ -258,25 +234,10 @@ function runGate(brief: string, lexicon: LexEntry[], coverage: string[]): string
   return [...new Set(forbidden)];
 }
 
-/**
- * Hard-Rule wird IMMER im Code angehängt — nie von Haiku geschrieben.
- * FORM / MATERIAL / VERSCHLUSS / forbidden bleiben hart gesperrt (Invariante).
- * Geändert ggü. Blank-Version: statt „completely blank / white background"
- * jetzt Marken-Anmutung erlaubt (aber kein lesbarer Text / kein echtes Logo)
- * + garantierte Render-Tells (Grounding, Licht, Optik).
- */
-/* v32 — Grafikebene. Vorher galt "bare, uninterrupted material" ausnahmslos:
-   damit konnte ein Code, dessen Identitaet die Typo IST (ingredient_block),
-   nie etwas ausdruecken — klinische Codes rendern als nacktes Teil. Jetzt gibt
-   es eine Druckebene, aber OHNE lesbare Woerter: abstrakte Mikro-Typografie,
-   wie in jedem Packaging-Mockup vor der Copy. Das IP-Risiko bleibt gedeckelt
-   (keine echte Marke, kein Logo, kein lesbarer Text). */
-/* v33 — Linienwerk statt "Typografie". Worte wie "typography", "lettering"
-   oder "wordmark" liest das Bildmodell als Auftrag, Text zu SETZEN — und druckt
-   dann die Anweisung selbst aufs Teil (v32-Fehler: "abstract nonlegible
-   typography" stand lesbar auf der Flasche). Beschrieben wird deshalb nur noch
-   die GEOMETRIE: feine waagerechte Striche in Textzeilen-Anmutung. Das rendert
-   zuverlaessig als Etikett-Optik, ohne dass Buchstaben entstehen. */
+/* ── Grafikebene (v33 — Linienwerk statt "Typografie") ─────────────────
+   Worte wie "typography" liest das Bildmodell als Auftrag, Text zu SETZEN.
+   Beschrieben wird nur GEOMETRIE: feine waagerechte Striche in Textzeilen-
+   Anmutung — rendert als Etikett-Optik, ohne dass Buchstaben entstehen. */
 const TYPO_RENDER: Record<string, string> = {
   minimal_klein: 'one small group of 2-3 short, fine horizontal printed lines, centred low on the front face, together occupying under 12% of the surface width',
   ingredient_block: 'two or three stacked groups of fine horizontal printed lines of varying length — the look of a clinical ingredient panel seen from arm\'s length — centred on the lower front face',
@@ -290,23 +251,21 @@ function grafikRegel(typoHaltung: string | null | undefined, akzentHex: string |
   return `Printed flat on the front surface: ${spec}${akzentHex ? `, printed in ${akzentHex}` : ''}. These are PURE GEOMETRIC LINES — plain solid rules with squared ends, evenly spaced. They must NOT form letters, characters, glyphs, numbers or words of any kind. Render them crisp and flat, never embossed, never on a sticker with visible edges.`;
 }
 
-function buildHardRule(fall: RenderFall, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null): string {
-  const closureRule = fall === 'A'
-    ? 'Do not add, remove, replace or restyle the closure — keep the closure exactly as shown in the reference image.'
-    : 'Use ONLY the closure shown in image 2 — do not invent a different closure, do not change its shape or mechanism.';
-
+/**
+ * Hard-Rule wird IMMER im Code angehaengt — deterministisch, nie vom LLM.
+ * FORM / MATERIAL / VERSCHLUSS / forbidden bleiben hart gesperrt (Invariante).
+ * closureRule variiert pro Pfad (Vollbild A/B, Split-Base ohne Cap).
+ */
+function buildHardRule(closureRule: string, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null): string {
   return [
     'CRITICAL RULES — these override everything above.',
-    // ── Invariante (unverändert hart) ──
     'Do not change the shape, silhouette, proportions or size of the packaging.',
     'Do not redesign the bottle: no angular, faceted, architectural, geometric or tapered body, no new silhouette, no different neck — the container outline must stay identical to the reference image.',
     closureRule,
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
-    // ── Markenwelt erlaubt, aber Guardrail ──
     grafikRegel(typoHaltung, akzentHex),
     'STRICTLY FORBIDDEN on the product: any letter, character, digit, word, brand name, logo, trademark or crest. Never print words from these instructions onto the packaging — this text is a description, not label copy.',
-    // ── Garantierte Render-Tells (code-seitig, verlässlich) ──
     'Ground the product on the surface with a soft contact shadow — the product must never float.',
     'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
     '100mm macro, f/8, commercial product photography, photorealistic.',
@@ -314,87 +273,7 @@ function buildHardRule(fall: RenderFall, forbidden: string[], typoHaltung?: stri
   ].filter(Boolean).join(' ');
 }
 
-type Concept = {
-  konzept_name: string;
-  story: string;
-  rationale: string;
-  produzierbar: any | null;
-  szene_id: string;
-  // v5.1 Board-Felder (Frontend komponiert Label/Chips/Radar über den Render):
-  label?: { wortmarke: string; kategorie: string; ist_platzhalter: boolean };
-  palette?: { name: string; hex: string[]; pantone: string[] };
-  radar?: Record<string, number>;
-  zielprofil?: string[];
-  segment?: string | null;
-  // Design_Code-Provenienz + deterministische Render-Werte (Base & Cap
-  // zitieren dieselbe Quelle -> Kohaerenz per Konstruktion).
-  design_code?: {
-    id: string; name: string; umleitung: string | null; brand?: string | null; produkt?: string | null; stufe?: number; verlust?: string[];
-    farbort?: string; can_koerper?: boolean; can_liquid?: boolean;
-    laut?: number | null; register?: string | null;
-    can_quieter?: boolean; can_louder?: boolean;
-    beschreibung?: string | null; wirkstoff_welt?: string[]; zielgruppe?: string[];
-  };
-  render?: { bodyLineEn: string; capHex: string | null; capFinishEn: string; akzentEn: string };
-  // Die Herleitungs-Leiter: pro Brief-Signal eine Zeile Bedeutung -> Form -> weil.
-  // Ein Profi-Brief waehlt nie, er leitet her — diese Kette IST die Herleitung.
-  kette?: Array<{ typ: string; bedeutung: string; form: string; weil: string }>;
-  do_not?: string[];
-  karte?: {
-    register: string | null; laut: number | null;
-    gewaehlt: string; kompass: string | null; anti: string | null; verworfen: string | null;
-    welten: Array<{ register: string; anzahl: number; codes: Array<{ id: string; name: string; brand: string; bild: string | null; laut: number | null }> }>;
-  };
-  // Die ernsthaft geprüfte und begruendet verworfene Alternative ("Winning
-  // Concept" heisst: es gab mehrere). Billigster Agentur-Beweis im System.
-  verworfen?: { name: string; grund: string } | null;
-  farbsystem?: FarbSystem;
-};
-
-// ── Prompt Assembly v5 — Constrained Selection ──────────────────────
-// Haiku schreibt KEINEN visuellen Prompt mehr. Es wählt nur aus endlichen
-// Listen (Palette/Finish/Akzent/Szene aus SF_-Feldern, Farbpaletten,
-// Design_Regeln) und liefert das Konzept (Name/Story/Herleitung).
-// Der Seedream-Prompt wird zu 100 % deterministisch im Code assembliert:
-// Preserve-first + Attribut-Ground-Truth (Render_Constraint) + echtes
-// Material + Hex/Pantone der gewählten Palette + Label in Quotes.
-// Halluzinationsfläche für Form/Material: null — der Pfad existiert nicht.
-
-const ATTRIBUT_TABLE = 'tblsWJ0q2sQ7sXwvk';
-
-// Bekannte reale Marken — dürfen NIE als Wortmarke aufs Label (Code-Guardrail,
-// zusätzlich zur Haiku-Instruktion).
-const REAL_BRAND_BLOCK = [
-  'porsche', 'audi', 'bmw', 'mercedes', 'ferrari', 'lamborghini', 'tesla',
-  'chanel', 'dior', 'gucci', 'prada', 'hermes', 'ysl', 'armani',
-  'nivea', 'loreal', "l'oreal", 'garnier', 'dove', 'vichy', 'kerastase',
-  'apple', 'nike', 'adidas', 'rolex', 'gillette',
-];
-const FINISH_DE: Record<string, string> = {
-  gloss: 'Glanz-Finish',
-  matt: 'Matt-Finish',
-  soft_touch: 'Soft-Touch-Matt',
-};
-const AKZENT_EN: Record<string, string> = {
-  none: '',
-  hot_foil_detail: 'one single small hot-foil accent detail near the wordmark',
-  silkscreen_graphic: 'a clean minimal silkscreen-printed graphic element',
-};
-const AKZENT_DE: Record<string, string> = {
-  none: '',
-  hot_foil_detail: 'Hot-Foil-Akzent',
-  silkscreen_graphic: 'Siebdruck-Grafik',
-};
-
-// ── Design_Code (Zielarchitektur 04.08.) ────────────────────────────
-// Kohaerenz entsteht in der ENTSCHEIDUNG, nicht im Bild: Body-Farbe,
-// Cap-Farbe, Akzent kommen aus EINEM Design_Code-Record; beide Render-
-// Prompts (Base + Cap) zitieren dieselben Werte -> Relation per
-// Konstruktion. Haiku waehlt nur den Code (constrained, aus Liste) —
-// alle Werte kommen deterministisch aus dem Record, nie frei vom LLM.
-// Selektion v15: Segment-Gate -> SF-Kompatibilitaets-Gate -> Haiku
-// waehlt EINEN Code. Vektor-Distanz (Emotion_Profil) folgt, sobald
-// Codes ihre 14-Dim-Profile haben — gleiche Schnittstelle.
+// ── Enum-Uebersetzungen (deterministisch) ───────────────────────────
 const CAP_FINISH_EN: Record<string, string> = {
   matt: 'a clean matt finish',
   glossy: 'a clean glossy finish',
@@ -407,8 +286,18 @@ const BODY_FINISH_EN: Record<string, string> = {
   frosted: 'a satin frosted finish',
   soft_touch: 'a soft-touch matte coating',
 };
-// Akzent_Cue -> genau EIN Premium-Cue (Konfliktregel Typ A). Hex aus
-// Akzent_Hex des Codes, Default warmes Gold.
+const BODY_FINISH_DE: Record<string, string> = {
+  matt: 'Matt-Finish',
+  glossy: 'Glanz-Finish',
+  frosted: 'Satiniert (Frosted)',
+  soft_touch: 'Soft-Touch-Matt',
+};
+const AKZENT_CUE_DE: Record<string, string> = {
+  metallic_band: 'Metallband',
+  gold_ring: 'Goldring',
+  praegung: 'Prägung',
+};
+// Akzent_Cue -> genau EIN Premium-Cue. Hex aus Akzent_Hex, Default warmes Gold.
 function akzentCueEn(cue: string, akzentHex: string | null): string {
   const hex = akzentHex || '#C9A24B';
   switch ((cue || '').toLowerCase()) {
@@ -418,87 +307,13 @@ function akzentCueEn(cue: string, akzentHex: string | null): string {
     default: return '';
   }
 }
-// ── Farb-Rollensystem ───────────────────────────────────────────────
-// Drei Hex-Felder ohne Regel sind keine Farbwelt, sondern drei Felder.
-// Rollen statt Positionen:
-//   Traeger      (Body_Hex,   ~70 %) traegt die WELT — wo du hingehoerst.
-//   Gegenspieler (Cap_Hex,    ~25 %) gibt die zweite Lesart. Fehlt er,
-//                                    liest sich alles wie Lagerware.
-//   Signal       (Akzent_Hex, <=10 %) traegt das ARGUMENT (Wirkstoff, Premium-Cue).
-// Harte Regeln:
-//   1. Jede Farbe braucht einen physischen Traeger -> Akzent_Hex ohne
-//      Akzent_Cue ist UNGUELTIG (nicht unschoen). Genau der Zustand, der
-//      "Silver Clinical" stillgelegt hatte.
-//   2. Mono-Verbot MIT ZAHL: Traeger vs. Gegenspieler brauchen dE >= 25
-//      ODER dL >= 20. Ohne Zahl prueft es niemand.
-//   3. Nur EINE Rolle darf laut sein (hoechste Chroma gewinnt) — der Rest
-//      geht ins Gedeckte. Die einzige Regel, die Bonbon-Chaos verhindert.
-//   4. Drei Farben + Materialeigenfarbe. Die vierte ist Rauschen.
-//   5. Sitzt der Traeger in der Fluessigkeit, wird die Huelle
-//      Materialeigenfarbe — dann traegt der Cap MEHR Last, nicht weniger.
-// Wirkstoff kommt aus dem BRIEF des Nutzers. Das Tag am Design_Code ist
-// HERKUNFT (aus welchem Produkt die Farbwelt eingefroren wurde), nicht Aussage
-// ueber dieses Produkt. Wer das verwechselt, schreibt "Botanisch Natur" auf ein
-// Vitamin-C-Serum. Spiegelt WIRKSTOFF_ERKENNUNG im Frontend.
-/* ── Wirkstoff-Referenz (Typ 1: ABSOLUT) ───────────────────────────────
-   Quelle: Airtable-Tabelle `Wirkstoffe` — Universalien pro KLASSE, von Alen
-   gepflegt. Nicht zu verwechseln mit Design_Code.Wirkstoff_Welt: das ist die
-   HERKUNFT eines Codes, hier steht die BEDEUTUNG des Wirkstoffs.
-   Modul-Cache 5 Min (wie ladeCodesLeicht) — kostet damit keine Ladezeit pro
-   Zug und wirkt trotzdem kurz nach dem Speichern in Airtable. */
-const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
-type WirkstoffRef = {
-  name: string; keys: string[];
-  emotional: string; farbe: string;
-  temp: 'warm' | 'kuehl' | 'neutral';
-  doNot: string[];
-};
-let wirkstoffCache: { t: number; data: WirkstoffRef[] } | null = null;
-async function ladeWirkstoffe(): Promise<WirkstoffRef[]> {
-  if (wirkstoffCache && Date.now() - wirkstoffCache.t < 300000) return wirkstoffCache.data;
-  const recs = await airtableListAll(WIRKSTOFF_TABLE);
-  const teile = (v: any) => String(v || '').split(',').map((x: string) => x.trim()).filter(Boolean);
-  const data: WirkstoffRef[] = recs
-    .filter((r: any) => (selectName(r.fields['Status']) || 'aktiv').toLowerCase() === 'aktiv')
-    .map((r: any) => ({
-      name: String(r.fields['Name'] || '').trim(),
-      keys: teile(r.fields['Keywords']).map((k: string) => k.toLowerCase()),
-      emotional: String(r.fields['Emotional'] || '').trim(),
-      farbe: String(r.fields['Farb_Assoziation'] || '').trim(),
-      temp: ((selectName(r.fields['Temperatur']) || 'neutral').toLowerCase() as 'warm' | 'kuehl' | 'neutral'),
-      doNot: teile(r.fields['Do_Not']),
-    }))
-    .filter((w: WirkstoffRef) => !!w.name && w.keys.length > 0 && !!w.emotional);
-  // Laengstes Keyword zuerst pruefen: "vitamin c" schlaegt "vitamin a",
-  // wenn ein Brief beides streift.
-  data.sort((a, b) => Math.max(...b.keys.map(k => k.length)) - Math.max(...a.keys.map(k => k.length)));
-  wirkstoffCache = { t: Date.now(), data };
-  return data;
-}
-function wirkstoffTreffer(text: string, liste: WirkstoffRef[]): WirkstoffRef | null {
-  const t = (text || '').toLowerCase();
-  for (const w of liste) if (w.keys.some(k => t.includes(k))) return w;
-  return null;
-}
-// Interne Feldwerte duerfen NIE im Kundentext landen. Haiku sieht sie in den
-// Kandidatenzeilen und schreibt sie sonst mit ("ingredient_block Typo").
-const FELDWORT_DE: Record<string, string> = {
-  ingredient_block: 'Wirkstoff-Panel', bold_wordmark: 'kräftige Wortmarke',
-  minimal_klein: 'zurückhaltende Typo', ohne: 'ohne Druck',
-  metallic_band: 'Metallband', gold_ring: 'Goldring', praegung: 'Prägung',
-  opak_recolor: 'eingefärbter Körper', klar_liquid_farbe: 'Farbe in der Flüssigkeit',
-  klar: 'klar', frosted: 'satiniert', koerper: 'Körper', liquid: 'Flüssigkeit',
-};
-const FELDWORT_RE: Array<[RegExp, string]> = Object.entries(FELDWORT_DE).map(
-  ([k, v]) => [new RegExp(k.split('_').join('[-_ ]?'), 'gi'), v] as [RegExp, string]
-);
-function entfeldere(t: string): string {
-  let out = t;
-  // Haiku schreibt die Feldwerte auch grossgeschrieben und mit Bindestrich
-  // ("Ingredient-Block"). Exakter Substring-Vergleich griff daneben.
-  for (const [re, v] of FELDWORT_RE) out = out.replace(re, v);
-  return out.replace(/\b[a-zA-Z]+_[a-zA-Z_]+\b/g, m => m.replace(/_/g, ' ')).trim();
-}
+
+// ── Farb-Mathematik + Rollensystem ──────────────────────────────────
+//   Traeger      (Body_Hex,   ~70 %) traegt die WELT.
+//   Gegenspieler (Cap_Hex,    ~25 %) gibt die zweite Lesart.
+//   Signal       (Akzent_Hex, <=10 %) traegt das ARGUMENT.
+// Regeln: Signal braucht physischen Traeger (Cue); Mono-Verbot mit Zahl
+// (dE>=25 oder dL>=20); nur EINE Rolle laut; max. drei Farben.
 function hexRgb(h: string | null | undefined): [number, number, number] | null {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim());
   if (!m) return null;
@@ -510,7 +325,6 @@ function hexLab(h: string | null | undefined): [number, number, number] | null {
   if (!rgb) return null;
   const lin = rgb.map(v => { const c = v / 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); });
   const [r, g, b] = lin;
-  // sRGB -> XYZ (D65) -> Lab
   let x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047;
   let y = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 1.0;
   let z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883;
@@ -542,14 +356,12 @@ function farbSystem(
   if (traegerHex && hexRgb(traegerHex)) rollen.push({ rolle: 'Träger', hex: traegerHex.toUpperCase(), ort: traegerOrt });
   if (capHex && hexRgb(capHex)) rollen.push({ rolle: 'Gegenspieler', hex: capHex.toUpperCase(), ort: 'Verschluss' });
   else if (capVorhanden) rollen.push({ rolle: 'Gegenspieler', hex: '', ort: 'Verschluss — Materialeigenfarbe' });
-  // Regel 1: Signal nur MIT Traeger (Cue). Hex ohne Cue ist tote Information.
   const cueEcht = !!akzentCue && akzentCue !== 'kein' && akzentCue !== 'none';
   if (akzentHex && hexRgb(akzentHex) && cueEcht) {
     rollen.push({ rolle: 'Signal', hex: akzentHex.toUpperCase(), ort: 'Akzent', cue: akzentCue });
   } else if (akzentHex && hexRgb(akzentHex) && !cueEcht) {
     warnungen.push('Akzentfarbe ohne Träger (kein Akzent_Cue) — die Farbe hat keine Fläche und fällt lautlos weg.');
   }
-  // Regel 2: Mono-Verbot mit Zahl.
   const dE = deltaE(traegerHex, capHex);
   const lT = hexLab(traegerHex), lC = hexLab(capHex);
   const dL = (lT && lC) ? Math.abs(lT[0] - lC[0]) : null;
@@ -560,32 +372,56 @@ function farbSystem(
   if (dES != null && dES < 12 && rollen.some(r => r.rolle === 'Signal')) {
     warnungen.push('Gegenspieler und Signal sind fast dieselbe Farbe — das Signal verschwindet im Verschluss.');
   }
-  // Regel 3: nur eine Rolle laut. Hoechste Chroma gewinnt.
   const kand = rollen.filter(r => r.hex).map(r => ({ r, c: chromaOf(r.hex) }));
   const laut = kand.length ? kand.reduce((a, b) => b.c > a.c ? b : a).r : null;
   const lautName = laut && chromaOf(laut.hex) > 12 ? laut.rolle : null;
   if (kand.filter(k => k.c > 35).length > 1) {
     warnungen.push('Mehr als eine Rolle ist voll gesättigt — zwei laute Farben nebeneinander lesen sich als Zufall, nicht als Entscheidung.');
   }
-  // Regel 4: vierte Farbe ist Rauschen (Materialeigenfarbe zaehlt nicht mit).
   if (rollen.filter(r => r.hex).length > 3) warnungen.push('Mehr als drei Farben — die vierte ist Rauschen.');
-  // Harte Render-Regel: Hierarchie in den Prompt, nicht nur in die Anzeige.
   const regelEn = lautName
     ? `Colour hierarchy (hard): only the ${lautName === 'Träger' ? (traegerOrt === 'Flüssigkeit' ? 'liquid' : 'body') : lautName === 'Gegenspieler' ? 'closure' : 'accent'} carries full saturation; every other coloured element stays visibly muted and desaturated so it supports that one instead of competing with it. Never more than one loud colour.`
     : '';
   return { rollen, laut: lautName, warnungen, regelEn };
 }
 
+// ── Wirkstoff-Referenz — NUR fuer den {codes:true}-Branch (Design-Wand) ─
+// Quelle: Airtable `Wirkstoffe`. Dient dem passend-Scoring der Wand; aus
+// dem Render-Pfad ist die Tabelle raus (forceCodeId traegt die Entscheidung).
+type WirkstoffRef = { name: string; keys: string[] };
+let wirkstoffCache: { t: number; data: WirkstoffRef[] } | null = null;
+async function ladeWirkstoffe(): Promise<WirkstoffRef[]> {
+  if (wirkstoffCache && Date.now() - wirkstoffCache.t < 300000) return wirkstoffCache.data;
+  const recs = await airtableListAll(WIRKSTOFF_TABLE);
+  const teile = (v: any) => String(v || '').split(',').map((x: string) => x.trim()).filter(Boolean);
+  const data: WirkstoffRef[] = recs
+    .filter((r: any) => (selectName(r.fields['Status']) || 'aktiv').toLowerCase() === 'aktiv')
+    .map((r: any) => ({
+      name: String(r.fields['Name'] || '').trim(),
+      keys: teile(r.fields['Keywords']).map((k: string) => k.toLowerCase()),
+    }))
+    .filter((w: WirkstoffRef) => !!w.name && w.keys.length > 0);
+  // Laengstes Keyword zuerst: "vitamin c" schlaegt "vitamin a".
+  data.sort((a, b) => Math.max(...b.keys.map(k => k.length)) - Math.max(...a.keys.map(k => k.length)));
+  wirkstoffCache = { t: Date.now(), data };
+  return data;
+}
+function wirkstoffTreffer(text: string, liste: WirkstoffRef[]): WirkstoffRef | null {
+  const t = (text || '').toLowerCase();
+  for (const w of liste) if (w.keys.some(k => t.includes(k))) return w;
+  return null;
+}
+
+// ── Design_Code ─────────────────────────────────────────────────────
+// Kohaerenz entsteht in der ENTSCHEIDUNG: Body-Farbe, Cap-Farbe, Akzent
+// kommen aus EINEM Design_Code-Record; Base- und Cap-Prompt zitieren
+// dieselben Werte -> Relation per Konstruktion. Die Wahl trifft der Nutzer
+// (forceCodeId) — hier wird nur geprueft, ob der Code auf DIESEM Teil
+// produzierbar ist (SF-Faehigkeitsmodell + Typ-B-Umleitung).
 type DesignCodeRec = {
   id: string;
   name: string;
-  segments: string[];
-  // v19 hat register + tempLaut in Extraktion und Nudge-Logik ergaenzt, aber
-  // NICHT in diesem Type-Alias — Vercel transpiliert api/*.ts ohne Typcheck,
-  // deshalb lief es trotzdem. Ein echter `tsc`/`next build` waere gebrochen.
-  register: string | null;
-  tempLaut: number | null;
-  bild: string | null;   // Referenz_Bild — das echte Marktprodukt, aus dem der Code stammt
+  bild: string | null;   // Referenz_Bild — das echte Marktprodukt (Style-Referenz)
   bodyBehandlung: string;
   farbort: string;
   bodyHex: string | null;
@@ -594,88 +430,77 @@ type DesignCodeRec = {
   finishBody: string;
   akzentCue: string;
   akzentHex: string | null;
-  ausdrucksweg: string;
   typoHaltung: string;
-  szeneId: string;
   anforderungen: string[];
-  // v34 (Punkt 11) — Kern vs. Ausspraegung: ein Code ist kein Ja/Nein. Stufe 3
-  // = volle Signatur, 2 = ein Traeger umgeleitet, 1 = Signaturtraeger faellt
-  // weg, Kern lebt auf Cap/Akzent/Druck weiter. 'verlust' benennt, WAS fehlt —
-  // damit die Herleitung es sagen kann statt es zu verschweigen.
+  // Kern vs. Ausspraegung: 3 = volle Signatur, 2 = ein Traeger umgeleitet,
+  // 1 = Signaturtraeger faellt weg. 'verlust' benennt, WAS fehlt.
   stufe: 3 | 2 | 1;
   verlust: string[];
   compatible: boolean;
   umleitung: string | null;
-  brand: string;   // objektiver Label-Fakt vom Referenzbild (Tagger)
-  produkt: string; // gesetzt, wenn Konfliktregel Typ B umgeleitet hat
-  // v27 — Agentursprache: die kuratierte Prosa des Codes plus die beiden
-  // inhaltlichen Achsen. Gehen als Behauptungs-Material ins Frontend; der
-  // Render benutzt sie NICHT (keine Prompt-Aenderung, kein Bild-Effekt).
+  brand: string;
+  produkt: string;
   wirkungBeschreibung: string | null;
-  wirkstoffWelt: string[];
-  zielgruppe: string[];
+  doNot: string[]; // Do_Not des Codes — Geschmacks-Verbote (deutsch, kuratiert)
 };
 
-// Feldnamen-Fallback: die drei neuen Felder werden hier zum ersten Mal
-// gelesen. Statt eine Schreibweise zu raten und still null zu liefern,
-// probieren wir die plausiblen Namen durch — ein falsch geratener Name
-// waere ein lautloser Ausfall, genau wie das leere Status-Feld.
-function fieldAny(f: any, names: string[]): any {
-  for (const n of names) {
-    const v = f[n];
-    if (v !== undefined && v !== null && v !== '') return v;
+type Concept = {
+  konzept_name: string;
+  story: string;
+  rationale: string;
+  produzierbar: any | null;
+  szene_id: string;
+  palette?: { name: string; hex: string[]; pantone: string[] };
+  design_code?: {
+    id: string; name: string; umleitung: string | null;
+    brand?: string | null; produkt?: string | null; stufe?: number; verlust?: string[]; farbort?: string;
+    beschreibung?: string | null;
+  };
+  do_not?: string[];
+  farbsystem?: FarbSystem;
+  render?: { bodyLineEn: string; capHex: string | null; capFinishEn: string; akzentEn: string };
+};
+
+// Geschmacks-Verbote fuer den Bild-Prompt: bekannte Fallen als kurze
+// englische Negativbegriffe; was kein Muster trifft, reist ROH (deutsch)
+// mit, statt lautlos verworfen zu werden.
+const DO_NOT_EN: [RegExp, string][] = [
+  [/orange/i, 'any literal orange fruit, citrus slice or fruit imagery'],
+  [/tropfen|frucht|obst/i, 'droplet, splash or fruit decoration'],
+  [/bonbon|candy|s(ü|ue)ss/i, 'candy-bright saturated pastel'],
+  [/blatt|botanic|pflanz|vektor/i, 'stock vector leaf or botanical clip-art'],
+  [/glitter|glanzeffekt|sparkle/i, 'glitter or sparkle effects'],
+  [/gradient|verlauf/i, 'multi-colour gradients on the body'],
+  [/transparen|durchsichtig|klarglas/i, ''], // Transparenz-Verbote nie ins Bild (klare Flasche bleibt sichtbar)
+];
+function doNotZeile(doNot: string[]): string {
+  const out: string[] = [];
+  for (const d of doNot) {
+    let matched = false;
+    for (const [re, en] of DO_NOT_EN) {
+      if (re.test(d)) { matched = true; if (en) out.push(en); }
+    }
+    if (!matched && d.trim().length > 3) out.push(d.trim());
   }
-  return null;
+  const uniq = [...new Set(out)];
+  return uniq.length ? `Avoid entirely: ${uniq.join('; ')}.` : '';
 }
 
-function parseJsonArray(raw: any): string[] {
-  if (!raw) return [];
-  try {
-    const arr = JSON.parse(String(raw));
-    if (Array.isArray(arr)) return arr.map(String).filter(Boolean);
-  } catch { /* Fallback: Hex/Pantone per Regex */ }
-  const m = String(raw).match(/#[0-9a-fA-F]{6}|[0-9]{2,4}\s?C?\b/g);
-  return m ? m.slice(0, 6) : [];
-}
-
-function sanitizeBrandname(name: any, brief: string): string {
-  const n = String(name || '').trim().replace(/[^A-Za-zÀ-ž0-9 &'-]/g, '').slice(0, 14);
-  if (n.length < 2) return '';
-  const low = n.toLowerCase();
-  if (REAL_BRAND_BLOCK.some(b => low.includes(b))) return '';
-  return n;
-}
-
+// ── Prompt Assembly — 100 % deterministisch ─────────────────────────
+// Kein LLM: alle Werte kommen aus dem Design_Code-Record + den SF_-Feldern
+// des Teils. Halluzinationsflaeche fuer Form/Material: null.
 async function assemblePrompt(
   brief: string,
   fall: RenderFall,
+  split: boolean,
   sysFields: any,
   capFields: any | null,
-  reqSegment: string | null = null,
-  forceCodeId: string | null = null,
-  lautNudge: string | null = null,
-  farbortNudge: 'koerper' | 'liquid' | null = null,
-  // v14.3 hielt die Packmittel-Suche bewusst aus dem Design-Brief. Richtig fuer
-  // die Gespraechs-Zeilen — aber der WIRKSTOFF steckt nur dort. Er reist hier
-  // getrennt mit und wird ausschliesslich fuer die Wirkstoff-Zeile gelesen,
-  // nie als Brief-Text interpretiert.
-  sucheQuery: string | null = null,
-  // Board-Tipps auf echte Produkte. Sie ersetzen nicht die Ableitung — sie
-  // praezisieren den Anker, auf dem sie aufsetzt.
-  boardLikes: string[] = [],
-  boardDislikes: string[] = []
-): Promise<{ prompt: string; forbidden: string[]; concept: Concept }> {
-  const [produktRegeln, farbpalettenAll, designCodesAll, wirkstoffListe] = await Promise.all([
-    airtableListAll(PRODUKT_REGELN_TABLE),
-    airtableListAll(FARBPALETTEN_TABLE),
-    airtableListAll(DESIGN_CODE_TABLE),
-    ladeWirkstoffe().catch(() => [] as WirkstoffRef[]),
-  ]);
-  // Ein Treffer pro Zug: Brief schlaegt Suchtext (der Nutzer ist praeziser als
-  // seine Suche), Suchtext faengt den Fall "Wirkstoff nur im Suchfeld genannt".
-  const wsRef = wirkstoffTreffer(brief, wirkstoffListe) || wirkstoffTreffer(sucheQuery || '', wirkstoffListe);
-  // v5: Active-Filter (Bugfix — inaktive Paletten konnten bisher matchen).
-  const farbpaletten = farbpalettenAll.filter(p => !!p.fields['Active']);
+  forceCodeId: string
+): Promise<{
+  fullPrompt: string; basePrompt: string; capPrompt: string | null;
+  refBild: string | null; forbidden: string[]; concept: Concept;
+}> {
+  const designCodesAll = await airtableListAll(DESIGN_CODE_TABLE);
 
   // ── Attribut-Ground-Truth (Render_Constraint) — positive Fixierung ─
   const attrIds: string[] = Array.isArray(sysFields['Attribute']) ? sysFields['Attribute'] : [];
@@ -690,37 +515,18 @@ async function assemblePrompt(
     } catch { attrConstraints = []; }
   }
 
-  const matchedProdukt = produktRegeln.filter(r => queryMatchesKeywords(brief, r.fields['Keywords']));
-
-  // ── Design_Code: Aktiv-Filter + SF-Kompatibilitaets-Gate + Konfliktregel ─
-  // Anforderungen (fordernde Hard Facts) treffen auf SF_/Material des Systems.
-  // Wand gewinnt IMMER — aber Identitaet wird UMGELEITET, nie gestrichen:
-  //   Typ B (Methoden-Konflikt): Body_Behandlung braucht Transparenz, Koerper
-  //     kann nicht -> Ausdruck laeuft ueber vollfarbe_opak (Body_Hex opak).
-  //   Typ A: genau EIN Akzent_Cue — bereits per Schema garantiert.
-  // Cap-Anforderungen (cap_weiss/metallcap) sind per Recolor immer erfuellbar,
-  // solange ein Cap existiert (Prompt B faerbt ihn deterministisch).
+  // ── SF-Faehigkeitsmodell (bestätigt / unbekannt / ausgeschlossen) ──
+  // Quelle: belegpflichtig getaggte SF_-Felder. Ausnahme: Kunststoff-
+  // Einfaerbung ist industriell universell (Masterbatch) -> ohne Beleg ok.
   const matGate = multiSelectNames(sysFields['Material']).join(' ').toLowerCase();
   const isGlassBody = /glas|glass/.test(matGate);
   const isPlasticGate = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(matGate);
   const hasCap = !!capFields || fall !== 'A';
-
-  // ── Dreistufiges Fähigkeits-Modell (05.08.) ──────────────────────────
-  // производ-truth: eine Fähigkeit ist bestätigt / unbekannt / ausgeschlossen.
-  // Quelle sind die belegpflichtig getaggten SF_-Felder (SF-Beleg-Pass ueber
-  // Screenshot_Rohtext) — NICHT mehr aus dem Material geraten. Ausnahme:
-  // Kunststoff-Einfaerbung ist industriell universell (Masterbatch) -> gilt
-  // ohne Textbeleg als bestaetigt. Glas-Einfaerbung/-Lackierung/-Mattierung
-  // dagegen ist lieferantenspezifisch: ohne Beleg = unbekannt (nie geraten).
   const confirmed = new Set(multiSelectNames(sysFields['SF_Bestätigt']).map(s => s.toLowerCase()));
   const excluded  = new Set(multiSelectNames(sysFields['SF_Ausgeschlossen']).map(s => s.toLowerCase()));
   type CapState = 'ok' | 'unknown' | 'excluded';
-  // Fasst Einfaerben + Lackieren zu "Koerper faerbbar" zusammen (zwei Wege,
-  // ein Ziel: farbiger Koerper). Plastik = immer ok.
   const koerperFarbe = (): CapState => {
-    // Reihenfolge ist die Aussage: ein explizites "geht nicht" des Lieferanten
-    // schlaegt jede Material-Vermutung. Vorher stand isPlasticGate ZUERST und
-    // hat SF_Ausgeschlossen bei Plastikteilen lautlos ueberschrieben.
+    // Ein explizites "geht nicht" des Lieferanten schlaegt jede Material-Vermutung.
     if (excluded.has('einfaerbbar') && excluded.has('lackierbar')) return 'excluded';
     if (confirmed.has('einfaerbbar') || confirmed.has('lackierbar')) return 'ok';
     if (isPlasticGate) return 'ok';
@@ -743,6 +549,7 @@ async function assemblePrompt(
     }
   };
   const TRANSPARENT_BEHANDLUNG = ['klar', 'frosted', 'getönt', 'getoent', 'klar_liquid_farbe'];
+  const teileListe = (v: any) => String(v || '').split(/[,\n;]/).map((x: string) => x.trim()).filter(Boolean);
   const designCodes: DesignCodeRec[] = designCodesAll
     .filter(r => selectName(r.fields['Status']) === 'Aktiv')
     .map(r => {
@@ -753,66 +560,46 @@ async function assemblePrompt(
       let farbort = (selectName(f['Farbort']) || 'koerper').toLowerCase();
       let umleitung: string | null = null;
 
-      // AUSGESCHLOSSEN gewinnt immer: der Lieferant sagt explizit "geht nicht"
-      // -> Code fuer dieses System nicht waehlbar. Keine Umleitung.
+      // AUSGESCHLOSSEN gewinnt immer: Lieferant sagt explizit "geht nicht".
       const hardExcluded = states.filter(x => x.s === 'excluded').map(x => x.a);
 
-      // UNBEKANNT bei Koerper-Farbe: производ-safe umleiten statt behaupten.
-      // WICHTIG: Trigger ist, was der Code TUT (Koerper toenen/faerben), nicht
-      // ob eine 'braucht_einfaerbbar'-Anforderung gesetzt ist — ein getoenter
-      // Glaskoerper braucht Koerper-Faerbbarkeit unabhaengig von der Anford.-Liste.
-      const unknown = states.filter(x => x.s === 'unknown').map(x => x.a);
+      // UNBEKANNT bei Koerper-Farbe: produzier-safe umleiten statt behaupten.
       const wantsBodyColor = ['getönt', 'getoent', 'opak_recolor'].includes(bodyBehandlung)
         && farbort === 'koerper';
       const bodyColorState = koerperFarbe();
       if (wantsBodyColor && bodyColorState === 'unknown') {
-        // Farbe in die FLUESSIGKEIT: klares Gebinde kann jeder liefern, die
-        // Fluessigkeitsfarbe ist die Formel der Marke. Grün überlebt, ehrlich.
+        // Farbe in die FLUESSIGKEIT: klares Gebinde kann jeder liefern.
         bodyBehandlung = 'klar_liquid_farbe';
         farbort = 'liquid';
         umleitung = `Typ B: Koerper-Faerbbarkeit unbestaetigt -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar (Machbarkeit per Muster bestaetigen)`;
       } else if (wantsBodyColor && bodyColorState === 'excluded') {
-        // Lieferant sagt explizit "nicht faerbbar" -> auch Fluessigkeits-Umleitung
-        // ist ehrlich (klares Gebinde), aber als harte Info kennzeichnen.
         bodyBehandlung = 'klar_liquid_farbe';
         farbort = 'liquid';
         umleitung = `Typ B: Koerper NICHT faerbbar (Lieferant) -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar`;
       }
-      // ── v34 — Ausspraegungs-Kaskade statt Rauswurf ────────────────────
-      // Fehlt ein Traeger, stirbt nicht der Code, sondern eine Stufe seines
-      // Ausdrucks. Abstufung VERLANGT WENIGER vom Teil als das Original —
-      // sie kann also nie etwas Unproduzierbares versprechen.
+      // ── Ausspraegungs-Kaskade statt Rauswurf ──────────────────────
       let stufe: 3 | 2 | 1 = umleitung ? 2 : 3;
       const verlust: string[] = [];
       if (umleitung) verlust.push('Körperfarbe — die Farbe sitzt jetzt in der Flüssigkeit, das Gebinde bleibt klar');
 
-      // Mattierung nicht belegt -> Frost faellt, Rest bleibt (vorher: Rauswurf).
       if (bodyBehandlung === 'frosted' && checkAnforderung('braucht_frostbar') !== 'ok') {
         bodyBehandlung = isGlassBody ? 'klar' : 'opak_recolor';
         stufe = 1;
         verlust.push('mattierte Oberfläche — dieses Teil ist nicht belegt mattierbar, der Körper bleibt glatt');
       }
-      // Code lebt von Durchsicht, Teil ist kein Glas -> Transparenz faellt,
-      // Farbe/Akzent/Druck tragen die Haltung weiter (vorher: Rauswurf).
       if (anford.includes('braucht_klarglas') && !isGlassBody) {
         if (TRANSPARENT_BEHANDLUNG.includes(bodyBehandlung)) { bodyBehandlung = 'opak_recolor'; farbort = 'koerper'; }
         stufe = 1;
         verlust.push('durchsichtiger Körper — dieses Teil ist nicht aus Glas, die Haltung läuft über Farbe, Verschluss und Druck');
       }
-      // Ohne Cap kann eine Cap-Anforderung durch nichts ersetzt werden — das
-      // ist der einzige verbliebene echte Ausschlussgrund.
-      const blockingUnknown: string[] = [];
-      // Die Umleitung LOEST Koerper-Farb-Anforderungen (Farbe sitzt jetzt in
-      // der Fluessigkeit, das klare Gebinde kann jeder liefern). Sie duerfen
-      // den Code nicht mehr blockieren — sonst ist die Umleitung tote Logik.
       // Was die Kaskade aufgeloest hat, darf nicht mehr sperren.
       const geloest = new Set<string>(umleitung ? ['braucht_einfaerbbar', 'braucht_opak'] : []);
       if (stufe === 1) { geloest.add('braucht_klarglas'); geloest.add('braucht_frostbar'); geloest.add('braucht_einfaerbbar'); geloest.add('braucht_opak'); }
-      const remaining = [...hardExcluded, ...blockingUnknown].filter(a => !geloest.has(a));
+      const remaining = hardExcluded.filter(a => !geloest.has(a));
       return {
         id: r.id,
         name: String(f['Name'] || ''),
-        segments: multiSelectNames(f['Segment']),
+        bild: (() => { const a = f['Referenz_Bild']; return Array.isArray(a) && a[0] ? (a[0].thumbnails?.large?.url || a[0].url || null) : null; })(),
         bodyBehandlung,
         farbort,
         bodyHex: String(f['Body_Hex'] || '').trim() || null,
@@ -821,17 +608,7 @@ async function assemblePrompt(
         finishBody: (selectName(f['Finish_Body']) || 'matt').toLowerCase(),
         akzentCue: (selectName(f['Akzent_Cue']) || 'kein').toLowerCase(),
         akzentHex: String(f['Akzent_Hex'] || '').trim() || null,
-        ausdrucksweg: (selectName(f['Ausdrucksweg']) || '').toLowerCase(),
         typoHaltung: (selectName(f['Typo_Haltung']) || '').toLowerCase(),
-        szeneId: String(f['Szene_ID'] || '').trim(),
-        // Achsen-Cursor: Temp_Laut als numerische Koordinate. null = ungetaggt
-        // -> nimmt an keiner Nudge-Wahl teil (rastet nie versehentlich ein).
-        tempLaut: (f['Temp_Laut'] != null && f['Temp_Laut'] !== '') ? Number(f['Temp_Laut']) : null,
-        bild: (() => { const a = f['Referenz_Bild']; return Array.isArray(a) && a[0] ? (a[0].thumbnails?.large?.url || a[0].url || null) : null; })(),
-        // Register = die real getaggte Welt-Achse (clean-minimal, tech-premium, ...).
-        // Ankert die Nudge-Nachbarschaft. (Hinweis 02.09.: Segment ist inzwischen
-        // 35/35 getaggt — der alte Kommentar 'Segment-Feld ist leer' war veraltet.)
-        register: (selectName(f['Register']) || '').toLowerCase() || null,
         anforderungen: anford,
         stufe, verlust,
         compatible: remaining.length === 0,
@@ -842,340 +619,43 @@ async function assemblePrompt(
           const v = fieldAny(f, ['Wirkung_Beschreibung', 'Wirkung_Beschreibung ', 'Wirkungsbeschreibung']);
           return v ? String(v).trim() : null;
         })(),
-        wirkstoffWelt: multiSelectNames(fieldAny(f, ['Wirkstoff_Welt', 'Wirkstoff-Welt', 'Wirkstoff'])),
-        // Zielgruppe == das Feld 'Segment' der Codes (Klinisch_Derma, GenZ_DTC,
-        // Clean_Botanical, Quiet_Luxury). Wird oben schon als `segments`
-        // gelesen — hier nur unter sprechendem Namen weitergereicht.
-        zielgruppe: multiSelectNames(f['Segment']),
+        doNot: teileListe(fieldAny(f, ['Do_Not', 'Do_not', 'DoNot'])),
       };
     });
 
-  // ── Segment-Gate (HART) ───────────────────────────────────────────
-  // Welt-Zuordnung fest (A), Palettenfeinwahl via Haiku (B). Kein
-  // Fallback-auf-ALLE mehr — das war die Ursache der Citrus/Orange-Konvergenz.
-  // Schickt das Frontend eine Pill (reqSegment) → Welt fix, Haiku sieht nur diese.
-  // Sonst wählt Haiku die Welt selbst (STEP 0) und wir filtern hart nach.
-  if (farbpaletten.length === 0) throw new Error('Keine aktiven Farbpaletten vorhanden');
-  const requestedSegment = SEGMENTS.includes(reqSegment as any) ? (reqSegment as string) : null;
-  let candidates = requestedSegment
-    ? farbpaletten.filter(p => multiSelectNames(p.fields['Segment']).includes(requestedSegment))
-    : farbpaletten;
-  // Sicherheitsnetz: Welt (noch) ohne aktive Palette → nicht crashen, statt Welt alle zeigen.
-  if (candidates.length === 0) candidates = farbpaletten;
+  // ── Der gewaehlte Code (forceCodeId ist die Entscheidung des Nutzers) ─
+  // Ist er auf diesem Teil NICHT produzierbar, brechen wir sichtbar ab,
+  // statt still auf einen anderen Look zu kippen (der "immer Pink"-Bug):
+  // ein anderer Look waere eine Luege.
+  const code = designCodes.find(c => c.id === forceCodeId && c.compatible) || null;
+  if (!code) {
+    const wanted = designCodes.find(c => c.id === forceCodeId);
+    throw new Error(wanted
+      ? `Look "${wanted.name}" ist auf diesem Teil nicht produzierbar (Anforderung unbestätigt/ausgeschlossen)`
+      : `Design-Code ${forceCodeId} nicht gefunden oder nicht aktiv`);
+  }
 
-  // ── Produkt-Basics ────────────────────────────────────────────────
-  const type = selectName(sysFields['Type']);
+  // ── Produkt-Basics + Gates ──────────────────────────────────────────
   const material = multiSelectNames(sysFields['Material']);
-  const form = multiSelectNames(sysFields['Form']).join(', ');
-  const desc = sysFields['Kurzbeschreibung'] || '';
   const availMaterials = multiSelectNames(sysFields['Available_Materials']);
-
   const sysClosure = multiSelectNames(sysFields['Closure']).concat(selectName(sysFields['Closure']) || []);
   const capClosure = capFields
     ? multiSelectNames(capFields['Closure_Type']).concat(selectName(capFields['Closure_Type']) || [])
     : [];
   const closureCoverage = [...new Set([...sysClosure, ...capClosure].filter(Boolean))];
   const capMaterial = capFields ? multiSelectNames(capFields['Material']).join(', ') : '';
-
-  // ── Gates auf den Brief (Demand-Signal 'rejected' bleibt) ─────────
   const materialCoverage = [...new Set([...availMaterials, ...material])];
   const forbiddenMaterials = runGate(brief, MATERIAL_LEXICON, materialCoverage);
   const forbiddenClosures = runGate(brief, CLOSURE_LEXICON, closureCoverage);
   const forbidden = [...new Set([...forbiddenMaterials, ...forbiddenClosures])];
 
-  // ── Erlaubte Enums aus SF_-Feldern (Produzierbarkeit by construction) ─
-  const primaryMatEarly = (multiSelectNames(sysFields['Material'])[0] || '').toLowerCase();
-  const isPlasticBody = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMatEarly);
-  const finishes: string[] = ['gloss'];
-  if (capState('mattierbar') === 'ok' || isPlasticBody) finishes.push('matt', 'soft_touch');
-  const akzente: string[] = ['none'];
-  if (confirmed.has('hotfoil')) akzente.push('hot_foil_detail');
-  if (confirmed.has('siebdruck')) akzente.push('silkscreen_graphic');
-  // Leere Checkbox = ungetaggt, nicht "nein". Kunststoff ist industriell immer
-  // einfärbbar (Masterbatch) → default true; Glas/Metall nur bei explizitem Tag.
   const colorable = koerperFarbe() === 'ok';
-
-  // Emotions-Label-Set = Union der Emotion_Tags der Kandidaten-Paletten.
-  const emotionTagSet = [...new Set(candidates.flatMap(p => multiSelectNames(p.fields['Emotion_Tags'])))];
-
-  // ── Haiku: NUR Auswahl + Konzept — striktes JSON, keine Prosa ─────
-  const paletteList = candidates.map(p => {
-    const f = p.fields;
-    return `- id: ${p.id} | seg: ${multiSelectNames(f['Segment']).join('/') || '-'} | ${f['Name'] || ''} | tags: ${multiSelectNames(f['Emotion_Tags']).join(', ')} | warmth: ${selectName(f['SF_Warmth']) || '-'} | prestige: ${f['SF_Prestige_Score'] ?? '-'}/5 | zeitgeist: ${f['SF_Zeitgeist_Score'] ?? '-'}/5 | ${String(f['Beschreibung'] || '').slice(0, 90)}`;
-  }).join('\n');
-
-  // Welten, die in den gezeigten Paletten real vorkommen (leere Welten nie anbieten).
-  const worldsAvail = [...new Set(candidates.flatMap(p => multiSelectNames(p.fields['Segment'])))].filter(Boolean);
-  // v31 — Referenzmarke als Kern-Anker: kompatibel -> bevorzugen; nicht
-  // kompatibel -> naechster Code derselben Welt, und die Herleitung nennt,
-  // was auf diesem Teil wegfiel (Kern bleibt, Ausdruck sinkt).
-  const referenzen = findeReferenzen(brief, designCodes);
-  const refZeilen = referenzen.map(r => `  · "${r.brand}" = code "${r.name}" (id ${r.id}, segment ${r.segments.join('/') || '?'}, world ${r.register || '?'}, loudness ${r.tempLaut ?? '?'}/10)${r.compatible ? '' : ' — NOT producible on this exact part'}`).join('\n');
-  const referenzHinweis = referenzen.length ? ` BRANDS NAMED IN THE BRIEF (our archive knows them):
-${refZeilen}
-  READ THE POLARITY yourself from the brief.
-  LOVED brand = the COMPASS. Its code is a hard preference: pick it if it is a candidate. If it is not (not producible, or its segment differs from the chosen one), pick the candidate that carries the SAME CORE — its treatment, cap relation, typo attitude and ingredient stance — and tune the expression toward the brief's positioning. Say in herleitung which signature details of the compass fall away here and why (core attitude stays, expression shifts).
-  REJECTED brand = SUBTRACT ITS DISTINGUISHING TRAITS, never its whole world. The customer rejects what makes that brand specific (e.g. candy colour, playful shapes, teen-loud tone), not every code that happens to share its register. A code in the same world is fine as long as it does not carry the rejected traits. NEVER pick the rejected brand's own code.
-  If unsure of the polarity, ignore the brand rather than guessing.` : '';
-  // P1/P2 — der Kompass darf nicht eine Stufe frueher aussortiert werden:
-  // sein Segment geht in die Segment-Wahl ein, statt erst bei der Code-Wahl
-  // auf eine bereits gefallene Entscheidung zu treffen.
-  const kompassSegmente = Array.from(new Set(referenzen.flatMap(r => r.segments))).filter(Boolean);
-  /* Ein Tipp auf ein Bild ist eine vollstaendige Koordinate: Welt,
-     Lautstaerke und Wirkstoff-Welt des getippten Produkts sind getaggt. Das
-     ist praeziser als ein Markenname im Freitext — also waehlt der Tipp den
-     Anker, nicht das Textmatching. */
-  const boardRef = (ids: string[]) => designCodes.filter(c => ids.includes(c.id));
-  const geliebt = boardRef(boardLikes);
-  const abgelehnt = boardRef(boardDislikes);
-  const boardHinweis = (geliebt.length || abgelehnt.length)
-    ? `\nTAPPED REFERENCES (the customer pointed at these real products — this is a MEASURED coordinate and outranks any brand name in the free text).${geliebt.length ? `\n  LIKES: ${geliebt.map(c => `"${c.name}" (${c.brand}, world ${c.register || '?'}, loudness ${c.tempLaut ?? '?'}/10, id ${c.id})`).join('; ')}. Their shared world is the default choice; if they span worlds, the position sits between them and you must say so in kette.${geliebt.length === 1 ? ` With a single like, treat its world and loudness as the anchor unless the brief's own positioning clearly contradicts it.` : ''}` : ''}${abgelehnt.length ? `\n  REJECTS: ${abgelehnt.map(c => `"${c.name}" (${c.brand}, world ${c.register || '?'}, id ${c.id})`).join('; ')}. Never choose these codes. Subtract their colour, tone and decoration — never their physics. Set anti_code_id to one of them.` : ''}`
-    : '';
-  const segmentHinweis = referenzen.length ? ` The brief names brands our archive knows: ${referenzen.map(r => `"${r.brand}" sits in segment ${r.segments.join('/') || '?'}`).join('; ')}. If the customer LOVES one of them, its segment is the default choice. Deviate only if the brief's own positioning clearly contradicts it — and if the loved brand's segment and the stated positioning differ (e.g. a clinical/apothecary brand for a prestige shelf), that gap IS the position: choose the segment that lets the compass's credibility be expressed in the stated tone, and say so in herleitung.${kompassSegmente.length ? ` Compass segments present: ${kompassSegmente.join(', ')}.` : ''}` : '';
-  const segmentStep = requestedSegment
-    ? `WORLD (fixed by the user): ${requestedSegment}. Set "segment" to exactly this. Every palette below already belongs to this world.`
-    : `STEP 0 — segment: choose EXACTLY ONE world from [${worldsAvail.join(', ')}] that the brief's positioning belongs to.${segmentHinweis} In STEP 2 you may ONLY pick a palette whose "seg" contains this chosen segment.`;
-
-  // Design-Code-Kandidaten: nur kompatible (inkl. Typ-B-umgeleitete).
-  // Segment-Feinfilter macht Haiku selbst (Instruktion) + harte Validierung danach.
-  const codeCandidates = designCodes.filter(c => c.compatible);
-  if (codeCandidates.length === 0) throw new Error('Kein kompatibler aktiver Design_Code vorhanden');
-  // v28 (§7.4): Wirkstoff-Welt + Wirkung_Beschreibung reisen pro Kandidat in
-  // den Selection-Prompt. Haiku sieht damit die reale Regalwirkung jedes
-  // Codes (kuratierte Prosa) statt nur Hex-Werte — und die Herkunfts-Welt,
-  // gegen die die INGREDIENT RULE prüft. Prosa auf 130 Zeichen gekappt:
-  // bei ~30 Kandidaten bleibt der Prompt klein.
-  const designCodeList = codeCandidates.map(c =>
-    `- code_id: ${c.id} | seg: ${c.segments.join('/') || '-'} | ${c.name} | body: ${c.bodyBehandlung}/${c.farbort}${c.bodyHex ? ` ${c.bodyHex}` : ''} | cap: ${c.capHex || 'preserve'} ${c.capFinish} | akzent: ${c.akzentCue} | typo: ${c.typoHaltung || '-'}${c.stufe < 3 ? ` | expression level ${c.stufe}/3 (lost: ${c.verlust.join('; ')})` : ''}${c.wirkstoffWelt.length ? ` | wirkstoff: ${c.wirkstoffWelt.join('/')}` : ''}${c.wirkungBeschreibung ? ` | wirkung: ${c.wirkungBeschreibung.slice(0, 130)}` : ''}${c.umleitung ? ' | (umgeleitet)' : ''}`
-  ).join('\n');
-
-  /* Der Körper ist die groesste Flaeche. Kann dieses Teil ihn nicht tragen,
-     darf keine Zeile eine Koerperfarbe behaupten — sonst steht "klinisches
-     Silber" auf dem Blatt, waehrend eine klare Flasche im Bild steht. Haiku
-     sieht body-Hex in jeder Kandidatenzeile und schreibt ihn sonst mit. */
-  const koerperTraegt = colorable || isPlasticGate;
-  const koerperHinweisEn = koerperTraegt
-    ? 'the body of this part CAN be coloured — naming the body colour in kette is allowed.'
-    : 'the body of this part CANNOT be coloured (it stays its own material). NEVER name a body colour, silver, metallic body or tinted body in kette, story or herleitung — the expression lives on the closure, the accent and the print only. A code\'s body hex is its ORIGIN, not what will be visible here. The body therefore stays CLEAR AND TRANSPARENT: never write that transparency is avoided, rejected or subtracted (not in kette, not in do_not, not when subtracting a rejected brand\'s traits) — the picture will visibly show a transparent bottle and the sheet would contradict it. Subtract the rejected brand\'s colour, tone and decoration instead.';
-
-  /* Typ-1-Wahrheit an die Auswahl weitergeben: Haiku soll wissen, was der
-     Wirkstoff verspricht, damit ziel_profil und kette nicht dagegen laufen. */
-  const wsHint = wsRef;
-  const wirkstoffHinweisEn = wsHint
-    ? `\nACTIVE TRUTH: the brief names ${wsHint.name}. Its promise: ${wsHint.emotional}. Its colour expectation: ${wsHint.farbe} (${wsHint.temp}). Forbidden for this active: ${wsHint.doNot.join('; ')}. Honour it unless a loved reference brand pulls the other way — then follow the brand and say so.`
-    : '';
-
-  const selectionPrompt = `You are ulba's design-selection engine for beauty packaging.
-You NEVER write a visual prompt and NEVER invent materials, shapes, ingredients, actives, scents or claims.
-You only SELECT from the finite options below and write a short German concept grounded in the brief.
-
-PRODUCT (fixed, never changed): ${type} | ${material.join(', ')} | ${form}
-${desc ? String(desc).slice(0, 200) : ''}
-${closureCoverage.length ? `CLOSURE (fixed): ${closureCoverage.join(', ')}` : ''}
-
-${segmentStep}
-STEP 1 — ziel_profil: choose 3–5 tags ONLY from: [${emotionTagSet.join(', ')}]. They must express the brief's audience/mood.
-AUDIENCE RULE (hard): the palette MUST fit the audience in the brief. Feminine / curls / warm / natural briefs get warm or soft palettes — NEVER tech/chrome/futurist palettes. Masculine/tech briefs get cool restrained palettes. When in doubt, choose the softer, warmer palette.
-STEP 2 — palette_id: exactly one id from PALETTES below whose "seg" contains your chosen segment AND whose tags/warmth/prestige best fit ziel_profil AND the audience rule.
-PALETTES:
-${paletteList}
-STEP 3 — finish: one of [${finishes.join(', ')}].
-STEP 4 — akzent: one of [${akzente.join(', ')}].
-STEP 4b — code_id: choose EXACTLY ONE curated design code from DESIGN CODES below.${referenzHinweis} Its "seg" must contain your chosen segment. Pick the code whose design attitude (treatment, cap relation, accent, typo) best serves the brief's positioning — the code is the design DECISION; body colour, cap colour and accent will all be taken from it so the result is coherent by construction. INGREDIENT RULE (hard): if the brief names an active or ingredient world (vitamin c, retinol, hyaluron, barrier, acne, botanical, sun, hair, fragrance), you MUST prefer a code whose "wirkstoff" contains that world when one is available — a vitamin-c brief must never land on a retinol-world code while a vitamin-c code is listed. Use each code's "wirkung" prose to judge its real shelf effect and ground your herleitung in it. Codes marked (umgeleitet) still work on this product via a redirected expression — they remain valid choices.
-EXPRESSION LEVEL: a code marked "expression level 2/3" or "1/3" is still a valid, honest choice — its core attitude survives, only part of its signature cannot be built on this exact part. Prefer level 3 when the fit is equal, but NEVER reject the compass brand's code just because its level is lower. Whenever you choose a code below level 3, the herleitung MUST name in plain German what falls away here (use the "lost:" text) — e.g. "Pink Play, hier in der ruhigen Ausprägung: Rosa und die reduzierte Typo bleiben, der Kugelverschluss und die Transparenz gehen auf einer Glas-Pumpflasche nicht."
-DESIGN CODES:
-${designCodeList}
-STEP 5 — szene_id: one of [${SCENE_PRESETS.map(s => s.id).join(', ')}]. DEFAULT to 'studio_soft' or 'highkey_bright' (clean e-commerce packshot) unless the brief explicitly asks for a dark/moody/editorial setting.
-STEP 6 — brandname: if the brief contains the user's own brand name, use it EXACTLY; otherwise INVENT a fictional name (2–8 letters, evocative). NEVER a real existing brand or car brand.
-STEP 7 — konzept_name (1–3 words), story (ONE German sentence — NEVER name ingredients, actives, vitamins, scents or claims unless that exact word is in the brief), herleitung (ONE German sentence: why the chosen design direction fits the ziel_profil — describe the mood/finish in general words, NEVER name a specific palette, material, metal, chrome or technique that was not selected). IF the brief named a loved brand and you did NOT choose its code, the herleitung MUST say so in plain German and give the reason — name the brand, what you kept of it, and what you followed instead (e.g. "Weleda sitzt im Apotheken-Regal, du willst Prestige — ich halte Weledas Nüchternheit, gebe ihr aber den leiseren, schwereren Ton des Prestige-Regals"). Silently ignoring the compass is forbidden.
-BODY-COLOUR TRUTH (hard): ${koerperHinweisEn}${wirkstoffHinweisEn}${boardHinweis}
-STEP 9a — kompass_code_id / anti_code_id: from the reference brands listed above, the id of the code whose brand the customer LOVES (kompass) and the id whose brand they REJECT (anti). null if the brief names none.
-STEP 9 — kette: 2–3 rows that show HOW you derived the direction FROM THE BRIEF. One row per brief signal — audience/positioning, channel/shelf, named reference. Never a row about ingredient, material or physics (the engine writes those itself). Each row: {"bedeutung": what the brief said, 3–7 German words}, {"form": the design consequence, 3–7 German words}, {"weil": ONE short German clause that names the PROBLEM this solves — not a mood}. A professional brief never states taste, it states a problem being solved. Example: {"bedeutung":"Douglas-Kundin, kein Drogerie-Regal","form":"schwerer Ton, gedeckte Sättigung","weil":"im Prestige-Regal liest sich Buntheit als billig"}.
-STEP 10 — do_not: 2–3 short German clauses naming what this direction must NOT become. Concrete visual traps, not vague warnings — the difference between an 80-euro serum and multivitamin juice. Ground each in the brief's audience or shelf. Examples: "kein wörtliches Orange", "keine Tropfen- oder Frucht-Deko", "kein Bonbon-Rosa", "kein Stock-Vektor-Blatt". Never name a field value or an English word.
-STEP 11 — verworfen (REQUIRED, never null unless only one code exists in the whole list): name the ONE other design code you seriously considered and then rejected. {"code_id": its exact id from the list, "name": its exact name from the list, "grund": ONE short German clause saying what would have gone wrong — grounded in the brief's audience or shelf, never "passt nicht"}. Example: {"grund":"deine Käuferin ab 40 liest das als Teen-Ware"}. A presented direction without a rejected alternative reads as the only option instead of a decision — always fill this.
-STEP 8 — radar: score the TARGET emotional direction of this product on each axis 0–100 (integers): waerme, prestige, energie, ruhe, natuerlichkeit, praezision. These express where the brief wants to land, not the bare bottle.
-
-OUTPUT ONLY this JSON, no fences, no prose:
-{"segment":"…","ziel_profil":["…"],"palette_id":"…","finish":"…","akzent":"…","code_id":"…","szene_id":"…","brandname":"…","konzept_name":"…","story":"…","herleitung":"…","kette":[{"bedeutung":"…","form":"…","weil":"…"}],"kompass_code_id":"…","anti_code_id":"…","do_not":["…","…"],"verworfen":{"code_id":"…","name":"…","grund":"…"},"radar":{"waerme":0,"prestige":0,"energie":0,"ruhe":0,"natuerlichkeit":0,"praezision":0}}`;
-
-  const res = await fetchT('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY || '',
-      'anthropic-version': '2023-06-01',
-    },
-    timeoutMs: 30000, label: 'anthropic haiku',
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5',
-      max_tokens: 1000,
-      temperature: 0,
-      system: selectionPrompt,
-      messages: [{ role: 'user', content: brief }],
-    }),
-  });
-  const data = await res.json() as { content: Array<{ text: string }> };
-  const rawText = (data.content?.[0]?.text || '').trim();
-
-  let parsed: any = null;
-  try {
-    parsed = JSON.parse(rawText.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim());
-  } catch { parsed = null; }
-
-  // ── Validierung mit deterministischen Fallbacks ───────────────────
-  // Effektive Welt: Pill > Haiku-Wahl > Welt der ersten Kandidatenpalette.
-  const validSeg = SEGMENTS.includes(parsed?.segment) ? String(parsed.segment) : null;
-  const effectiveSegment = requestedSegment || validSeg
-    || (candidates[0] ? multiSelectNames(candidates[0].fields['Segment'])[0] : null) || null;
-  // HART: nur Paletten der effektiven Welt sind wählbar (schnappt Fehlwahl zurück).
-  const worldPool = effectiveSegment
-    ? candidates.filter(p => multiSelectNames(p.fields['Segment']).includes(effectiveSegment))
-    : candidates;
-  const pool = worldPool.length ? worldPool : candidates;
-  const pal = pool.find(p => p.id === parsed?.palette_id) || pool[0];
-  const finish = finishes.includes(parsed?.finish) ? parsed.finish : finishes[finishes.length - 1];
-  const akzent = akzente.includes(parsed?.akzent) ? parsed.akzent : 'none';
-  // Code-Wahl HART validieren: nur Kandidaten; Segment-Fehlwahl schnappt zurueck
-  // auf einen Code der effektiven Welt; letzter Fallback = erster Kandidat.
-  // forceCodeId (Frontend: der geklickte Look) schlaegt Haikus Wahl — sofern
-  // der Code fuer dieses Base ueberhaupt kompatibel ist. Ist er es NICHT,
-  // brechen wir sichtbar ab statt still auf einen anderen Look zu kippen
-  // (der "immer Pink"-Bug): der Nutzer hat einen bestimmten Look gewaehlt,
-  // ein anderer Look waere eine Luege.
-  // Harte Sperre statt Prompt-Bitte: ein getipptes "bloss nicht" darf nie
-  // gewaehlt werden, auch wenn Haiku es vorschlaegt.
-  if (boardDislikes.length) {
-    for (let i = codeCandidates.length - 1; i >= 0; i--) {
-      if (boardDislikes.includes(codeCandidates[i].id) && codeCandidates.length > 1) codeCandidates.splice(i, 1);
-    }
-  }
-  const forcedCode = forceCodeId ? codeCandidates.find(c => c.id === forceCodeId) : null;
-  if (forceCodeId && !forcedCode) {
-    const wanted = designCodes.find(c => c.id === forceCodeId);
-    throw new Error(`Look "${wanted?.name || forceCodeId}" ist auf diesem Teil nicht produzierbar (Anforderung unbestätigt/ausgeschlossen)`);
-  }
-
-  // ── Anker-Welt fuer Pool + Cursor + Nachbarschaft ─────────────────
-  // BUGFIX: Ist ein Code gepinnt/geforced (Direction-Chip ODER Nudge), definiert
-  // DESSEN Welt die navigierbare Nachbarschaft — NICHT Haikus pro Call neu
-  // gewuerfelte Welt-Wahl. Sonst sucht der Nudge den leiseren Nachbarn im
-  // falschen Weltpool ("leiser tut nichts") und graut die Chips falsch aus.
-  const navWorld = (forcedCode?.segments[0]) || effectiveSegment;
-  // P2 — der Kompass-Code bleibt im Pool, auch wenn sein Segment ein anderes
-  // ist: zwischen zwei Segmenten liegt eine Position, kein Fehler.
-  const kompassIds = new Set(referenzen.filter(r => r.compatible).map(r => r.id));
-  const codeWorldPool = navWorld
-    ? codeCandidates.filter(c => c.segments.includes(navWorld) || kompassIds.has(c.id))
-    : codeCandidates;
-  const codePool = codeWorldPool.length ? codeWorldPool : codeCandidates;
-
-  // ── Achsen-Cursor · Prototyp Temp_Laut (WITHIN-WORLD) ─────────────
-  // Ein Nudge verschiebt den Cursor NICHT um einen festen Betrag (bei duenner
-  // Code-Dichte tut "−1" oft nichts, weil der eigene Punkt der naechste bleibt).
-  // Stattdessen: Sprung auf den NAECHSTEN kuratierten Code IN Richtung
-  // leiser/lauter — Punkt-zu-Punkt, nie Interpolation (der Zwischenraum ist
-  // ungetesteter KI-Matsch, s. Konzept §3). Der Pool ist codePool: gleiche Welt,
-  // kompatibel zur Base -> gleiche Flasche, ruhigerer/lauterer Look. Kein
-  // Nachbar in Richtung -> No-Op (Chip ist frontendseitig ohnehin disabled).
-  let cursorCode = forcedCode;
-  // Nachbarschafts-Pool: Codes desselben REGISTERS (die befuellte Welt-Achse).
-  // Das Segment-Feld der Codes ist leer, deshalb war "within-world" bisher
-  // wirkungslos und der Nudge sprang ueber Welten (pink -> tech-klinisch).
-  // Fix A (Welt-Sprung, 14.08.): Ist der Anker allein in seinem Register, gibt
-  // es KEINEN globalen Fallback mehr — der Chip wird ausgegraut (No-Op) statt in
-  // eine fremde Welt zu springen. Die grauen Chips sind ab jetzt die Landkarte
-  // der Dichte-Luecken (-> Matrix-Diagnose + Code-Dichte, Roadmap-Punkt 2).
-  const nudgeNeighborhood = (anchor: { id?: string; register: string | null } | null | undefined) => {
-    if (anchor?.register) return codePool.filter(c => c.register === anchor.register);
-    // Anker ohne Register -> keine identifizierbare Welt -> nur der Anker selbst.
-    return anchor?.id ? codePool.filter(c => c.id === anchor.id) : codePool;
-  };
-  if (forcedCode && forcedCode.tempLaut != null && (lautNudge === 'quieter' || lautNudge === 'louder')) {
-    const cur = forcedCode.tempLaut;
-    const hood = nudgeNeighborhood(forcedCode);
-    const cands = hood.filter(c =>
-      c.tempLaut != null && (lautNudge === 'quieter' ? c.tempLaut < cur : c.tempLaut > cur)
-    );
-    cands.sort((a, b) =>
-      lautNudge === 'quieter' ? (b.tempLaut! - a.tempLaut!) : (a.tempLaut! - b.tempLaut!)
-    );
-    if (cands[0]) cursorCode = cands[0];
-  }
-
-  const code = cursorCode || codePool.find(c => c.id === parsed?.code_id) || codePool[0];
-
-  // Nachbar-Verfuegbarkeit fuer die Nudge-Chips — auf DERSELBEN Nachbarschaft
-  // berechnet, in der der Nudge sucht (sonst luegen die Chips).
-  const codeLaut = code.tempLaut;
-  const codeHood = nudgeNeighborhood(code);
-  const canQuieter = codeLaut != null && codeHood.some(c => c.tempLaut != null && c.tempLaut < codeLaut);
-  const canLouder  = codeLaut != null && codeHood.some(c => c.tempLaut != null && c.tempLaut > codeLaut);
-  const szeneId = SCENE_PRESETS.some(s => s.id === parsed?.szene_id)
-    ? parsed.szene_id
-    : (SCENE_PRESETS.some(s => s.id === code.szeneId) ? code.szeneId : 'studio_soft');
-  const szene = SCENE_PRESETS.find(s => s.id === szeneId)!;
-  const brandname = sanitizeBrandname(parsed?.brandname, brief);
-  const zielProfil: string[] = Array.isArray(parsed?.ziel_profil)
-    ? parsed.ziel_profil.filter((t: any) => emotionTagSet.includes(t)).slice(0, 5)
-    : [];
-
-  const palName = String(pal.fields['Name'] || '');
-  const hex = parseJsonArray(pal.fields['Hex_Codes']).slice(0, 3);
-  const pantone = parseJsonArray(pal.fields['Pantone_Nearest']).slice(0, 3);
-
-  // v15-Kohaerenz (Fix 05.08.): die ANGEZEIGTE Palette (SpecSheet-Chips +
-  // farbkonzept) kommt aus dem GEWAEHLTEN CODE — Body/Cap/Akzent-Hex —, nie
-  // aus der separat von Haiku gewaehlten Farbpalette. Sonst zeigen die Chips
-  // andere Farben als der Render (gruene Flasche, braune Chips). Die Farbpalette
-  // bleibt Haikus Reasoning-Grundlage fuer ziel_profil/tags, ist aber nicht
-  // mehr die Farbwahrheit. Pantone entfaellt beim Code-Pfad (Code hat keins);
-  // spaeter liefert der Palette-LINK des Codes Pantone + Emotion_Tags mit.
-  const codeHexes = [code.bodyHex, code.capHex, code.akzentHex].filter(Boolean) as string[];
-  const displayHex = codeHexes.length ? codeHexes.slice(0, 3) : hex;
-  const displayPalName = code.name || palName;
-  const displayPantone = codeHexes.length ? [] : pantone;
-
-  // ── Deterministische Prompt-Assembly — RECOLOR-ONLY ───────────────
-  // Bewiesener Modus: Seedream ändert NUR Farbe/Finish auf der exakten
-  // Bild_Harmonisiert-Flasche. KEIN Labeltext (verschreibt sich, bricht Form),
-  // KEINE Szenenfantasie — immer weisses Studio. Label + Emotionsprofil +
-  // Palette-Chips baut das Frontend als Board ÜBER den Render.
   const primaryMat = (material[0] || 'plastic').toLowerCase();
   const isPlastic = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
   const matEN = material.join(' / ') || 'plastic';
-  const kategorie = String(matchedProdukt[0]?.fields['Kategorie'] || type || 'Beauty Product');
 
-  // Geschmacks-Verbote fuer den Bild-Prompt. Nur generische Fallen, keine
-  // uebersetzte Prosa — Seedream braucht kurze englische Negativbegriffe.
-  const DO_NOT_EN: [RegExp, string][] = [
-    [/orange/i, 'any literal orange fruit, citrus slice or fruit imagery'],
-    [/tropfen|frucht|obst/i, 'droplet, splash or fruit decoration'],
-    [/bonbon|candy|s(ü|ue)ss/i, 'candy-bright saturated pastel'],
-    [/blatt|botanic|pflanz|vektor/i, 'stock vector leaf or botanical clip-art'],
-    [/glitter|glanzeffekt|sparkle/i, 'glitter or sparkle effects'],
-    [/gradient|verlauf/i, 'multi-colour gradients on the body'],
-    [/transparen|durchsichtig|klarglas/i, ''],
-  ];
-  const doNotRaw: string[] = (Array.isArray(parsed?.do_not) ? parsed.do_not : []).map((d: any) => String(d || ''));
-  const wsPrompt = wsRef;
-  const doNotAlle = [...doNotRaw, ...(wsPrompt ? wsPrompt.doNot : [])];
-  const doNotEn = [...new Set(DO_NOT_EN.filter(([re]) => doNotAlle.some(d => re.test(d))).map(([, en]) => en))].filter(Boolean);
-
-  const lines: string[] = [];
-  lines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in the reference image${fall === 'A' ? '' : 's'} — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
-  if (attrConstraints.length) {
-    lines.push(`Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`);
-  }
-  if (fall === 'B') {
-    lines.push(`Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap.`);
-  } else if (fall === 'C' || fall === 'D') {
-    lines.push(`Compose a single product photo by combining the two reference images: body shape exactly from image 1, cap shape and mechanism exactly from image 2, assembled onto the bottle neck, flush and aligned.`);
-  }
-  lines.push(`The body is ${matEN}${isPlastic ? ' — it must clearly read as a plastic container, never as solid metal, aluminium, steel, glass or ceramic' : ''}.`);
-  if (capMaterial) lines.push(`The cap is ${capMaterial}.`);
   // ── Body-Behandlung: EINE Zeile, deterministisch aus dem Design_Code ─
-  // (Kohaerenz-Kern: Body_Behandlung + Farbort + Body_Hex aus dem Record.)
-  const codeBodyHex = code.bodyHex || hex[0] || '#EDEDED';
+  const codeBodyHex = code.bodyHex || '#EDEDED';
   const bodyFinishEn = BODY_FINISH_EN[code.finishBody] || BODY_FINISH_EN.matt;
   // Fuellfarbe fuer Farbort 'liquid': Body_Hex ist dort haeufig #FFFFFF (das
   // ist das GLAS, nicht das Serum) — dann traegt Akzent/Cap die echte Farbe.
@@ -1187,43 +667,21 @@ OUTPUT ONLY this JSON, no fences, no prose:
     const mx = Math.max(rr, gg, bb), mn = Math.min(rr, gg, bb);
     return mx === 0 ? true : (mx - mn) / mx < 0.15;
   };
-  /* Welche Traeger kann DIESES Teil? koerper = Koerper faerbbar;
-     liquid = Wand durchsichtig (Glas oder klares Plastik). */
-  const klarFaehig = isGlassBody || /pet|petg|acryl|surlyn/.test(matGate);
-  const farbortMoeglich = (_c: DesignCodeRec) => ({
-    koerper: colorable || isPlastic,
-    liquid: klarFaehig,
-  });
   const codeBodyHexFuellung = istFarblos(code.bodyHex)
     ? (code.akzentHex && !istFarblos(code.akzentHex) ? code.akzentHex
        : code.capHex && !istFarblos(code.capHex) ? code.capHex : codeBodyHex)
     : codeBodyHex;
-  /* v35 — Seitliche Ausspraegung. Punkt 11 kannte bisher nur ABWAERTS (ein
-     Traeger faellt weg). Derselbe Code kann seine Farbe aber auch WOANDERS
-     tragen, auf gleicher Hoehe: Pink Play als klare Flasche mit rosa Serum
-     ODER als opake rosa Flasche. Beides ist Pink Play. Der Nudge wechselt nur
-     den Traeger — Code, Farben und Haltung bleiben identisch. */
-  let codeBodyBehandlung = code.bodyBehandlung;
-  let codeFarbort = code.farbort;
-  if (farbortNudge === 'koerper' && farbortMoeglich(code).koerper) {
-    codeBodyBehandlung = 'opak_recolor'; codeFarbort = 'koerper';
-  } else if (farbortNudge === 'liquid' && farbortMoeglich(code).liquid) {
-    codeBodyBehandlung = 'klar_liquid_farbe'; codeFarbort = 'liquid';
-  }
-  const code2 = { ...code, bodyBehandlung: codeBodyBehandlung, farbort: codeFarbort };
   let bodyLineEn: string;
-  switch (code2.bodyBehandlung) {
+  switch (code.bodyBehandlung) {
     case 'klar':
-      // Farbort MUSS hier gelesen werden. Ein 'klar'-Code mit Farbort 'liquid'
-      // (z.B. Pink Liquid: Body #FFFFFF, Cap+Akzent #FF007F, Farbe im Serum)
-      // hat seine gesamte Lautstaerke in der Fluessigkeit — ohne diese Abfrage
-      // fiel sie lautlos weg und der lauteste Code rendert als leere Flasche.
-      bodyLineEn = code2.farbort === 'liquid'
+      // Farbort MUSS gelesen werden: ein 'klar'-Code mit Farbort 'liquid'
+      // hat seine gesamte Lautstaerke in der Fluessigkeit.
+      bodyLineEn = code.farbort === 'liquid'
         ? `Keep the body as clear transparent material exactly as in the reference image — do not tint or recolor the material itself. The bottle is filled with liquid in a saturated ${codeBodyHexFuellung}; the colour comes entirely from the contents and reads clearly through the clear wall, with a visible fill line near the shoulder.`
         : `Keep the body as clear transparent material exactly as in the reference image — do not tint or recolor it.`;
       break;
     case 'frosted':
-      bodyLineEn = code2.farbort === 'liquid'
+      bodyLineEn = code.farbort === 'liquid'
         ? `Give the body a satin frosted (sandblasted) surface. The liquid inside is ${codeBodyHex} and reads softly through the frosted wall. Do not recolor the material itself.`
         : `Give the body a satin frosted (sandblasted) ${codeBodyHex}-tinted surface — translucent, not opaque.`;
       break;
@@ -1241,331 +699,138 @@ OUTPUT ONLY this JSON, no fences, no prose:
         : `Keep the ${matEN} body in its original tone — do not recolor it.`;
       break;
   }
-  lines.push(bodyLineEn);
-  if (code.capHex) {
-    lines.push(`Color the closure/cap as ONE single solid ${code.capHex} tone with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt} — never the body colour on the cap.`);
-  }
-  const codeAkzentEn = akzentCueEn(code.akzentCue, code.akzentHex);
-  if (codeAkzentEn) lines.push(`Add ${codeAkzentEn}.`);
-  if (AKZENT_EN[akzent]) lines.push(`Add ${AKZENT_EN[akzent]}.`);
-  // ── Rollen-Hierarchie als HARTE Render-Regel ───────────────────────
-  // Sitzt der Traeger in der Fluessigkeit, wird die Huelle Materialeigenfarbe
-  // -> der Cap ist dann der einzige chromatische Anker am Gebinde und traegt
-  // mehr Last. Das ist eine ableitbare Regel, keine Geschmacksfrage.
-  /* Der Träger muss aus dem ECHTEN Render-Ergebnis kommen, nicht aus
-     code.farbort. Ein 'opak_recolor'-Code auf nicht einfärbbarem Glas fällt in
-     der Switch oben auf "Keep the body in its original tone" — das Blatt hat
-     dann "der Körper trägt die Welt" behauptet, während das Bild eine klare
-     Flasche zeigte. Die Physik-Zeile trägt den Moat; sie darf nie lügen. */
+
+  // ── Farb-Rollensystem: Traeger aus dem ECHTEN Render-Ergebnis ──────
+  // Ein 'opak_recolor'-Code auf nicht einfaerbbarem Glas faellt oben auf
+  // "Keep the body in its original tone" — die Physik-Zeile darf nie luegen.
   const traegerOrt: 'Flüssigkeit' | 'Körper' | 'Material' =
-    (code2.farbort === 'liquid' || code2.bodyBehandlung === 'klar_liquid_farbe') ? 'Flüssigkeit'
-    : code2.bodyBehandlung === 'klar' ? 'Material'
-    : (code2.bodyBehandlung === 'opak_recolor' && !(colorable || isPlastic)) ? 'Material'
+    (code.farbort === 'liquid' || code.bodyBehandlung === 'klar_liquid_farbe') ? 'Flüssigkeit'
+    : code.bodyBehandlung === 'klar' ? 'Material'
+    : (code.bodyBehandlung === 'opak_recolor' && !(colorable || isPlastic)) ? 'Material'
     : 'Körper';
   const traegerHexEcht = traegerOrt === 'Material' ? null
     : traegerOrt === 'Flüssigkeit' ? codeBodyHexFuellung : codeBodyHex;
-  const farbsys = farbSystem(
-    traegerHexEcht,
-    traegerOrt,
-    code.capHex,
-    code.akzentHex,
-    code.akzentCue,
-    !!capFields
-  );
-  if (farbsys.regelEn) lines.push(farbsys.regelEn);
-  if (doNotEn.length) lines.push(`Avoid entirely: ${doNotEn.join('; ')}.`);
-  // Immer weisses Studio — kein Szenen-Preset im Recolor-Modus.
-  lines.push(`Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`);
+  const farbsys = farbSystem(traegerHexEcht, traegerOrt, code.capHex, code.akzentHex, code.akzentCue, !!capFields || fall !== 'A');
 
-  const visuell = lines.join(' ');
+  // ── Geteilte Bausteine fuer ALLE Prompts (Vollbild, Split-Base, Cap) ─
+  const attrLine = attrConstraints.length
+    ? `Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`
+    : '';
+  const materialLine = `The body is ${matEN}${isPlastic ? ' — it must clearly read as a plastic container, never as solid metal, aluminium, steel, glass or ceramic' : ''}.`;
+  const capMaterialLine = capMaterial ? `The cap is ${capMaterial}.` : '';
+  const avoidLine = doNotZeile((traegerOrt === 'Material')
+    // Transparenz-Verbote rausfiltern, wenn die Wand sichtbar klar bleibt.
+    ? code.doNot.filter(d => !/transparen|durchsichtig|klarglas/i.test(d))
+    : code.doNot);
+  const studioLine = `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`;
+  const codeAkzentEn = akzentCueEn(code.akzentCue, code.akzentHex);
+  // NEU: Referenz_Bild des Codes als Style-Referenz. Immer das LETZTE Bild
+  // in image_urls[] — der Satz nennt den Index explizit.
+  const refBild = code.bild;
+  const styleRefLine = (idx: number) => refBild
+    ? `Image ${idx} is a style reference only: take the colour mood, finish quality, material feel and overall premium atmosphere from it — NEVER its shape, geometry, proportions, closure, text, logos or label layout. The product keeps its own exact form from image 1.`
+    : '';
 
-  // Label-Daten strukturiert fürs Frontend-Board (NICHT an Seedream).
-  const labelData = {
-    wortmarke: brandname || '',
-    kategorie,
-    ist_platzhalter: !brandname,
-  };
+  // ── Vollbild-Prompt (Fall A/B, ein Render) ─────────────────────────
+  const fullLines: string[] = [];
+  fullLines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
+  if (attrLine) fullLines.push(attrLine);
+  if (fall === 'B') {
+    fullLines.push(`Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap.`);
+  }
+  fullLines.push(materialLine);
+  if (capMaterialLine) fullLines.push(capMaterialLine);
+  fullLines.push(bodyLineEn);
+  if (code.capHex) {
+    fullLines.push(`Color the closure/cap as ONE single solid ${code.capHex} tone with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt} — never the body colour on the cap.`);
+  }
+  if (codeAkzentEn) fullLines.push(`Add ${codeAkzentEn}.`);
+  if (farbsys.regelEn) fullLines.push(farbsys.regelEn);
+  if (avoidLine) fullLines.push(avoidLine);
+  fullLines.push(styleRefLine(fall === 'B' ? 3 : 2));
+  fullLines.push(studioLine);
+  const closureRuleFull = fall === 'A'
+    ? 'Do not add, remove, replace or restyle the closure — keep the closure exactly as shown in the reference image.'
+    : 'Use ONLY the closure shown in image 2 — do not invent a different closure, do not change its shape or mechanism.';
+  const fullPrompt = `${fullLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleFull, forbidden, code.typoHaltung, code.akzentHex)}`;
 
-  // ── Konzept + Produzierbar (code-built, Register 2) ───────────────
+  // ── Split-Prompts (Fall C/D): Base und Cap GETRENNT, gleiche Bausteine ─
+  // Einzelbild-Edit ist formtreu; zwei Produktbilder zusammen = Drift
+  // (bewiesen, 2x reproduziert). Beide Prompts zitieren DENSELBEN Code.
+  const baseLines: string[] = [];
+  baseLines.push(`Keep the exact same body shape, silhouette and proportions as reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck.`);
+  if (attrLine) baseLines.push(attrLine);
+  baseLines.push(materialLine);
+  baseLines.push(bodyLineEn);
+  if (farbsys.regelEn) baseLines.push(farbsys.regelEn);
+  if (avoidLine) baseLines.push(avoidLine);
+  baseLines.push(styleRefLine(2));
+  baseLines.push(studioLine);
+  const closureRuleBase = 'Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle — the neck stays open exactly as in reference image 1.';
+  const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex)}`;
+
+  // Cap: Recolor (Code hat Cap_Hex) oder Preserve (ohne Hex bleibt er roh).
+  const akzentLine = codeAkzentEn ? ` Add ${codeAkzentEn}.` : '';
+  const capRecolorPrompt = [
+    `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish. Color the closure as ONE single solid ${code.capHex} tone across the whole closure with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}.${akzentLine} Do NOT split it into multiple colored segments and do NOT use more than this one accent on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size.`,
+    capMaterialLine,
+    avoidLine,
+    refBild ? `Image 2 is a style reference only: take the colour mood and finish quality from it — NEVER its shape, parts or any text or logos. The closure keeps its own exact form from image 1.` : '',
+    `The image contains ONLY this closure exactly as in reference image 1; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`,
+  ].filter(Boolean).join(' ');
+  const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
+  const capPrompt = split ? (code.capHex ? capRecolorPrompt : capPreservePrompt) : null;
+
+  // ── Konzept — deterministisch aus dem Code (kein LLM) ──────────────
+  const displayHex = [code.bodyHex, code.capHex, code.akzentHex].filter(Boolean) as string[];
   const produzierbar = {
-    finish: [FINISH_DE[finish]],
+    finish: [BODY_FINISH_DE[code.finishBody] || BODY_FINISH_DE.matt],
     dekoration: [
-      ...(AKZENT_DE[akzent] ? [AKZENT_DE[akzent]] : []),
+      ...(AKZENT_CUE_DE[code.akzentCue] ? [AKZENT_CUE_DE[code.akzentCue]] : []),
       ...(colorable ? ['Einfärbung Primärbehälter'] : ['Farbe via Label/Cap (Behälter nicht einfärbbar)']),
     ],
-    grafik_label: brandname
-      ? `Wortmarke "${brandname}" + "${kategorie}", reduzierte Typo`
-      : `Wortmarke (Platzhalter) + "${kategorie}", reduzierte Typo`,
-    farbkonzept: `${displayPalName} — Hex: ${displayHex.join(', ')}${displayPantone.length ? ` · Pantone: ${displayPantone.join(', ')}` : ''}`,
-    // Demand-Signal code-gruppierbar ("Ocean Clean 47x auf Serumflaschen").
+    farbkonzept: `${code.name} — Hex: ${displayHex.join(', ')}`,
     design_code: code.name,
     design_code_id: code.id,
     ...(code.umleitung ? { design_code_umleitung: code.umleitung } : {}),
   };
-
-  const herleitung = String(parsed?.herleitung || '').trim();
+  // Herkunft statt Herleitung: ein Hex aus einem real produzierten Produkt
+  // ist staerker als ein hergeleiteter — die Rationale nennt Provenienz.
   const rationale = [
-    zielProfil.length ? `Zielprofil: ${zielProfil.join(' · ')}` : '',
-    herleitung || `Die Farbwelt ${displayPalName} und ${FINISH_DE[finish]} folgen aus dem Brief.`,
-  ].filter(Boolean).join(' — ');
-
-  // ── Die Herleitungs-Leiter ────────────────────────────────────────
-  // Arbeitsteilung: was die Engine WEISS, schreibt die Engine (Wirkstoff,
-  // Physik, Farbprovenienz, Verlust) — deterministisch, nie halluziniert.
-  // Was nur im Brief steht (Zielgruppe, Kanal, Referenz), schreibt Haiku.
-  // Deshalb entsteht Tiefe OHNE eine einzige zusaetzliche Frage.
-  type KetteZeile = { typ: string; bedeutung: string; form: string; weil: string };
-  const kette: KetteZeile[] = [];
-  const wirkstoffDoNot: string[] = [];
-
-  // Typ 1 — Wirkstoff: aus dem BRIEF. Das Tag am Code ist Herkunft, nicht Aussage.
-  const wref = wsRef;
-  if (wref) {
-    /* Divergenz ehrlich benennen: Der Wirkstoff ERWARTET eine Temperatur, der
-       gewählte Code bringt seine eigene mit (oft weil eine Referenzmarke der
-       Kompass war). Wo beides auseinandergeht, ist das keine Panne, sondern die
-       Entscheidung — und sie muss auf dem Blatt stehen, nicht verschwiegen
-       werden. Ohne das behauptet die Zeile eine Farbwelt, die das Bild nicht
-       zeigt. Temperatur aus dem Lab-b-Wert des lautesten Trägers. */
-    const lautHex = farbsys.rollen.find(r => r.rolle === farbsys.laut)?.hex
-      || farbsys.rollen.find(r => r.hex)?.hex || null;
-    const lab = hexLab(lautHex);
-    const istWarm = lab ? lab[2] > 8 : null;
-    const istKuehl = lab ? lab[2] < -8 : null;
-    const divergiert = (wref.temp === 'warm' && istKuehl === true) || (wref.temp === 'kuehl' && istWarm === true);
-    kette.push({
-      typ: 'Wirkstoff',
-      bedeutung: wref.name,
-      form: divergiert ? `${wref.farbe} erwartet — hier bewusst anders` : wref.farbe,
-      weil: divergiert
-        ? `${wref.emotional}. Die gewählte Richtung geht dagegen — die Marken-Referenz wog hier schwerer als die Wirkstoff-Erwartung.`
-        : wref.emotional,
-    });
-    // Wirkstoff-eigene Verbote treten zu Haikus Liste dazu (Typ-1-do_not).
-    wirkstoffDoNot.push(...wref.doNot);
-  }
-
-  // Aus dem Brief (Haiku) — Zielgruppe, Kanal, Referenz.
-  const haikuKette = Array.isArray(parsed?.kette) ? parsed.kette : [];
-  for (const z of haikuKette.slice(0, 3)) {
-    const bedeutung = entfeldere(String(z?.bedeutung || ''));
-    const form = entfeldere(String(z?.form || ''));
-    const weil = entfeldere(String(z?.weil || ''));
-    if (bedeutung && form) kette.push({ typ: 'Brief', bedeutung: bedeutung.slice(0, 80), form: form.slice(0, 80), weil: weil.slice(0, 160) });
-  }
-
-  // Typ 2 — Physik: die Wand des realen Teils. Kann keine Agentur wissen.
-  const PHYSIK_FORM: Record<string, string> = {
-    'Flüssigkeit': 'Farbe in die Flüssigkeit',
-    'Körper': 'Farbe in den Körper',
-    'Material': 'Farbe an Verschluss und Akzent',
-  };
-  const PHYSIK_WEIL: Record<string, string> = {
-    'Flüssigkeit': 'das Gebinde bleibt transparent — die Hülle kann den Ausdruck nicht tragen',
-    'Körper': 'der Körper ist belegt einfärbbar, also trägt er die Welt',
-    'Material': 'dieses Teil ist nicht belegt einfärbbar — die Wand bleibt Material, der Ausdruck wandert nach oben',
-  };
-  kette.push({
-    typ: 'Physik',
-    bedeutung: `${matEN.replace(/^(a|an) /, '')}${closureCoverage.length ? `, ${closureCoverage.join('/')}` : ''}`,
-    form: PHYSIK_FORM[traegerOrt],
-    weil: PHYSIK_WEIL[traegerOrt],
-  });
-  // Wollte der Code den Körper färben und das Teil kann es nicht, ist das ein
-  // echter Ausdrucksverlust — er wird benannt, nicht verschwiegen.
-  if (traegerOrt === 'Material' && code.bodyHex && code2.bodyBehandlung !== 'klar') {
-    kette.push({
-      typ: 'Ausprägung',
-      bedeutung: `Stufe ${Math.min(code.stufe, 1)}/3`,
-      form: 'Körperfarbe fällt weg',
-      weil: 'die Haltung lebt über Verschluss, Akzent und Druck weiter',
-    });
-  }
-
-  // Farbe ist relational, nicht absolut — und geerbt statt erfunden.
-  // Ein Hex aus einem real produzierten Produkt ist STAERKER als ein
-  // hergeleiteter: darum nennt diese Zeile Provenienz, nie "abgeleitet".
-  if (code.brand) {
-    const rollenTxt = farbsys.rollen.filter(r => r.hex).map(r => `${r.rolle} ${r.hex}`).join(' · ');
-    kette.push({
-      typ: 'Farbe',
-      bedeutung: `Farbwelt aus ${code.brand}${code.produkt ? ` ${code.produkt}` : ''}`,
-      form: rollenTxt || displayPalName,
-      weil: 'real produziert, nicht geraten — am Regal bewiesen',
-    });
-  }
-
-  // Ausprägung: was auf DIESEM Teil wegfällt, wird benannt statt verschwiegen.
-  for (const v of code.verlust) {
-    kette.push({ typ: 'Ausprägung', bedeutung: `Stufe ${code.stufe}/3`, form: v, weil: 'dieses Teil kann es nicht — die Haltung bleibt, der Träger wechselt' });
-  }
-
-  // Was NICHT — Geschmacks-Verbote, getrennt von den Physik-Verboten (forbidden).
-  const doNot: string[] = [...new Set([
-    ...doNotRaw.map((d: string) => entfeldere(d).slice(0, 90)),
-    ...wirkstoffDoNot,
-  ])]
-    .filter((d: string) => !(traegerOrt === 'Material' && /transparen|durchsichtig|klarglas/i.test(d)))
-    .filter((d: string) => d.length > 3)
-    .slice(0, 4);
-
-  // Die verworfene Alternative: "Winning Concept" heisst, es gab mehrere.
-  const vwRaw = parsed?.verworfen;
-  const vwGrund = entfeldere(String(vwRaw?.grund || '')).slice(0, 160);
-  const vwName = String(vwRaw?.name || '').trim().toLowerCase();
-  // Auflösen in drei Anläufen: exakte id, dann exakter Name, dann Teilstring.
-  // Vorher fiel die Zeile bei jeder id-Abweichung still aus — und genau sie ist
-  // der billigste Agentur-Beweis im ganzen Blatt.
-  const vwCode = (vwRaw?.code_id && codeCandidates.find(c => c.id === String(vwRaw.code_id)))
-    || (vwName && codeCandidates.find(c => c.name.toLowerCase() === vwName))
-    || (vwName && codeCandidates.find(c => c.name.toLowerCase().includes(vwName) || vwName.includes(c.name.toLowerCase())))
-    || null;
-  const namensgleich = !!vwCode && vwCode.name.trim().toLowerCase() === code.name.trim().toLowerCase();
-  const verworfen = (vwCode && vwCode.id !== code.id && !namensgleich && vwGrund)
-    ? { name: vwCode.brand ? `${vwCode.name} (${vwCode.brand})` : vwCode.name, grund: vwGrund }
-    : null;
-  if (!verworfen && vwGrund) console.log('[verworfen] verworfen:', vwRaw?.code_id, vwRaw?.name, namensgleich ? '(namensgleich)' : '(nicht auflösbar)');
-
-  // Reihenfolge = Anzeigepriorität. Das Frontend zeigt die ersten drei; der
-  // Rest liegt hinter "alle Schritte". Brief zuerst (die Einsicht), dann der
-  // Beweis (Physik), dann die Provenienz (Farbe).
-  const RANG: Record<string, number> = { Wirkstoff: 0, Brief: 1, Physik: 2, Farbe: 3, 'Ausprägung': 4 };
-  kette.sort((a, b) => (RANG[a.typ] ?? 9) - (RANG[b.typ] ?? 9));
-
-  /* ── Die Karte ──────────────────────────────────────────────────────
-     Was im Agentur-Deck 60 Folien sind — Benchmarks, fuenf Moodboards, die
-     Competitive Landscape mit dem weissen Fleck — entsteht hier aus dem
-     Archiv: sechs Welten (Register), gefuellt mit den Referenzbildern echter
-     Marktprodukte, die gewaehlte Welt mit Richtung, Kompass, Anti und
-     verworfener Alternative markiert. Leere Welten bleiben LEER: der weisse
-     Fleck ist die ehrlichste Zeile auf dem Blatt und macht Kuratierung zur
-     sichtbaren Aufgabe statt zur unsichtbaren. */
-  const KARTE_WELTEN = ['clean-minimal', 'masse-funktional', 'pharma-klinisch', 'natur-erdig', 'luxus-ritual', 'tech-premium'];
-  const idOderNull = (v: any) => (typeof v === 'string' && designCodes.some(c => c.id === v)) ? v : null;
-  const kompassId = idOderNull(parsed?.kompass_code_id) || ([...kompassIds][0] ?? null);
-  const antiId = idOderNull(parsed?.anti_code_id);
-  const karteCode = (c: typeof designCodes[number]) => ({ id: c.id, name: c.name, brand: c.brand, bild: c.bild, laut: c.tempLaut });
-  const karte = {
-    register: code.register,
-    laut: code.tempLaut,
-    gewaehlt: code.id,
-    kompass: kompassId,
-    anti: antiId,
-    verworfen: verworfen ? (vwCode?.id ?? null) : null,
-    welten: KARTE_WELTEN.map(reg => {
-      const drin = designCodes.filter(c => c.register === reg);
-      // Markierte zuerst, dann nach Lautstaerke, damit die Kacheln eine Ordnung haben.
-      const mark = new Set([code.id, kompassId, antiId, vwCode?.id].filter(Boolean));
-      drin.sort((a, b) => (mark.has(b.id) ? 1 : 0) - (mark.has(a.id) ? 1 : 0) || ((a.tempLaut ?? 5) - (b.tempLaut ?? 5)));
-      return { register: reg, anzahl: drin.length, codes: drin.slice(0, reg === code.register ? 8 : 4).map(karteCode) };
-    }),
-  };
-
-  const rawRadar = parsed?.radar || {};
-  const radarAxes = ['waerme', 'prestige', 'energie', 'ruhe', 'natuerlichkeit', 'praezision'];
-  const radar: Record<string, number> = {};
-  for (const ax of radarAxes) {
-    const v = Number(rawRadar[ax]);
-    radar[ax] = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 50;
-  }
+    code.brand ? `Farbwelt aus ${code.brand}${code.produkt ? ` ${code.produkt}` : ''} — real produziert, am Regal bewiesen.` : `Farbwelt aus dem kuratierten Design-Code ${code.name}.`,
+    ...(code.verlust.length ? [`Auf diesem Teil (Stufe ${code.stufe}/3): ${code.verlust.join('; ')}.`] : []),
+  ].join(' ');
 
   const concept: Concept = {
-    konzept_name: String(parsed?.konzept_name || palName || '').slice(0, 60),
-    story: String(parsed?.story || '').slice(0, 240),
+    konzept_name: code.name,
+    story: code.wirkungBeschreibung || '',
     rationale,
     produzierbar,
-    szene_id: szeneId,
-    label: labelData,
-    palette: { name: displayPalName, hex: displayHex, pantone: displayPantone },
-    radar,
-    zielprofil: zielProfil,
-    segment: effectiveSegment,
-    kette,
-    do_not: doNot,
-    verworfen,
-    karte,
-    farbsystem: farbsys,
+    szene_id: '',
+    palette: { name: code.name, hex: displayHex.slice(0, 3), pantone: [] },
     design_code: {
-      id: code.id, name: code.name, umleitung: code.umleitung, laut: codeLaut,
+      id: code.id, name: code.name, umleitung: code.umleitung,
       brand: code.brand || null, produkt: code.produkt || null,
-      stufe: code.stufe, verlust: code.verlust,
-      farbort: codeFarbort,
-      can_koerper: farbortMoeglich(code).koerper && codeFarbort !== 'koerper',
-      can_liquid: farbortMoeglich(code).liquid && codeFarbort !== 'liquid',
-      register: code.register, can_quieter: canQuieter, can_louder: canLouder,
-      // v27 — Material fuer die Behauptung im Frontend.
+      stufe: code.stufe, verlust: code.verlust, farbort: code.farbort,
       beschreibung: code.wirkungBeschreibung,
-      wirkstoff_welt: code.wirkstoffWelt,
-      zielgruppe: code.zielgruppe,
     },
+    do_not: code.doNot.slice(0, 4),
+    farbsystem: farbsys,
     render: {
       bodyLineEn,
       capHex: code.capHex,
       capFinishEn: CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt,
-      akzentEn: akzentCueEn(code.akzentCue, code.akzentHex),
+      akzentEn: codeAkzentEn,
     },
   };
 
-  return {
-    prompt: `${visuell}\n\n${buildHardRule(fall, forbidden, code.typoHaltung, code.akzentHex)}`,
-    forbidden,
-    concept,
-  };
+  return { fullPrompt, basePrompt, capPrompt, refBild, forbidden, concept };
 }
 
-
-// ── Main Handler ────────────────────────────────────────────────────
-export const config = { api: { bodyParser: true }, maxDuration: 300 };
-type Referenz = { brand: string; name: string; id: string; register: string | null; tempLaut: number | null; compatible: boolean; umleitung: string | null; segments: string[] };
-/* Tippfehler kosten sonst das wichtigste Signal: "weloda" != "weleda".
-   Distanz 1 ab 5 Zeichen, 2 ab 8 — eng genug, um Marken nicht zu verwechseln. */
-function levenshtein(a: string, b: string): number {
-  if (a === b) return 0;
-  const m = a.length, n = b.length;
-  if (Math.abs(m - n) > 2) return 99;
-  let prev = Array.from({ length: n + 1 }, (_, j) => j);
-  for (let i = 1; i <= m; i++) {
-    const cur = [i];
-    for (let j = 1; j <= n; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    prev = cur;
-  }
-  return prev[n];
-}
-function markeTrifft(hay: string, marke: string): boolean {
-  if (hay.includes(' ' + marke + ' ')) return true;
-  const tol = marke.length >= 8 ? 2 : marke.length >= 5 ? 1 : 0;
-  if (tol === 0) return false;
-  const teile = marke.split(' ');
-  const woerter = hay.trim().split(/\s+/);
-  if (teile.length > 1) {
-    for (let i = 0; i + teile.length <= woerter.length; i++) {
-      if (levenshtein(woerter.slice(i, i + teile.length).join(' '), marke) <= tol) return true;
-    }
-    return false;
-  }
-  return woerter.some(w => Math.abs(w.length - marke.length) <= tol && levenshtein(w, marke) <= tol);
-}
-function findeReferenzen(brief: string, codes: Array<{ id: string; name: string; brand: string; register: string | null; tempLaut: number | null; compatible?: boolean; umleitung?: string | null; segments?: string[] }>): Referenz[] {
-  const b = ' ' + brief.toLowerCase().replace(/[^a-z0-9äöüß]+/g, ' ') + ' ';
-  const out: Referenz[] = [];
-  const seen = new Set<string>();
-  for (const c of codes) {
-    const br = (c.brand || '').toLowerCase().replace(/[^a-z0-9äöüß]+/g, ' ').trim();
-    if (br.length < 3 || seen.has(br)) continue;
-    if (markeTrifft(b, br)) {
-      seen.add(br);
-      out.push({ brand: c.brand, name: c.name, id: c.id, register: c.register, tempLaut: c.tempLaut, compatible: c.compatible !== false, umleitung: c.umleitung ?? null, segments: c.segments ?? [] });
-    }
-  }
-  return out;
-}
+// ── Design-Wand ({codes:true}): leichte Code-Liste mit Facetten ──────
 type CodeLeicht = {
   id: string; name: string; brand: string; register: string | null; tempLaut: number | null;
   segments: string[]; bild: string | null; wirkstoffWelt: string[];
-  // v45 — Facetten fuer die Design-Wand. Alle Werte liegen bereits in der
-  // Design_Code-Tabelle; hier werden sie nur mitgeliefert, nichts Neues erfunden.
   tempTon: number | null; tempForm: number | null; farbtemp: number | null; dekoDichte: number | null;
   hfForm: string | null; hfMaterial: string | null; hfTyp: string | null;
   bodyHex: string | null; capHex: string | null; wirkung: string;
@@ -1599,15 +864,11 @@ async function ladeCodesLeicht(): Promise<CodeLeicht[]> {
   return v;
 }
 
-// ── Zugangs-Riegel (v46) ──────────────────────────────────────────────
-// Der Renderer stand offen: CORS '*', keine Auth, kein Limit. Jeder mit der
-// URL konnte auf ulbas fal.ai-/Anthropic-Guthaben rendern lassen. Ab hier
-// gilt: nur die eigene Oberflaeche darf rufen, und auch die nicht endlos.
+// ── Zugangs-Riegel ────────────────────────────────────────────────────
+// Nur die eigene Oberflaeche darf rufen, und auch die nicht endlos.
 const ULBA_ORIGINS = new Set<string>([
   'https://ulba.vercel.app',
   'http://localhost:3000',
-  // Zusatz-Origins (Preview-Deploys, spaeter die eigene Domain) ohne
-  // Code-Deploy: ENV ULBA_ORIGINS = kommagetrennte Liste voller Origins.
   ...String(process.env.ULBA_ORIGINS || '').split(',').map(o => o.trim()).filter(o => /^https?:\/\//.test(o)),
 ]);
 
@@ -1637,6 +898,9 @@ function taktOk(req: VercelRequest, max: number, fensterMs: number): boolean {
   return true;
 }
 
+// ── Main Handler ────────────────────────────────────────────────────
+export const config = { api: { bodyParser: true }, maxDuration: 300 };
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -1646,20 +910,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
   if (!taktOk(req, 30, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen — kurz warten.' });
 
-  /* ── Das Board: die Referenz-Runde als Bild ────────────────────────
-     Bakic fragt "brands and packagings you aspire to". ulba fragte das als
-     Text — und bekam ein Wort zurueck, das erst gegen das Archiv gematcht
-     werden musste. Ein Tipp auf ein echtes Produkt ist dagegen eine ganze
-     Koordinate: der Tagger hat jedes Referenzbild auf Welt, Lautstaerke und
-     Wirkstoff-Welt vermessen.
-     KEIN Konfigurator: es wird NIE das Archiv gezeigt, sondern immer eine
-     ABGELEITETE Auswahl von acht Bildern — gestreut ueber die Welten, damit
-     der Tipp etwas unterscheidet, und gewichtet nach dem, was schon bekannt
-     ist. Der Kunde setzt nichts zusammen; er zeigt auf etwas, und die Engine
-     leitet neu ab. */
-  /* ── v45 — Die Design-Wand. Ein Modus, eine Antwort: alle aktiven Codes mit
-     Bild, plus die Facetten, nach denen sich filtern laesst. Kein Ranking-
-     Geheimnis: 'passend' ist nur eine Vorsortierung, die Wand zeigt alles. */
+  /* ── Die Design-Wand. Ein Modus, eine Antwort: alle aktiven Codes mit
+     Bild, plus die Facetten, nach denen sich filtern laesst. 'passend' ist
+     nur eine Vorsortierung, die Wand zeigt alles. */
   if ((req.body as any)?.codes === true) {
     try {
       const b = req.body as { register?: string | null; wirkstoff?: string | null; suche?: string | null; segment?: string | null };
@@ -1702,65 +955,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const {
     systemId,
     query,
-    renderBrief = null,
     selectedCapId = null,
     tier = 'lite',
-    segment = null,
     forceCodeId = null,
-    lautNudge = null,
-    farbortNudge = null,
     nocache: nocacheRoh = false,
-    dryRun = false,
-    sucheQuery = null,
-    boardLikes = [],
-    boardDislikes = [],
   } = req.body as {
     systemId: string;
     query: string;
-    sucheQuery?: string | null;
-    // Board-Tipps: Code-IDs, nicht Markennamen. Ein Tipp ist eine exakte
-    // Koordinate und schlaegt deshalb jedes Textmatching auf Markennamen.
-    boardLikes?: string[];
-    boardDislikes?: string[];
-    renderBrief?: string | null;
     selectedCapId?: string | null;
     tier?: Tier;
-    segment?: string | null;
     forceCodeId?: string | null;
-    lautNudge?: string | null;
-    farbortNudge?: 'koerper' | 'liquid' | null;
     nocache?: boolean;
-    // v27 — Behauptung ohne Bild: gleiche Ableitung, gleicher Code, kein
-    // fal.ai-Call. Der teure Schritt bleibt hinter dem zweiten Klick.
-    dryRun?: boolean;
   };
 
   if (!systemId || !query) {
     return res.status(400).json({ error: 'systemId und query sind erforderlich' });
   }
+  if (!forceCodeId) {
+    return res.status(400).json({ error: 'forceCodeId ist erforderlich — der Render braucht einen gewählten Design-Code' });
+  }
   if (tier !== 'lite' && tier !== 'pro') {
     return res.status(400).json({ error: 'tier muss "lite" oder "pro" sein' });
   }
 
-  // nocache umgeht den Cache und kostet damit bei jedem Aufruf einen
-  // frischen fal.ai-Lauf. Ab v46 nur noch mit Dev-Geheimnis im Header.
+  // nocache umgeht den Cache und kostet einen frischen fal.ai-Lauf —
+  // nur mit Dev-Geheimnis im Header.
   const nocache = nocacheRoh === true
     && !!process.env.ULBA_DEV_SECRET
     && req.headers['x-ulba-dev'] === process.env.ULBA_DEV_SECRET;
 
-  // Rendering-Brief aus der Suche hat Vorrang; Query bleibt Demand-Signal.
-  const effectiveBrief = (renderBrief && renderBrief.trim()) ? renderBrief.trim() : query;
+  const effectiveBrief = query;
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, segment, forceCodeId, lautNudge, farbortNudge);
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId);
     let cached: any[] = [];
-    // Dev-Bypass: nocache=true ueberspringt das Cache-Lesen -> immer frischer Render.
-    // dryRun liest den Cache nicht: der Cache haelt fertige BILDER. Wir
-    // wollen hier nur die Ableitung, und die soll denselben Weg nehmen wie
-    // beim echten Render — sonst behauptet der Screen etwas anderes als
-    // das Bild danach zeigt.
-    if (!nocache && !dryRun) try {
+    if (!nocache) try {
       cached = await airtableQuery(
         CACHE_TABLE,
         `{Cache_Key}='${key}'`,
@@ -1768,8 +998,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         1
       );
     } catch {
-      // z.B. Feld 'Board' noch nicht angelegt → als Cache-Miss behandeln, frisch rendern.
-      cached = [];
+      cached = []; // z.B. Feld fehlt → Cache-Miss, frisch rendern.
     }
     if (cached.length > 0) {
       const cachedImg = imgUrl(cached[0].fields['Bild']);
@@ -1779,18 +1008,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         try { produzierbar = cf['Produzierbar'] ? JSON.parse(cf['Produzierbar']) : null; } catch { produzierbar = null; }
         let board: any = {};
         try { board = cf['Board'] ? JSON.parse(cf['Board']) : {}; } catch { board = {}; }
-        const cachedConcept: Concept | null = (cf['Konzept_Name'] || cf['Szene_ID'] || produzierbar)
+        const cachedConcept: Concept | null = (cf['Konzept_Name'] || produzierbar)
           ? {
               konzept_name: cf['Konzept_Name'] || '',
               story: cf['Konzept_Story'] || '',
               rationale: cf['Konzept_Rationale'] || '',
               produzierbar,
               szene_id: cf['Szene_ID'] || '',
-              label: board.label,
+              // Neue Records tragen do_not/farbsystem im Board-JSON; alte
+              // Records liefern undefined — beides vertraegt das Frontend.
               palette: board.palette,
-              radar: board.radar,
-              zielprofil: board.zielprofil,
               design_code: board.design_code,
+              do_not: board.do_not,
+              farbsystem: board.farbsystem,
             }
           : null;
 
@@ -1826,65 +1056,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ── 4. Render-Strategie ─────────────────────────────────────────
-    // Fall C/D: Base und Cap NIE zusammen an Gemini geben — es zeichnet den
     // Fall C/D: Base und Cap werden GETRENNT recolort und GETRENNT angezeigt.
-    // Nie zusammen an ein Modell (Drift), kein Compositing (Positionierung entfaellt).
+    // Nie zusammen an ein Modell (Drift), kein Compositing.
     const useSplitRender = (fall === 'C' || fall === 'D') && !!capImageUrl;
-    const promptFall: RenderFall = useSplitRender ? 'A' : fall;
 
-    // ── 5. Assemble Rendering Prompt (Konzept-Brief) ────────────────
-    const { prompt: renderingPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, promptFall, sys.fields, capFields, segment, forceCodeId, lautNudge, farbortNudge, sucheQuery, boardLikes, boardDislikes);
-
-    // ── 5b. dryRun: Behauptung ausliefern, NICHT rendern ────────────
-    // Die Ableitung ist komplett (Code gewaehlt, Konzept gebaut) — nur das
-    // Bild fehlt. Ein Gehirn, zwei Ausgaenge: derselbe assemblePrompt-Lauf
-    // liefert erst die Behauptung, beim zweiten Aufruf (ohne dryRun) das
-    // Bild. Damit kann der Screen nie etwas anderes sagen als der Render.
-    if (dryRun) {
-      return res.status(200).json({
-        dryRun: true,
-        renderingUrl: null,
-        capRenderingUrl: null,
-        renderingPrompt: null,
-        briefUsed: effectiveBrief,
-        rejected: forbidden,
-        capId: resolvedCapId,
-        cached: false,
-        fall,
-        tier,
-        concept,
-      });
-    }
+    // ── 5. Prompts deterministisch assemblieren ─────────────────────
+    const { fullPrompt, basePrompt, capPrompt, refBild, forbidden, concept } =
+      await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId);
 
     // ── 6. Render ───────────────────────────────────────────────────
+    // Referenz_Bild des Codes reist als LETZTES Bild mit (Style-Referenz).
     let renderingUrl: string;
-
     let capRenderingUrl: string | null = null;
     let capPromptUsed: string | null = null;
+    const renderingPrompt = useSplitRender ? basePrompt : fullPrompt;
 
     if (useSplitRender) {
-      // ZWEI GETRENNTE EINZELBILD-RECOLORS (Architektur 04.08.):
-      // Einzelbild-Edit ist formtreu (bewiesen: Base App355, Cap Pipette+Gold).
-      // Zwei Bilder zusammen an ein Modell = Drift (bewiesen, 2x reproduziert).
-      // Base allein + Cap allein, parallel; beide Prompts zitieren DIESELBEN
-      // Konzept-Werte -> Kohaerenz per Konstruktion. Kein Compositing, keine
-      // Positionierung — Frontend zeigt den Cap in der eigenen Cap-Buehne.
-      // ALLE Farb-/Finish-/Akzent-Werte kommen aus concept.render — d.h. aus
-      // EINEM Design_Code-Record. Base-Prompt und Cap-Prompt zitieren dieselbe
-      // Quelle -> Kohaerenz per Konstruktion (Beweis 3, Zielarchitektur 04.08.).
-      const rc = concept.render || { bodyLineEn: 'Keep the body exactly as in the reference image.', capHex: null, capFinishEn: 'a clean matt finish', akzentEn: '' };
-      const capHex = rc.capHex;
-      const capFinishEn = rc.capFinishEn;
-      const akzentLine = rc.akzentEn ? ` Add ${rc.akzentEn}.` : '';
-      const baseOnlyPrompt = `${rc.bodyLineEn} Keep the exact same body shape, silhouette and proportions as the reference image. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck. Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle. Clean seamless white studio background, soft neutral lighting, centered. No label, sticker, text, logo or lettering anywhere.`;
-      const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
-      const capRecolorPrompt = `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in the reference image — change ONLY the surface colour and finish. Color the closure as ONE single solid ${capHex} tone across the whole closure with ${capFinishEn}.${akzentLine} Do NOT split it into multiple colored segments and do NOT use more than this one accent on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
-      const capOnlyPrompt = capHex ? capRecolorPrompt : capPreservePrompt;
-
+      const baseImgs = refBild ? [primaryUrl, refBild] : [primaryUrl];
+      // Preserve-Cap (kein Cap_Hex) braucht keine Style-Referenz — er bleibt roh.
+      const capImgs = (concept.render?.capHex && refBild) ? [capImageUrl!, refBild] : [capImageUrl!];
       const [baseUrl, capUrl] = await Promise.all([
-        falEdit([primaryUrl], baseOnlyPrompt, FAL_BASE_ENDPOINT),
-        falEdit([capImageUrl!], capOnlyPrompt, FAL_CAP_ENDPOINT).catch((e) => {
+        falEdit(baseImgs, basePrompt),
+        falEdit(capImgs, capPrompt!).catch((e) => {
           // Cap-Recolor darf nie den Gesamt-Render killen: Fallback = Roh-Cap.
           console.error('Cap-Recolor fehlgeschlagen — zeige Roh-Cap:', e);
           return capImageUrl!;
@@ -1892,19 +1085,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ]);
       renderingUrl = baseUrl;
       capRenderingUrl = capUrl;
-      capPromptUsed = capOnlyPrompt;
+      capPromptUsed = capPrompt;
     } else {
       const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
-      renderingUrl = await geminiEdit(imgs, renderingPrompt);
+      if (refBild) imgs.push(refBild);
+      renderingUrl = await falEdit(imgs, fullPrompt);
     }
 
-    // ── 7. AUSLIEFERN ZUERST, cachen danach (Hobby-60s-Haertung) ─────
-    // Frueher: erst 4 Airtable-Writes, DANN antworten. Bei fal ~40s + Writes
-    // ~8s riss die Funktion die 60s-Wand MITTEN im Cache-Schreiben -> Bild bei
-    // fal fertig, aber Client bekam nie eine Antwort ("Failed to fetch") und
-    // der Cache blieb leer. Jetzt: fal-URL sofort an den Client (fal-URLs leben
-    // ~1h, reicht zum Anzeigen). Cachen laeuft als Best-Effort DANACH; killt
-    // die 60s-Wand es, hat der Nutzer sein Bild trotzdem laengst.
+    // ── 7. AUSLIEFERN ZUERST, cachen danach ─────────────────────────
+    // fal-URLs leben ~1h, reicht zum Anzeigen. Cachen laeuft als
+    // Best-Effort DANACH; killt die 60s-Wand es, hat der Nutzer sein Bild.
     if (!res.headersSent) {
       res.status(200).json({
         renderingUrl,
@@ -1922,12 +1112,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ── 8. Persistieren (Best-Effort, nach der Antwort) ─────────────
-    // Ab hier darf ALLES scheitern, ohne den Nutzer zu betreffen — die Antwort
-    // ist raus. Ein Fehler wird geloggt, nie geworfen. Beim naechsten identischen
-    // Aufruf wird schlicht neu gerendert (Cache-Miss), bis ein Schreiben durchkommt.
+    // Ab hier darf ALLES scheitern, ohne den Nutzer zu betreffen.
     try {
     const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 15000, label: 'fal img download' })).arrayBuffer());
     const base64 = imgBuffer.toString('base64');
+    const boardJson = JSON.stringify({
+      palette: concept.palette,
+      design_code: concept.design_code,
+      do_not: concept.do_not,
+      farbsystem: concept.farbsystem,
+    });
 
     const createRes = await fetch(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`,
@@ -1944,13 +1138,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             Query_Input: query, // roh, nie sanitisiert — Demand-Signal
             Rendering_Prompt: renderingPrompt, // Base-Prompt (Provenienz)
             Cap_Prompt: capPromptUsed || '', // Cap-Prompt (Provenienz, symmetrisch)
-            // Konzept als eigene, auswertbare Felder (Demand-Signal / Provenienz).
             Konzept_Name: concept.konzept_name || '',
             Konzept_Story: concept.story || '',
             Konzept_Rationale: concept.rationale || '',
             Szene_ID: concept.szene_id || '',
             Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
-            Board: JSON.stringify({ label: concept.label, palette: concept.palette, radar: concept.radar, zielprofil: concept.zielprofil, design_code: concept.design_code }),
+            Board: boardJson,
             Tier: tier,
             Fall: fall,
             Created_At: new Date().toISOString(),
@@ -1960,7 +1153,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     );
 
     let createData = await createRes.json() as { id: string; error?: any };
-    // Haertung: unbekanntes Feld kippt NICHT mehr den ganzen Record. Airtable
+    // Haertung: unbekanntes Feld kippt NICHT den ganzen Record. Airtable
     // nennt das fehlende Feld -> wir droppen es und versuchen EINMAL erneut.
     if (!createData.id && createData.error?.type === 'UNKNOWN_FIELD_NAME') {
       const m = String(createData.error?.message || '').match(/\"([^\"]+)\"/);
@@ -1973,7 +1166,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           Konzept_Name: concept.konzept_name || '', Konzept_Story: concept.story || '',
           Konzept_Rationale: concept.rationale || '', Szene_ID: concept.szene_id || '',
           Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
-          Board: JSON.stringify({ label: concept.label, palette: concept.palette, radar: concept.radar, zielprofil: concept.zielprofil }),
+          Board: boardJson,
           Tier: tier, Fall: fall, Created_At: new Date().toISOString(),
         }}));
         delete retryBody.fields[badField];
@@ -1986,7 +1179,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
     if (!createData.id) {
-      // Antwort ist laengst raus — Cache-Fehler nur loggen, nichts mehr senden.
       console.error('Cache-Record Fehler (Antwort war bereits ausgeliefert):', JSON.stringify(createData.error || createData));
       return;
     }
@@ -2012,8 +1204,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // Cap-Bild SYMMETRISCH zur Base als echten Anhang hochladen (Bytes, nicht
-    // die temporaere fal-URL — die verfaellt). Non-fatal: scheitert der Upload,
-    // wird der Render trotzdem ausgeliefert.
+    // die temporaere fal-URL). Non-fatal.
     if (capRenderingUrl) {
       try {
         const capBuf = Buffer.from(await (await fetchT(capRenderingUrl, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
@@ -2038,16 +1229,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // Erfolgreich gecacht — Antwort war schon raus, hier gibt es nichts zu senden.
     } catch (cacheErr) {
-      // Best-Effort-Cache gescheitert (z.B. 60s-Wand mitten im Upload). Nutzer
-      // hat sein Bild; beim naechsten identischen Aufruf wird neu gerendert.
+      // Best-Effort-Cache gescheitert (z.B. 60s-Wand mitten im Upload).
       console.error('Cache-Persist fehlgeschlagen (Antwort war bereits raus):', cacheErr);
     }
     return;
   } catch (err) {
     // Fehler VOR der Auslieferung (fal-Timeout, Airtable-Read, Assembly).
-    // Nur hier darf noch ein 500 an den Client — sonst ist headersSent true.
     const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
     console.error('Render error:', message);
     if (!res.headersSent) return res.status(500).json({ error: message });
