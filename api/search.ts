@@ -1597,7 +1597,10 @@ function taktOk(req: VercelRequest, max: number, fensterMs: number): boolean {
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  const offen = riegel(req, res);
+  // v68 — Server-zu-Server (Suchtest aus Airtable): gleicher Schluessel wie
+  // /api/harmonize. Ohne gesetztes RENDER_SECRET bleibt dieser Weg zu.
+  const secret = process.env.RENDER_SECRET || '';
+  const offen = riegel(req, res) || (!!secret && req.headers['x-render-secret'] === secret);
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
