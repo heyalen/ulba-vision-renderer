@@ -470,9 +470,14 @@ function formelHinweis(cat: CategoryConstraints | null, query: string): string |
   const g: string[] = [];
   const oxidAktiv = /vitamin\s*c|ascorb|retinol|retinal|niacin/.test(q);
   if (flags.has('oxidationsempfindlich_moeglich')) {
-    g.push(oxidAktiv
+    // v68 — der Satz muss stimmen: ausgeblendet wird nur bei erkanntem
+    // Wirkstoff, und nie, wenn der Nutzer die Pipette selbst verlangt.
+    const pipetteGewollt = /pipett|tropf|dropper/.test(q);
+    g.push(oxidAktiv && !pipetteGewollt
       ? 'die Formel ist licht- und oxidationsempfindlich — darum zeige ich dir keine offenen Pipetten in Klarglas'
-      : 'solche Formeln sind oft lichtempfindlich — offene Pipetten in Klarglas lasse ich weg');
+      : oxidAktiv
+        ? 'die Formel ist licht- und oxidationsempfindlich — nimm die Pipette am besten mit getöntem Glas oder Überkappe'
+        : 'bei licht- oder luftempfindlichen Wirkstoffen (Vitamin C, Retinol) ist getöntes Glas die sichere Wahl');
   }
   if (flags.has('hochviskos')) g.push('sie ist dickflüssig — Pipette und Spray fallen weg, Tiegel, Tube und Pumpe passen');
   if (flags.has('niedrigviskos')) g.push('sie ist dünnflüssig — Tropfer, Pipette und Spray sind hier stark');
