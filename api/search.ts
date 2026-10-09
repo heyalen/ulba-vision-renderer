@@ -1283,6 +1283,8 @@ const SYNONYME: [RegExp, string, string][] = [
   [/\b(bauchig|kugel|spherical|bulbous)/i, 'A1_Body_Geometry', 'Spherical / Bulbous'],
   [/\b(facett|hexagon|sechseck)/i, 'A1_Body_Geometry', 'Hexagonal / Faceted'],
   [/\b(tropfen|teardrop)/i, 'A1_Body_Geometry', 'Teardrop'],
+  [/(nach unten (verj[uü]ng|schmaler|enger)|unten schmal|oben breit|tapered down|umgekehrt konisch)/i, 'A1_Body_Geometry', 'Tapered Downwards'],
+  [/(nach oben (verj[uü]ng|schmaler|enger)|oben schmal|unten breit|tapered up|pyramid|konisch)/i, 'A1_Body_Geometry', 'Tapered Upwards'],
   [/\b(skulptur|freeform|organisch)/i, 'A1_Body_Geometry', 'Sculptural / Freeform'],
   [/\b(schlank|hoch und schmal|elongated|tall)/i, 'A2_Body_Proportion', 'Tall & Narrow (Elongated)'],
   [/\b(gedrungen|squat|breit und flach)/i, 'A2_Body_Proportion', 'Squat & Wide'],
@@ -1320,13 +1322,29 @@ const SYNONYME: [RegExp, string, string][] = [
   [/\b(flache kappe|flat cap|low cap)/i, 'B4_Cap_Height', 'Low (Flat)'],
   [/\b(hohe kappe|oversized cap|high cap)/i, 'B4_Cap_Height', 'High / Oversized'],
 ];
-function attributBoost(ranked: RankedProduct[], query: string, tags: Map<string, Map<string, Set<string>>>, caps: Map<string, Map<string, Set<string>>>): RankedProduct[] {
-  const gewollt = SYNONYME.filter(([re]) => re.test(query));
+// v67 — Was die Query beim Namen nennt: Synonyme + jeder deutsche Bibliotheks-
+// Label wörtlich ("nach unten verjüngend", "dickwandig"). Neue Bibliothekswerte
+// sind damit ohne Code-Änderung suchbar. Pro Kategorie gewinnt der erste Treffer
+// (Synonym vor Label), damit "konisch" nicht zugleich oben und unten heisst.
+const norm = (t: string) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+function gewollteMerkmale(query: string, attrWerte: AttrWert[]): [string, string][] {
+  const q = ` ${norm(query).replace(/[^a-z0-9&]+/g, ' ')} `;
+  const raus = new Map<string, string>();
+  for (const [re, kat, wert] of SYNONYME) if (re.test(query) && !raus.has(kat)) raus.set(kat, wert);
+  for (const w of attrWerte) {
+    if (raus.has(w.kategorie)) continue;
+    const label = norm((w.beschreibung || '').split('·')[0].trim()).replace(/[^a-z0-9&]+/g, ' ').trim();
+    if (label.length >= 5 && q.includes(` ${label} `)) raus.set(w.kategorie, w.name);
+  }
+  return Array.from(raus.entries());
+}
+
+function attributBoost(ranked: RankedProduct[], gewollt: [string, string][], tags: Map<string, Map<string, Set<string>>>, caps: Map<string, Map<string, Set<string>>>): RankedProduct[] {
   if (!gewollt.length) return ranked;
   return ranked.map(r => {
     const m = merkmaleVon(r.id, r.capIds, tags, caps);
     let delta = 0; const why: string[] = [];
-    for (const [, kat, wert] of gewollt) {
+    for (const [kat, wert] of gewollt) {
       const hat = m.get(kat);
       if (!hat || hat.size === 0) continue;             // ungetaggt: neutral
       if (hat.has(wert)) { delta += 6; why.push(`+${wert}`); }
@@ -1588,6 +1606,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Das Foto im Vokabular des Archivs taggen — 33 Kategorien, gewichtet.
     const katMap = nachKategorie(attrWerte);
+    let gewollt: [string, string][] = [];
     const katGewicht = new Map<string, number>();
     katMap.forEach((werte, kat) => katGewicht.set(kat, werte[0]?.gewicht ?? 0.03));
     const tags = systemTags(attrWerte);
@@ -1788,7 +1807,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Text dabei: Claude rankt weiter, die Bildlesart kommt als Kontext.
       const rankQuery = lesart ? effektiveQuery + lesartKontext(lesart) : effektiveQuery;
       ranked = await claudeRank(rankQuery, filtered, category, identity, wall, merkmale);
-      ranked = attributBoost(ranked, effektiveQuery, tags, kappenTags);
+      gewollt = gewollteMerkmale(effektiveQuery, attrWerte);
+      ranked = attributBoost(ranked, gewollt, tags, kappenTags);
       if (lesart) {
         for (const r of ranked) {
           const hf = hardfactScore(r, lesart);
@@ -1860,6 +1880,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Interne Felder nicht an Client leaken (capIds, excluded)
     const publicResults = ranked.map(({ capIds, excluded, ...rest }) => ({ ...rest, merkmale: merkmalListe(rest.id, capIds) }));
+    // v67 — Form/Proportion/Wandung, die die Query wörtlich nennt, kommen als
+    // vorgewählte Eingrenz-Chips zurück: der Ranker sortiert nur, die Liste
+    // soll aber zeigen, was gefragt ist. Nur Identität (A*), nie Veredelung —
+    // ein Lieferantenfoto in Klarglas ist dasselbe Teil wie mattiert. Und nur,
+    // wenn mindestens ein Ergebnis passt — sonst lieber alles zeigen.
+    const merkmalWahl = gewollt
+      .filter(([kat]) => /^A[125]_/.test(kat))
+      .map(([kat, wert]) => `${kat}::${wert}`)
+      .filter(k => publicResults.some(r => r.merkmale.some(m => `${m.kat}::${m.wert}` === k)));
 
     // 8. Log (fire-and-forget)
     const SEARCH_LOG_TABLE = 'tbljh9GowT7JkJcn4';
@@ -1885,6 +1914,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json({
       results: publicResults,
+      merkmal_wahl: merkmalWahl,
       query: effektiveQuery,
       // v47 — korrigierbare Chips. `geraten` sagt dem Frontend, welche
       // gestrichelt zu zeichnen sind. Korrektur zurueckschicken als
