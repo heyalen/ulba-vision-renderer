@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 
-/* ── render.ts v45 — der vereinfachte Renderer ────────────────────────────
+/* ── render.ts v46 — der vereinfachte Renderer ────────────────────────────
    Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
    (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
    was nur dem alten Mehr-Runden-Briefing diente, ist raus:
@@ -10,9 +10,13 @@ import { createHash } from 'crypto';
    keine Farbpaletten-/Produkt_Regeln-Ladung, keine Szenen.
    Geblieben: das SF-Faehigkeitsmodell (Produzierbarkeit by construction),
    die deterministische Prompt-Assembly, das Farb-Rollensystem, der Cache.
-   NEU: das Referenz_Bild des gewaehlten Codes reist als Style-Referenz
-   in image_urls[] mit — Farbe/Finish/Anmutung aus dem echten Marktprodukt,
-   nie dessen Form. */
+   v46: Referenz_Bild wieder RAUS aus image_urls (Live-Test XTAG: Seedream
+   uebernimmt Formen aus der Stil-Referenz — Geometrie-Kontamination;
+   Detailtreue schlaegt alles). Stil kommt jetzt aus Design_Code.
+   Render_Rezept: prompt-fertiger englischer Text, verbatim in den Prompt,
+   VOR den mechanischen Farb-/Finish-Zeilen; leer -> heutiges Verhalten.
+   Dazu haerterer Geometrie-Lock (strict recolor of the SAME object) und
+   das Seitenverhaeltnis des Produktfotos statt 'auto'. */
 
 // ── fetch mit hartem Timeout ──────────────────────────────────────────────
 // Ohne dies wartet ein haengender externer Call (fal.ai / Airtable) bis
@@ -48,7 +52,7 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-const RENDER_VERSION = 'v45';
+const RENDER_VERSION = 'v46';
 // EIN Modell fuer alles (A/B-Test 04.08.: Seedream hielt Detail + Matt-Haptik
 // besser als Gemini). Multi-Image via image_urls[].
 const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edit';
@@ -56,12 +60,13 @@ const FAL_SEEDREAM_EDIT = 'https://fal.run/fal-ai/bytedance/seedream/v5/lite/edi
 type Tier = 'lite' | 'pro';
 type RenderFall = 'A' | 'B' | 'C' | 'D';
 
-// Ein fal-Edit-Aufruf → Bild-URL.
-async function falEdit(imageUrls: string[], prompt: string): Promise<string> {
+// Ein fal-Edit-Aufruf → Bild-URL. aspect_ratio: Preset aus dem Eingabefoto
+// (aspectFromAttachment), 'auto' nur als letzter Fallback.
+async function falEdit(imageUrls: string[], prompt: string, aspectRatio: string = 'auto'): Promise<string> {
   const r = await fetchT(FAL_SEEDREAM_EDIT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
-    body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: 'auto' }),
+    body: JSON.stringify({ prompt, image_urls: imageUrls, aspect_ratio: aspectRatio }),
     timeoutMs: 120000, label: 'fal.ai edit',
   });
   if (!r.ok) throw new Error(`fal.ai edit: ${await r.text()}`);
@@ -87,6 +92,29 @@ function imgUrl(attachmentField: any): string | null {
     return attachmentField[0].url || attachmentField[0].thumbnails?.full?.url || null;
   }
   return null;
+}
+
+// ── Seitenverhaeltnis aus dem Eingabefoto ───────────────────────────
+// Airtable-Bildanhaenge tragen width/height. Der Render soll das Format
+// des Produktfotos behalten (keine Beschnitt-/Streck-Artefakte); gemappt
+// wird auf das naechstliegende fal-Preset (dasselbe Preset-Set, das der
+// fruehere Gemini-Edit-Endpoint dokumentiert — Seedream teilt bei fal das
+// I/O-Schema). 'auto' nur, wenn keine Masse vorliegen.
+const FAL_RATIOS: Array<[string, number]> = [
+  ['21:9', 21 / 9], ['16:9', 16 / 9], ['3:2', 3 / 2], ['4:3', 4 / 3],
+  ['1:1', 1], ['3:4', 3 / 4], ['2:3', 2 / 3], ['9:16', 9 / 16],
+];
+function aspectFromAttachment(attachmentField: any): string {
+  const a = Array.isArray(attachmentField) && attachmentField[0] ? attachmentField[0] : null;
+  const w = Number(a?.width), h = Number(a?.height);
+  if (!w || !h || !isFinite(w) || !isFinite(h)) return 'auto';
+  const r = w / h;
+  let best = 'auto', bestD = Infinity;
+  for (const [name, v] of FAL_RATIOS) {
+    const d = Math.abs(Math.log(r / v)); // log-Distanz: symmetrisch fuer Hoch/Quer
+    if (d < bestD) { bestD = d; best = name; }
+  }
+  return best;
 }
 
 async function airtableFetch(table: string, recordId: string): Promise<any> {
@@ -124,32 +152,34 @@ async function airtableListAll(table: string): Promise<any[]> {
 }
 
 // ── Determine Rendering Fall ────────────────────────────────────────
-function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; hasMultipleCaps: boolean } {
-  const bildRohBase = imgUrl(sys.fields['Bild_Roh_Base']);
+function determineFall(sys: any): { fall: RenderFall; primaryUrl: string; primaryAspect: string; hasMultipleCaps: boolean } {
+  const attRoh = sys.fields['Bild_Roh_Base'];
   // Bild_Harmonisiert ist der bevorzugte Anker (neutrales Studio-Foto),
   // Bild_System nur Fallback. Fall C/D (Base+Cap) bleibt auf Roh_Base.
-  const bildSystem = imgUrl(sys.fields['Bild_Harmonisiert']) || imgUrl(sys.fields['Bild_System']);
+  const attSys = imgUrl(sys.fields['Bild_Harmonisiert']) ? sys.fields['Bild_Harmonisiert'] : sys.fields['Bild_System'];
+  const bildRohBase = imgUrl(attRoh);
+  const bildSystem = imgUrl(attSys);
   const caps = sys.fields['Caps'] as any[] | undefined;
   const capCount = caps?.length || 0;
 
   if (!bildRohBase && !bildSystem) throw new Error('Kein Bild vorhanden');
 
   if (bildSystem && capCount === 0) {
-    return { fall: 'A', primaryUrl: bildSystem, hasMultipleCaps: false };
+    return { fall: 'A', primaryUrl: bildSystem, primaryAspect: aspectFromAttachment(attSys), hasMultipleCaps: false };
   }
   if (bildSystem && !bildRohBase && capCount > 0) {
-    return { fall: 'B', primaryUrl: bildSystem, hasMultipleCaps: capCount > 1 };
+    return { fall: 'B', primaryUrl: bildSystem, primaryAspect: aspectFromAttachment(attSys), hasMultipleCaps: capCount > 1 };
   }
   if (bildRohBase && capCount === 1) {
-    return { fall: 'C', primaryUrl: bildRohBase, hasMultipleCaps: false };
+    return { fall: 'C', primaryUrl: bildRohBase, primaryAspect: aspectFromAttachment(attRoh), hasMultipleCaps: false };
   }
   if (bildRohBase && capCount > 1) {
-    return { fall: 'D', primaryUrl: bildRohBase, hasMultipleCaps: true };
+    return { fall: 'D', primaryUrl: bildRohBase, primaryAspect: aspectFromAttachment(attRoh), hasMultipleCaps: true };
   }
   if (bildRohBase && capCount === 0) {
-    return { fall: 'A', primaryUrl: bildRohBase, hasMultipleCaps: false };
+    return { fall: 'A', primaryUrl: bildRohBase, primaryAspect: aspectFromAttachment(attRoh), hasMultipleCaps: false };
   }
-  return { fall: 'A', primaryUrl: (bildSystem || bildRohBase)!, hasMultipleCaps: false };
+  return { fall: 'A', primaryUrl: (bildSystem || bildRohBase)!, primaryAspect: aspectFromAttachment(bildSystem ? attSys : attRoh), hasMultipleCaps: false };
 }
 
 // ── Field readers ───────────────────────────────────────────────────
@@ -259,8 +289,12 @@ function grafikRegel(typoHaltung: string | null | undefined, akzentHex: string |
 function buildHardRule(closureRule: string, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null): string {
   return [
     'CRITICAL RULES — these override everything above.',
+    // Geometrie-Lock (v46, Live-Test XTAG): Seedream formte den Pumpkopf um
+    // und erfand Streifen. Deshalb explizit: gleiches physisches Objekt.
+    'This is a strict recolor and restyle of the SAME physical object. Keep silhouette, proportions, wall thickness, shoulder, collar, and every step and part of the pump/closure EXACTLY as in the photo — identical geometry, identical mechanism. Change ONLY surface colour, finish and tint.',
     'Do not change the shape, silhouette, proportions or size of the packaging.',
     'Do not redesign the bottle: no angular, faceted, architectural, geometric or tapered body, no new silhouette, no different neck — the container outline must stay identical to the reference image.',
+    'Do not add stripes, bars, lines, dots, patterns, badges or any other graphic element beyond what this prompt explicitly specifies.',
     closureRule,
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
@@ -421,7 +455,10 @@ function wirkstoffTreffer(text: string, liste: WirkstoffRef[]): WirkstoffRef | n
 type DesignCodeRec = {
   id: string;
   name: string;
-  bild: string | null;   // Referenz_Bild — das echte Marktprodukt (Style-Referenz)
+  // Render_Rezept (fldPnvXZEc5pXZyNg): prompt-fertiger englischer Stil-Block,
+  // von Alen kuratiert. Gefuellt -> verbatim in den Prompt; leer -> Fallback
+  // auf die aus Achsen/Hex generierten Stilzeilen (heutiges Verhalten).
+  rezept: string | null;
   bodyBehandlung: string;
   farbort: string;
   bodyHex: string | null;
@@ -498,7 +535,7 @@ async function assemblePrompt(
   forceCodeId: string
 ): Promise<{
   fullPrompt: string; basePrompt: string; capPrompt: string | null;
-  refBild: string | null; forbidden: string[]; concept: Concept;
+  forbidden: string[]; concept: Concept;
 }> {
   const designCodesAll = await airtableListAll(DESIGN_CODE_TABLE);
 
@@ -599,7 +636,7 @@ async function assemblePrompt(
       return {
         id: r.id,
         name: String(f['Name'] || ''),
-        bild: (() => { const a = f['Referenz_Bild']; return Array.isArray(a) && a[0] ? (a[0].thumbnails?.large?.url || a[0].url || null) : null; })(),
+        rezept: (() => { const v = fieldAny(f, ['Render_Rezept', 'Render Rezept']); return v ? String(v).trim() : null; })(),
         bodyBehandlung,
         farbort,
         bodyHex: String(f['Body_Hex'] || '').trim() || null,
@@ -724,12 +761,26 @@ async function assemblePrompt(
     : code.doNot);
   const studioLine = `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`;
   const codeAkzentEn = akzentCueEn(code.akzentCue, code.akzentHex);
-  // NEU: Referenz_Bild des Codes als Style-Referenz. Immer das LETZTE Bild
-  // in image_urls[] — der Satz nennt den Index explizit.
-  const refBild = code.bild;
-  const styleRefLine = (idx: number) => refBild
-    ? `Image ${idx} is a style reference only: take the colour mood, finish quality, material feel and overall premium atmosphere from it — NEVER its shape, geometry, proportions, closure, text, logos or label layout. The product keeps its own exact form from image 1.`
+  // ── Render_Rezept: kuratierter Stil-Block, verbatim, VOR den mechanischen
+  // Farb-/Finish-Zeilen. Hex-Werte bleiben als Verstaerkung (Anker-Zeile),
+  // aber das Rezept gewinnt bei jedem Konflikt — insbesondere bei Umleitung/
+  // klar_liquid_farbe, wo die generierte Tint-Zeile sonst blass gegen das
+  // Rezept arbeitet (Live-Test XTAG: #00AEEF blass statt gesaettigt, kein
+  // Verlauf). Kein Rezept -> exakt das bisherige, generierte Verhalten.
+  const rezept = code.rezept;
+  const rezeptBlock = rezept
+    ? `STYLE RECIPE for this design world — follow it precisely; on any conflict with the colour lines in this prompt, the recipe wins: ${rezept}`
     : '';
+  const hexAnker = [
+    code.bodyHex ? `body ${code.bodyHex}` : '',
+    code.capHex ? `closure ${code.capHex}` : '',
+    code.akzentHex ? `accent ${code.akzentHex}` : '',
+  ].filter(Boolean).join(', ');
+  const ankerLine = rezept && hexAnker ? `Colour anchors reinforcing the recipe: ${hexAnker}.` : '';
+  // Rezept gewinnt die Body-Zeile: bei Typ-B-Umleitung oder klar_liquid_farbe
+  // wuerde die mechanische Zeile ("liquid is a clean X") dem Rezept
+  // widersprechen — dann faellt sie weg. Sonst bleibt sie als Verstaerkung.
+  const rezeptGewinnt = !!rezept && (!!code.umleitung || code.bodyBehandlung === 'klar_liquid_farbe');
 
   // ── Vollbild-Prompt (Fall A/B, ein Render) ─────────────────────────
   const fullLines: string[] = [];
@@ -740,14 +791,21 @@ async function assemblePrompt(
   }
   fullLines.push(materialLine);
   if (capMaterialLine) fullLines.push(capMaterialLine);
-  fullLines.push(bodyLineEn);
-  if (code.capHex) {
-    fullLines.push(`Color the closure/cap as ONE single solid ${code.capHex} tone with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt} — never the body colour on the cap.`);
+  if (rezept) {
+    // Rezept-Pfad: der kuratierte Block traegt den Stil; die generierten
+    // Zeilen schrumpfen auf Anker + (falls konfliktfrei) die Body-Zeile.
+    fullLines.push(rezeptBlock);
+    if (ankerLine) fullLines.push(ankerLine);
+    if (!rezeptGewinnt) fullLines.push(bodyLineEn);
+  } else {
+    fullLines.push(bodyLineEn);
+    if (code.capHex) {
+      fullLines.push(`Color the closure/cap as ONE single solid ${code.capHex} tone with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt} — never the body colour on the cap.`);
+    }
+    if (codeAkzentEn) fullLines.push(`Add ${codeAkzentEn}.`);
+    if (farbsys.regelEn) fullLines.push(farbsys.regelEn);
   }
-  if (codeAkzentEn) fullLines.push(`Add ${codeAkzentEn}.`);
-  if (farbsys.regelEn) fullLines.push(farbsys.regelEn);
   if (avoidLine) fullLines.push(avoidLine);
-  fullLines.push(styleRefLine(fall === 'B' ? 3 : 2));
   fullLines.push(studioLine);
   const closureRuleFull = fall === 'A'
     ? 'Do not add, remove, replace or restyle the closure — keep the closure exactly as shown in the reference image.'
@@ -761,25 +819,45 @@ async function assemblePrompt(
   baseLines.push(`Keep the exact same body shape, silhouette and proportions as reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck.`);
   if (attrLine) baseLines.push(attrLine);
   baseLines.push(materialLine);
-  baseLines.push(bodyLineEn);
-  if (farbsys.regelEn) baseLines.push(farbsys.regelEn);
+  if (rezept) {
+    baseLines.push(rezeptBlock);
+    if (ankerLine) baseLines.push(ankerLine);
+    if (!rezeptGewinnt) baseLines.push(bodyLineEn);
+  } else {
+    baseLines.push(bodyLineEn);
+    if (farbsys.regelEn) baseLines.push(farbsys.regelEn);
+  }
   if (avoidLine) baseLines.push(avoidLine);
-  baseLines.push(styleRefLine(2));
   baseLines.push(studioLine);
   const closureRuleBase = 'Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle — the neck stays open exactly as in reference image 1.';
   const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex)}`;
 
-  // Cap: Recolor (Code hat Cap_Hex) oder Preserve (ohne Hex bleibt er roh).
+  // Cap: Rezept-Variante (Rezept vorhanden — das ganze Rezept reist mit,
+  // die Closure-Behandlung kommt daraus), sonst Recolor (Cap_Hex) oder
+  // Preserve (ohne Hex bleibt er roh).
   const akzentLine = codeAkzentEn ? ` Add ${codeAkzentEn}.` : '';
-  const capRecolorPrompt = [
-    `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish. Color the closure as ONE single solid ${code.capHex} tone across the whole closure with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}.${akzentLine} Do NOT split it into multiple colored segments and do NOT use more than this one accent on it. If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size.`,
+  // Geometrie-Lock fuer den Cap (v46, Live-Test XTAG: Pumpkopf wurde zu
+  // einem klobigen weissen Stufen-Pumpkopf umgeformt).
+  const capGeoLock = `This is a strict recolor and restyle of the SAME physical closure. Keep silhouette, proportions, wall thickness, collar, and every step and part of the pump/closure EXACTLY as in reference image 1 — identical geometry, identical mechanism. Change ONLY surface colour, finish and tint. Do not add stripes, bars, lines, dots, patterns, badges or any other graphic element beyond what this prompt explicitly specifies.`;
+  const capTailLock = `If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in reference image 1; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
+  const capRezeptPrompt = [
+    `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish.`,
+    rezeptBlock,
+    `Apply to this closure exactly the closure treatment the recipe describes — and nothing beyond it.${code.capHex ? ` Its closure anchor colour is ${code.capHex} with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}; the recipe wins on any conflict.` : ''}`,
+    capGeoLock,
     capMaterialLine,
     avoidLine,
-    refBild ? `Image 2 is a style reference only: take the colour mood and finish quality from it — NEVER its shape, parts or any text or logos. The closure keeps its own exact form from image 1.` : '',
-    `The image contains ONLY this closure exactly as in reference image 1; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`,
+    capTailLock,
+  ].filter(Boolean).join(' ');
+  const capRecolorPrompt = [
+    `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish. Color the closure as ONE single solid ${code.capHex} tone across the whole closure with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}.${akzentLine} Do NOT split it into multiple colored segments and do NOT use more than this one accent on it.`,
+    capGeoLock,
+    capMaterialLine,
+    avoidLine,
+    capTailLock,
   ].filter(Boolean).join(' ');
   const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
-  const capPrompt = split ? (code.capHex ? capRecolorPrompt : capPreservePrompt) : null;
+  const capPrompt = split ? (rezept ? capRezeptPrompt : (code.capHex ? capRecolorPrompt : capPreservePrompt)) : null;
 
   // ── Konzept — deterministisch aus dem Code (kein LLM) ──────────────
   const displayHex = [code.bodyHex, code.capHex, code.akzentHex].filter(Boolean) as string[];
@@ -824,7 +902,7 @@ async function assemblePrompt(
     },
   };
 
-  return { fullPrompt, basePrompt, capPrompt, refBild, forbidden, concept };
+  return { fullPrompt, basePrompt, capPrompt, forbidden, concept };
 }
 
 // ── Design-Wand ({codes:true}): leichte Code-Liste mit Facetten ──────
@@ -1038,10 +1116,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 2. Fetch System Record ──────────────────────────────────────
     const sys = await airtableFetch(SYSTEM_TABLE, systemId);
-    const { fall, primaryUrl } = determineFall(sys);
+    const { fall, primaryUrl, primaryAspect } = determineFall(sys);
 
     // ── 3. Resolve Cap ──────────────────────────────────────────────
     let capImageUrl: string | null = null;
+    let capAspect = 'auto';
     let capFields: any | null = null;
     let resolvedCapId: string | null = selectedCapId;
 
@@ -1051,7 +1130,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       resolvedCapId = capId;
       const capRec = await airtableFetch(CAP_TABLE, capId);
       capFields = capRec.fields;
-      capImageUrl = imgUrl(capRec.fields['Cap_Bild_Harmonisiert']) || imgUrl(capRec.fields['Cap_Bild']);
+      const capAtt = imgUrl(capRec.fields['Cap_Bild_Harmonisiert'])
+        ? capRec.fields['Cap_Bild_Harmonisiert'] : capRec.fields['Cap_Bild'];
+      capImageUrl = imgUrl(capAtt);
+      capAspect = aspectFromAttachment(capAtt);
       if (!capImageUrl) throw new Error(`Cap ${capId} hat kein Bild`);
     }
 
@@ -1061,23 +1143,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const useSplitRender = (fall === 'C' || fall === 'D') && !!capImageUrl;
 
     // ── 5. Prompts deterministisch assemblieren ─────────────────────
-    const { fullPrompt, basePrompt, capPrompt, refBild, forbidden, concept } =
+    const { fullPrompt, basePrompt, capPrompt, forbidden, concept } =
       await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId);
 
     // ── 6. Render ───────────────────────────────────────────────────
-    // Referenz_Bild des Codes reist als LETZTES Bild mit (Style-Referenz).
+    // image_urls = NUR das/die Produktfoto(s). Kein Referenz_Bild mehr:
+    // Seedream uebernimmt sonst Formen aus der Stil-Referenz (Live-Test
+    // XTAG — Geometrie-Kontamination). Detailtreue schlaegt alles.
+    // aspect_ratio = Format des jeweiligen Eingabefotos.
     let renderingUrl: string;
     let capRenderingUrl: string | null = null;
     let capPromptUsed: string | null = null;
     const renderingPrompt = useSplitRender ? basePrompt : fullPrompt;
 
     if (useSplitRender) {
-      const baseImgs = refBild ? [primaryUrl, refBild] : [primaryUrl];
-      // Preserve-Cap (kein Cap_Hex) braucht keine Style-Referenz — er bleibt roh.
-      const capImgs = (concept.render?.capHex && refBild) ? [capImageUrl!, refBild] : [capImageUrl!];
       const [baseUrl, capUrl] = await Promise.all([
-        falEdit(baseImgs, basePrompt),
-        falEdit(capImgs, capPrompt!).catch((e) => {
+        falEdit([primaryUrl], basePrompt, primaryAspect),
+        falEdit([capImageUrl!], capPrompt!, capAspect).catch((e) => {
           // Cap-Recolor darf nie den Gesamt-Render killen: Fallback = Roh-Cap.
           console.error('Cap-Recolor fehlgeschlagen — zeige Roh-Cap:', e);
           return capImageUrl!;
@@ -1088,8 +1170,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       capPromptUsed = capPrompt;
     } else {
       const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
-      if (refBild) imgs.push(refBild);
-      renderingUrl = await falEdit(imgs, fullPrompt);
+      renderingUrl = await falEdit(imgs, fullPrompt, primaryAspect);
     }
 
     // ── 7. AUSLIEFERN ZUERST, cachen danach ─────────────────────────
