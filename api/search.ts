@@ -153,7 +153,7 @@ function parseQuery(query: string): ParsedQuery & { freeHints: FreeHints } {
   // Material → REALE Options
   const materialMentions: string[] = [];
   const addMat = (v: string) => { if (!materialMentions.includes(v)) materialMentions.push(v); };
-  if (/\bglas\b|glass|gläser|glaeser/.test(q)) addMat('Glas');
+  if (/\bglas(?!ur)|glass|gläser|glaeser/.test(q)) addMat('Glas');   // auch "Glasflasche", "Glastiegel"
   if (/\bpcr\b|recycl|rezyklat|r-pet|rpet/.test(q)) { addMat('Glas PCR 100 %'); addMat('R-PET'); }
   if (/\bpet\b/.test(q)) addMat('PET');
   if (/petg/.test(q)) addMat('PETG');
@@ -1961,10 +1961,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // aktive Filter-Pillen zurück (wie Typ/Material). Nur, wenn mindestens
     // ein Ergebnis passt — sonst lieber alles zeigen als nichts.
     // Keine Doppel-Pille: Material/Verschluss stehen schon als harte Filter oben.
-    const merkmalWahl = gewollt
+    const genannt = gewollt
       .filter(([kat]) => !(kat.startsWith('D1_') && parsed.materialMentions.length) && !(kat.startsWith('F1_') && parsed.closureMentions.length))
-      .map(([kat, wert]) => ({ key: `${kat}::${wert}`, label: labelVon.get(`${kat}::${wert}`) || wert }))
-      .filter(x => publicResults.some(r => r.merkmale.some(m => `${m.kat}::${m.wert}` === x.key)));
+      .map(([kat, wert]) => ({ key: `${kat}::${wert}`, label: labelVon.get(`${kat}::${wert}`) || wert }));
+    const vorhanden = (k: string) => publicResults.some(r => r.merkmale.some(m => `${m.kat}::${m.wert}` === k));
+    const merkmalWahl = genannt.filter(x => vorhanden(x.key));
+    // Ehrlich sagen, was verstanden wurde, aber im Katalog fehlt ("schwarz").
+    const merkmalFehlt = genannt.filter(x => !vorhanden(x.key)).map(x => x.label);
 
     // 8. Log (fire-and-forget)
     const SEARCH_LOG_TABLE = 'tbljh9GowT7JkJcn4';
@@ -1991,6 +1994,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json({
       results: publicResults,
       merkmal_wahl: merkmalWahl,
+      merkmal_fehlt: merkmalFehlt,
       query: effektiveQuery,
       // v47 — korrigierbare Chips. `geraten` sagt dem Frontend, welche
       // gestrichelt zu zeichnen sind. Korrektur zurueckschicken als
