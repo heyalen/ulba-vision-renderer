@@ -182,7 +182,7 @@ function parseQuery(query: string): ParsedQuery & { freeHints: FreeHints } {
     [/pipette|dropper|tropfer/, 'Pipette'],
     [/schraub|screw/, 'Schraubverschluss'],
     [/flip[-\s]?top|flip[-\s]?cap/, 'Flip-top'],
-    [/\bpump(e|en)?\b/, 'Pump'],
+    [/pump/, 'Pump'],   // auch "Dosierpumpe", "Pumpspender
     [/spray|sprüh|spruh/, 'Spray'],
     [/airless/, 'Airless'],
     [/stopfen|stopper/, 'Stopfen'],
