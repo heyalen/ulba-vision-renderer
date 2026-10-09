@@ -720,13 +720,15 @@ async function claudeRank(
   products: ProductData[],
   category: CategoryConstraints | null,
   identity: Identity | null,
-  wall: FormulaWall
+  wall: FormulaWall,
+  merkmale: (p: ProductData) => string = () => '',
 ): Promise<RankedProduct[]> {
   if (products.length === 0) return [];
 
-  const productList = products.map((p, i) =>
-    `[${i}] ${p.name} | Type: ${p.type} | Material: ${p.material.join(',')} | Form: ${p.form.join(',')} | Closure: ${p.closure} | Fähigkeiten: ${p.capabilities.join(',') || '—'} | Sizes: ${p.availableSizes.join(',')} | ${p.description}`
-  ).join('\n');
+  const productList = products.map((p, i) => {
+    const mk = merkmale(p);
+    return `[${i}] ${p.name} | Type: ${p.type} | Material: ${p.material.join(',')} | Form: ${p.form.join(',')} | Closure: ${p.closure} | Fähigkeiten: ${p.capabilities.join(',') || '—'} | Sizes: ${p.availableSizes.join(',')}${mk ? ` | Merkmale: ${mk}` : ''} | ${p.description}`;
+  }).join('\n');
 
   let categoryContext = '';
   if (category) {
@@ -746,7 +748,8 @@ async function claudeRank(
   const systemPrompt = `Du bist Sourcing-Experte für Beauty-Packaging.
 Ranke, wie gut jedes Produkt zum Brief passt — emotional UND funktional.
 Die harten physikalischen Wände sind bereits angewandt; ranke innerhalb der erlaubten Menge.
-Berücksichtige: Register, Lautstärke/Ton (Q6, orthogonal), Zielgruppe, Material-Sprache, Formsprache.${categoryContext}${identityContext}${wallContext}
+Berücksichtige: Register, Lautstärke/Ton (Q6, orthogonal), Zielgruppe, Material-Sprache, Formsprache.
+"Merkmale" sind am Foto belegte Eigenschaften (Geometrie, Wandstärke, Oberfläche, Farbe, Kappe) — nimm sie wörtlich: wer "eckig" oder "matt" sucht, bekommt Teile mit genau diesem Merkmal zuerst.${categoryContext}${identityContext}${wallContext}
 Antworte NUR mit JSON-Array, kein anderer Text:
 [{"index":0,"score":85,"reasoning":"kurz"}]
 Score 0-100. Sei entschieden — spreize die Scores. Bester Fit 90+, schlechter <30.
@@ -1130,7 +1133,15 @@ const ATTR_F = {
   beschreibung: 'fldduSVAFumDEDziS',
   gewicht: 'fldBUgInbJ8ec1sV1',
   systeme: 'flddgNw5dJbydl7bE',
+  caps: 'fld8pRogynhcnmFD1',    // v65 — Cap.Cap_Attribute (inverse)
 };
+
+// v65 — Kappen-Merkmale haengen am CAP-Record, nicht am System: Kappen-
+// geometrie (B), Kappenmaterial (D2), Kappenfarbe (E2), Kappenoberflaeche (E6).
+// Das Systembild zeigt bei base+cap_separat gar keine Kappe; alles, was dort
+// ueber Kappen getaggt wurde, war geraten. Beim Vergleich zaehlt ein Treffer,
+// wenn IRGENDEIN Cap des Systems den Wert traegt — wie beim Verschluss.
+const CAP_KAT = /^(B\d|D2|E2|E6)_/;
 
 // G* (Label, Typografie, Umverpackung) und H1 (Nachhaltigkeit) sind nicht am
 // nackten Teil ablesbar und gehoeren zur Design-Ebene — der Tagger laesst sie aus.
@@ -1138,7 +1149,17 @@ const SICHTBARE_PRAEFIXE = ['A', 'B', 'C', 'D', 'E', 'F'];
 
 interface AttrWert {
   id: string; kategorie: string; name: string; beschreibung: string;
-  gewicht: number; systeme: string[];
+  gewicht: number; systeme: string[]; caps: string[];
+}
+
+// 5-Minuten-Cache: die Bibliothek wird jetzt bei JEDER Suche gebraucht (v65:
+// auch die Textsuche sieht die Merkmale), aendert sich aber selten.
+let ATTR_CACHE: AttrWert[] = [];
+let attrStand = 0;
+async function attributeLaden(): Promise<AttrWert[]> {
+  if (Date.now() - attrStand < 300000 && ATTR_CACHE.length) return ATTR_CACHE;
+  try { ATTR_CACHE = await ladeAttributBibliothek(); attrStand = Date.now(); } catch { /* alter Stand bleibt */ }
+  return ATTR_CACHE;
 }
 
 async function ladeAttributBibliothek(): Promise<AttrWert[]> {
@@ -1162,6 +1183,7 @@ async function ladeAttributBibliothek(): Promise<AttrWert[]> {
         beschreibung: typeof f[ATTR_F.beschreibung] === 'string' ? f[ATTR_F.beschreibung] : '',
         gewicht: typeof f[ATTR_F.gewicht] === 'number' ? f[ATTR_F.gewicht] : 0.03,
         systeme: Array.isArray(f[ATTR_F.systeme]) ? f[ATTR_F.systeme] : [],
+        caps: Array.isArray(f[ATTR_F.caps]) ? f[ATTR_F.caps] : [],
       });
     }
     offset = j.offset || null;
@@ -1188,6 +1210,7 @@ function nachKategorie(werte: AttrWert[]): Map<string, AttrWert[]> {
 function systemTags(werte: AttrWert[]): Map<string, Map<string, Set<string>>> {
   const m = new Map<string, Map<string, Set<string>>>();
   for (const w of werte) {
+    if (CAP_KAT.test(w.kategorie)) continue; // Kappen-Merkmale: siehe capTags
     for (const sysId of w.systeme) {
       const proSys = m.get(sysId) || new Map<string, Set<string>>();
       const proKat = proSys.get(w.kategorie) || new Set<string>();
@@ -1199,6 +1222,121 @@ function systemTags(werte: AttrWert[]): Map<string, Map<string, Set<string>>> {
   return m;
 }
 
+
+// capId -> Kategorie -> Attributnamen (nur Kappen-Kategorien).
+function capTags(werte: AttrWert[]): Map<string, Map<string, Set<string>>> {
+  const m = new Map<string, Map<string, Set<string>>>();
+  for (const w of werte) {
+    if (!CAP_KAT.test(w.kategorie)) continue;
+    for (const capId of w.caps) {
+      const proCap = m.get(capId) || new Map<string, Set<string>>();
+      const proKat = proCap.get(w.kategorie) || new Set<string>();
+      proKat.add(w.name);
+      proCap.set(w.kategorie, proKat);
+      m.set(capId, proCap);
+    }
+  }
+  return m;
+}
+
+// System + alle seine Caps -> Kategorie -> Werte. Das ist die Sicht, in der
+// verglichen wird: ein System "hat" eine Kappeneigenschaft, wenn eines seiner
+// bestellbaren Caps sie traegt.
+function merkmaleVon(
+  sysId: string, capIds: string[],
+  tags: Map<string, Map<string, Set<string>>>,
+  caps: Map<string, Map<string, Set<string>>>,
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  tags.get(sysId)?.forEach((v, k) => out.set(k, new Set(v)));
+  for (const c of capIds) {
+    caps.get(c)?.forEach((v, k) => {
+      const z = out.get(k) || new Set<string>();
+      v.forEach(x => z.add(x));
+      out.set(k, z);
+    });
+  }
+  return out;
+}
+
+// Kompakte Merkmalzeile fuer das Text-Ranking: "Kubisch; dickwandig; matt;
+// Kappe: Zylinder/Alu/Silber". Vorher sah Haiku von 200 Bibliothekswerten
+// nichts — die ganze Tagging-Arbeit war fuer die Textsuche unsichtbar.
+function merkmalZeile(m: Map<string, Set<string>>): string {
+  const kurz = (k: string) => k.replace(/^[A-Z]\d_/, '').replace(/_/g, ' ');
+  const koerper: string[] = [], kappe: string[] = [];
+  Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b)).forEach(([kat, werte]) => {
+    const w = Array.from(werte).join('/');
+    (CAP_KAT.test(kat) ? kappe : koerper).push(`${kurz(kat)}=${w}`);
+  });
+  return [...koerper, ...(kappe.length ? [`Kappe: ${kappe.join(', ')}`] : [])].join('; ');
+}
+
+// Deterministischer Text-Boost: ein Suchwort, das eindeutig auf einen
+// Bibliothekswert zeigt, wird nicht dem Sprachmodell ueberlassen. Treffer
+// heben, Widersprueche senken (Veredelung D/E nur heben — ein Teil in Kupfer
+// ist dasselbe bestellbare Teil wie in Klarglas). Gedeckelt auf +/-18, damit
+// das Ranking von Haiku die Reihenfolge behaelt und nur geschaerft wird.
+const SYNONYME: [RegExp, string, string][] = [
+  [/\b(eckig|kubisch|quadratisch|square|cubic)/i, 'A1_Body_Geometry', 'Cubical / Square'],
+  [/\b(zylind|cylind)/i, 'A1_Body_Geometry', 'Cylindrical'],
+  [/\b(bauchig|kugel|spherical|bulbous)/i, 'A1_Body_Geometry', 'Spherical / Bulbous'],
+  [/\b(facett|hexagon|sechseck)/i, 'A1_Body_Geometry', 'Hexagonal / Faceted'],
+  [/\b(tropfen|teardrop)/i, 'A1_Body_Geometry', 'Teardrop'],
+  [/\b(skulptur|freeform|organisch)/i, 'A1_Body_Geometry', 'Sculptural / Freeform'],
+  [/\b(schlank|hoch und schmal|elongated|tall)/i, 'A2_Body_Proportion', 'Tall & Narrow (Elongated)'],
+  [/\b(gedrungen|squat|breit und flach)/i, 'A2_Body_Proportion', 'Squat & Wide'],
+  [/\b(reisegr|mini|travel)/i, 'A2_Body_Proportion', 'Mini / Travel Size'],
+  [/\b(scharfe schulter|sharp shoulder|kantige schulter)/i, 'A3_Body_Shoulder', 'Sharp Shoulder'],
+  [/\b(runde schulter|rounded shoulder)/i, 'A3_Body_Shoulder', 'Rounded Shoulder'],
+  [/\b(schwer|dickwandig|dicker boden|heavy|thick)/i, 'A5_Body_Wall', 'Thick-Walled'],
+  [/\b(d[uü]nnwandig|thin-walled)/i, 'A5_Body_Wall', 'Thin-Walled'],
+  [/\b(tailliert|waisted)/i, 'A6_Body_Contour', 'Waisted'],
+  [/\b(matt|matte)\b/i, 'E4_Light_Refraction', 'Matte / Light-Absorbing'],
+  [/\b(gl[aä]nzend|hochglanz|glossy|gloss)/i, 'E4_Light_Refraction', 'High Gloss / Reflective'],
+  [/\b(frosted|mattiert|satiniert|milchig)/i, 'E3_Translucency', 'Frosted'],
+  [/\b(opak|opaque|blickdicht|undurchsichtig)/i, 'E3_Translucency', 'Fully Opaque'],
+  [/\b(transparent|klarglas|durchsichtig|klar)\b/i, 'E3_Translucency', 'Fully Transparent'],
+  [/\b(geb[uü]rstet|brushed)/i, 'E5_Body_Surface', 'Brushed Metal Finish'],
+  [/\b(rillen|gerillt|ribbed|grooved)/i, 'E5_Body_Surface', 'Horizontal Ribs / Grooves'],
+  [/\b(soft-?touch|gummiert)/i, 'E5_Body_Surface', 'Soft-Touch Coating'],
+  [/\b(pr[aä]gung|embossed|relief)/i, 'E5_Body_Surface', 'Embossed Relief / 3D Pattern'],
+  [/\b(braunglas|amber|bernstein)/i, 'E1_Body_Color', 'Amber / Brown'],
+  [/\b(schwarz|black)\b/i, 'E1_Body_Color', 'Black'],
+  [/\b(wei[sß]+|white)\b/i, 'E1_Body_Color', 'White'],
+  [/\b(pastell|pastel)/i, 'E1_Body_Color', 'Pastel (Soft Colors)'],
+  [/\b(knallig|bunt|saturated|bold)/i, 'E1_Body_Color', 'Bold Saturated'],
+  [/\b(kobalt|cobalt|dunkelblau)/i, 'D1_Body_Material', 'Cobalt / Dark Blue Glass'],
+  [/\b(alu|aluminium|aluminum)\b/i, 'D1_Body_Material', 'Aluminum'],
+  [/\b(keramik|porzellan|ceramic)/i, 'D1_Body_Material', 'Ceramic / Porcelain'],
+  [/\b(metallkappe|metal cap|alukappe|aluminium cap)/i, 'D2_Cap_Material', 'Aluminum Cap'],
+  [/\b(holzkappe|holzdeckel|wood cap|bambus)/i, 'D2_Cap_Material', 'Wood Cap'],
+  [/\b(goldkappe|gold cap|goldene kappe|gold)\b/i, 'E2_Cap_Color', 'Metallic Gold Cap'],
+  [/\b(silberkappe|silver cap|silberne kappe|silber|silver)\b/i, 'E2_Cap_Color', 'Metallic Silver Cap'],
+  [/\b(ros[eé]gold|rose gold)/i, 'E2_Cap_Color', 'Rose Gold Cap'],
+  [/\b(schwarze kappe|black cap)/i, 'E2_Cap_Color', 'Black Cap'],
+  [/\b(wei[sß]+e kappe|white cap)/i, 'E2_Cap_Color', 'White Cap'],
+  [/\b([uü]berkappe|overcap)/i, 'B5_Overcap', 'Decorative Overcap'],
+  [/\b(flache kappe|flat cap|low cap)/i, 'B4_Cap_Height', 'Low (Flat)'],
+  [/\b(hohe kappe|oversized cap|high cap)/i, 'B4_Cap_Height', 'High / Oversized'],
+];
+function attributBoost(ranked: RankedProduct[], query: string, tags: Map<string, Map<string, Set<string>>>, caps: Map<string, Map<string, Set<string>>>): RankedProduct[] {
+  const gewollt = SYNONYME.filter(([re]) => re.test(query));
+  if (!gewollt.length) return ranked;
+  return ranked.map(r => {
+    const m = merkmaleVon(r.id, r.capIds, tags, caps);
+    let delta = 0; const why: string[] = [];
+    for (const [, kat, wert] of gewollt) {
+      const hat = m.get(kat);
+      if (!hat || hat.size === 0) continue;             // ungetaggt: neutral
+      if (hat.has(wert)) { delta += 6; why.push(`+${wert}`); }
+      else if (!istVeredelung(kat)) { delta -= 6; why.push(`-${wert}`); }
+    }
+    delta = Math.max(-18, Math.min(18, delta));
+    if (!delta) return r;
+    return { ...r, score: Math.max(0, Math.min(100, r.score + delta)), reasoning: `${r.reasoning} [${why.join(' ')}]`.trim() };
+  }).sort((a, b) => b.score - a.score);
+}
 
 // Gewichteter Attribut-Vergleich. Gezaehlt wird nur, wo BEIDE Seiten etwas
 // gesagt haben — ein System wird nicht dafuer bestraft, dass eine Kategorie
@@ -1222,13 +1360,15 @@ function attributScore(
   // die A-Kategorien (Geometrie) hier NICHT — eine Messung laesst sich
   // nicht von einer Schaetzung ueberstimmen. Die Attribute behalten, was
   // die Silhouette nicht sieht: Kappe, Verschluss, Material, Oberflaeche.
-  geometrieGemessen = false
+  geometrieGemessen = false,
+  capIds: string[] = [],
+  caps: Map<string, Map<string, Set<string>>> = new Map(),
 ): { score: number; treffer: string[]; differenz: string[]; geometrieBruch: boolean } {
-  const proSys = tags.get(sysId);
+  const proSys = merkmaleVon(sysId, capIds, tags, caps);
   const treffer: string[] = [];
   const differenz: string[] = [];
   let geometrieBruch = false;
-  if (!proSys || bildTags.size === 0) return { score: 0, treffer, differenz, geometrieBruch };
+  if (proSys.size === 0 || bildTags.size === 0) return { score: 0, treffer, differenz, geometrieBruch };
   let max = 0, punkte = 0;
   for (const [kat, bildWert] of bildTags) {
     if (geometrieGemessen && /^A\d/i.test(kat)) continue;
@@ -1443,7 +1583,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       airtableListAll(SYSTEM_TABLE, '{Published}=TRUE()'),
       airtableListAll(PRODUKT_REGELN_TABLE),
       (bildModus && !eigeneWorte) ? Promise.resolve(null) : parseIdentity(vorlaeufigeQuery),
-      bildModus ? ladeAttributBibliothek().catch(() => [] as AttrWert[]) : Promise.resolve([] as AttrWert[]),
+      attributeLaden(), // v65: immer — auch die Textsuche sieht die Merkmale
     ]);
 
     // Das Foto im Vokabular des Archivs taggen — 33 Kategorien, gewichtet.
@@ -1451,6 +1591,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const katGewicht = new Map<string, number>();
     katMap.forEach((werte, kat) => katGewicht.set(kat, werte[0]?.gewicht ?? 0.03));
     const tags = systemTags(attrWerte);
+    const kappenTags = capTags(attrWerte);
+    const merkmale = (p: ProductData) => merkmalZeile(merkmaleVon(p.id, p.capIds, tags, kappenTags));
     let bildTags = new Map<string, string>();
     // v55 — die Silhouette ist das Geometrie-Signal: sie misst den Koerper
     // als Zahl, wo das Sprachmodell sich zwischen "Cylindrical" und
@@ -1579,7 +1721,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       ranked = filtered.map(p => {
         const hf = hardfactScore(p, lesart!);
-        const at = attributScore(p.id, bildTags, tags, katGewicht, refProfil !== null);
+        const at = attributScore(p.id, bildTags, tags, katGewicht, refProfil !== null, p.capIds, kappenTags);
         // Arbeitsteilung (v55): die SILHOUETTE misst den Koerper als Zahl
         // und ersetzt die harte A1-Wand — sie kennt den Uebergang zwischen
         // bauchig und zylindrisch, den eine Kategorie nicht kennt. Die
@@ -1645,11 +1787,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     } else {
       // Text dabei: Claude rankt weiter, die Bildlesart kommt als Kontext.
       const rankQuery = lesart ? effektiveQuery + lesartKontext(lesart) : effektiveQuery;
-      ranked = await claudeRank(rankQuery, filtered, category, identity, wall);
+      ranked = await claudeRank(rankQuery, filtered, category, identity, wall, merkmale);
+      ranked = attributBoost(ranked, effektiveQuery, tags, kappenTags);
       if (lesart) {
         for (const r of ranked) {
           const hf = hardfactScore(r, lesart);
-          const at = attributScore(r.id, bildTags, tags, katGewicht);
+          const at = attributScore(r.id, bildTags, tags, katGewicht, false, r.capIds, kappenTags);
           let g = r.score * 0.4 + at.score * 0.4 + hf.score * 0.2;
           if (at.geometrieBruch) g *= 0.6;
           r.score = Math.round(Math.max(0, Math.min(100, g)));
