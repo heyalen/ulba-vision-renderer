@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 
-/* ── render.ts v47 — der vereinfachte Renderer ────────────────────────────
+/* ── render.ts v48 — der vereinfachte Renderer ────────────────────────────
    Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
    (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
    was nur dem alten Mehr-Runden-Briefing diente, ist raus:
@@ -24,7 +24,16 @@ import { createHash } from 'crypto';
    chrome's exact geometry"); (3) optionaler Body-Param engine ('seedream'
    default | 'gemini') fuer den A/B-Vergleich der Formtreue — fliesst in den
    Cache-Key; (4) volles fal-Preset-Set fuer aspect_ratio (9:21 etc. — 9:16
-   hatte schlanke Flaschen gestreckt). */
+   hatte schlanke Flaschen gestreckt).
+   v48 (Re-Test: Chrom-Pumpkopf weiss uebermalt, Streifen aus der Grafik-
+   Regel, DESIGN-ENTSCHEID): "Der Verschluss wird GEWAEHLT, nie umlackiert."
+   (1) Jede Cap-Umfaerbung ist raus — der gewaehlte Cap erscheint exakt wie
+   fotografiert, Cap_Hex und die Closure-Zeile des Rezepts gehen nie mehr in
+   Bild-Prompts; (2) ein vorhandenes Rezept besitzt die Deko EXKLUSIV
+   (grafikRegel + Akzent-Cues fallen dann weg — Aqua Minimal sagt NONE, also
+   keine Streifen); (3) passt der gewaehlte Cap nicht zur Closure-Praeferenz
+   des Rezepts, kommt eine ehrliche Warnung in farbsystem.warnungen — mit
+   der passenden Cap-Variante des Systems, falls es eine gibt. */
 
 // ── fetch mit hartem Timeout ──────────────────────────────────────────────
 // Ohne dies wartet ein haengender externer Call (fal.ai / Airtable) bis
@@ -60,7 +69,7 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-const RENDER_VERSION = 'v47';
+const RENDER_VERSION = 'v48';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -305,7 +314,11 @@ function grafikRegel(typoHaltung: string | null | undefined, akzentHex: string |
  * FORM / MATERIAL / VERSCHLUSS / forbidden bleiben hart gesperrt (Invariante).
  * closureRule variiert pro Pfad (Vollbild A/B, Split-Base ohne Cap).
  */
-function buildHardRule(closureRule: string, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null): string {
+// mitGrafik=false (Rezept vorhanden): das Rezept definiert die Deko
+// abschliessend — die achsen-generierte Grafikebene faellt komplett weg
+// (v48; die Linien-Spec hatte sonst Streifen erzeugt, die das Rezept nie
+// bestellt hat).
+function buildHardRule(closureRule: string, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null, mitGrafik: boolean = true): string {
   return [
     'CRITICAL RULES — these override everything above.',
     // Geometrie-Lock (v46, Live-Test XTAG): Seedream formte den Pumpkopf um
@@ -317,7 +330,7 @@ function buildHardRule(closureRule: string, forbidden: string[], typoHaltung?: s
     closureRule,
     'Do not introduce any material that is not visible in the reference images or explicitly listed as available.',
     forbidden.length ? `Explicitly forbidden in this render: ${forbidden.join(', ')}.` : '',
-    grafikRegel(typoHaltung, akzentHex),
+    mitGrafik ? grafikRegel(typoHaltung, akzentHex) : '',
     'STRICTLY FORBIDDEN on the product: any letter, character, digit, word, brand name, logo, trademark or crest. Never print words from these instructions onto the packaging — this text is a description, not label copy.',
     'Ground the product on the surface with a soft contact shadow — the product must never float.',
     'Softbox key light from the upper-left, subtle rim light, controlled speculars.',
@@ -551,7 +564,10 @@ async function assemblePrompt(
   split: boolean,
   sysFields: any,
   capFields: any | null,
-  forceCodeId: string
+  forceCodeId: string,
+  // v48: ID des gewaehlten Caps — fuer die Closure-Warnung (Geschwister-
+  // Varianten des Systems nachschlagen, den gewaehlten ausnehmen).
+  selectedCapId: string | null
 ): Promise<{
   fullPrompt: string; basePrompt: string; capPrompt: string | null;
   forbidden: string[]; concept: Concept;
@@ -809,17 +825,15 @@ async function assemblePrompt(
   const geoAnkerLine = geoBits.length
     ? `Preserve exactly as in the photo, part by part: ${geoBits.join('; ')}. Keep wall thickness, the visible gap between outer wall and inner cartridge where present, the cartridge's own shoulder, the base, and the overall height-to-width ratio unchanged.`
     : '';
-  // Cap-Anker: eigene Aufzaehlung fuer den Split-Cap-Prompt.
-  const capGeoTraits = [...new Set(capAttrNamen.filter(geoFilter))].slice(0, 10);
+  // Cap-Beschreibung — v48 nur noch fuer die Closure-Warnung (der Cap-Render
+  // ist reines Cleanup, er braucht keinen Anker mehr).
   const capClosureEn = capFields
     ? multiSelectNames(capFields['Closure_Type']).concat(selectName(capFields['Closure_Type']) || []).filter(Boolean).join('/')
     : '';
-  const capAnkerLine = (capClosureEn || capGeoTraits.length)
-    ? `Preserve exactly as in the photo, part by part: the complete ${capClosureEn || 'closure'} mechanism — slim actuator, every collar ring, step and seam${capGeoTraits.length ? `; its tagged build: ${capGeoTraits.join(', ')}` : ''}. Keep part count, part sizes and the height-to-width ratio unchanged.`
-    : '';
-  // Recolor-spezifischer Lock (v47): der Umlack selbst ist der Trigger der
-  // Form-Drift — deshalb steht die Regel direkt an der Farb-Anweisung.
-  const capRepaintLock = `Repaint ONLY the surface of this exact closure — every ring, step, seam and the slim actuator keep their identical shape, size and count; a chrome part painted white keeps chrome's exact geometry, only its colour changes.`;
+  // Unveraendert-Lock (v48, DESIGN-ENTSCHEID "Der Verschluss wird gewaehlt,
+  // nie umlackiert"): der Umlack selbst war der Trigger der Form-Drift —
+  // deshalb gibt es ihn nicht mehr. Der Cap bleibt exakt wie fotografiert.
+  const capUnveraendertLock = `The closure in the photo stays completely unchanged — identical colour, material, finish, geometry.`;
   const materialLine = `The body is ${matEN}${isPlastic ? ' — it must clearly read as a plastic container, never as solid metal, aluminium, steel, glass or ceramic' : ''}.`;
   const capMaterialLine = capMaterial ? `The cap is ${capMaterial}.` : '';
   const avoidLine = doNotZeile((traegerOrt === 'Material')
@@ -829,21 +843,26 @@ async function assemblePrompt(
   const studioLine = `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`;
   const codeAkzentEn = akzentCueEn(code.akzentCue, code.akzentHex);
   // ── Render_Rezept: kuratierter Stil-Block, verbatim, VOR den mechanischen
-  // Farb-/Finish-Zeilen. Hex-Werte bleiben als Verstaerkung (Anker-Zeile),
-  // aber das Rezept gewinnt bei jedem Konflikt — insbesondere bei Umleitung/
-  // klar_liquid_farbe, wo die generierte Tint-Zeile sonst blass gegen das
-  // Rezept arbeitet (Live-Test XTAG: #00AEEF blass statt gesaettigt, kein
-  // Verlauf). Kein Rezept -> exakt das bisherige, generierte Verhalten.
+  // Farb-/Finish-Zeilen. Das Rezept gewinnt bei jedem Konflikt — insbesondere
+  // bei Umleitung/klar_liquid_farbe (Live-Test XTAG: #00AEEF blass statt
+  // gesaettigt). Kein Rezept -> das generierte Verhalten.
+  // v48: Die "Closure preference"-Schlusszeile des Rezepts ist eine WAHL-Hilfe
+  // zwischen realen Cap-Varianten, nie eine Umlack-Anweisung — sie wird vor
+  // dem Prompt abgetrennt und speist nur die ehrliche Warnung (s. unten).
   const rezept = code.rezept;
-  const rezeptBlock = rezept
-    ? `STYLE RECIPE for this design world — follow it precisely; on any conflict with the colour lines in this prompt, the recipe wins: ${rezept}`
+  const rezeptZeilen = (rezept || '').split(/\n/);
+  const closurePrefZeile = rezeptZeilen.find(z => /closure preference/i.test(z)) || '';
+  const rezeptFuerPrompt = rezeptZeilen.filter(z => !/closure preference/i.test(z)).join('\n').trim();
+  const rezeptBlock = rezeptFuerPrompt
+    ? `STYLE RECIPE for this design world — follow it precisely; on any conflict with the colour lines in this prompt, the recipe wins: ${rezeptFuerPrompt}`
     : '';
+  // Hex-Anker: nur Body + Akzent. Cap_Hex geht NIE mehr in Bild-Prompts —
+  // der Verschluss wird gewaehlt, nie umlackiert (v48).
   const hexAnker = [
     code.bodyHex ? `body ${code.bodyHex}` : '',
-    code.capHex ? `closure ${code.capHex}` : '',
     code.akzentHex ? `accent ${code.akzentHex}` : '',
   ].filter(Boolean).join(', ');
-  const ankerLine = rezept && hexAnker ? `Colour anchors reinforcing the recipe: ${hexAnker}.` : '';
+  const ankerLine = rezept && hexAnker ? `Colour anchors reinforcing the recipe (body and accent only — never the closure): ${hexAnker}.` : '';
   // Rezept gewinnt die Body-Zeile: bei Typ-B-Umleitung oder klar_liquid_farbe
   // wuerde die mechanische Zeile ("liquid is a clean X") dem Rezept
   // widersprechen — dann faellt sie weg. Sonst bleibt sie als Verstaerkung.
@@ -855,31 +874,34 @@ async function assemblePrompt(
   if (geoAnkerLine) fullLines.push(geoAnkerLine);
   if (attrLine) fullLines.push(attrLine);
   if (fall === 'B') {
-    fullLines.push(`Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap.`);
+    // v19-Carmen-Muster, v48 reaktiviert: der Ersatz-Cap wird eingesetzt,
+    // wie er fotografiert ist — nie umgefaerbt.
+    fullLines.push(`Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap. Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.`);
+  } else {
+    fullLines.push(capUnveraendertLock);
   }
   fullLines.push(materialLine);
   if (capMaterialLine) fullLines.push(capMaterialLine);
   if (rezept) {
-    // Rezept-Pfad: der kuratierte Block traegt den Stil; die generierten
-    // Zeilen schrumpfen auf Anker + (falls konfliktfrei) die Body-Zeile.
+    // Rezept-Pfad: der kuratierte Block traegt Stil UND Deko exklusiv; die
+    // generierten Zeilen schrumpfen auf Anker + (falls konfliktfrei) Body.
     fullLines.push(rezeptBlock);
     if (ankerLine) fullLines.push(ankerLine);
     if (!rezeptGewinnt) fullLines.push(bodyLineEn);
-    fullLines.push(capRepaintLock);
   } else {
     fullLines.push(bodyLineEn);
-    if (code.capHex) {
-      fullLines.push(`Color the closure/cap as ONE single solid ${code.capHex} tone with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt} — never the body colour on the cap. ${capRepaintLock}`);
-    }
-    if (codeAkzentEn) fullLines.push(`Add ${codeAkzentEn}.`);
-    if (farbsys.regelEn) fullLines.push(farbsys.regelEn);
+    // v48: KEINE Cap-Farbzeile mehr. Akzent-Cues sitzen am Verschluss-Kragen
+    // (metallic_band/gold_ring) — nur die koerpergebundene Praegung bleibt.
+    if (codeAkzentEn && code.akzentCue === 'praegung') fullLines.push(`Add ${codeAkzentEn}.`);
+    // Farbhierarchie nur, wenn sie nicht den Verschluss adressiert.
+    if (farbsys.regelEn && farbsys.laut !== 'Gegenspieler') fullLines.push(farbsys.regelEn);
   }
   if (avoidLine) fullLines.push(avoidLine);
   fullLines.push(studioLine);
   const closureRuleFull = fall === 'A'
-    ? 'Do not add, remove, replace or restyle the closure — keep the closure exactly as shown in the reference image.'
-    : 'Use ONLY the closure shown in image 2 — do not invent a different closure, do not change its shape or mechanism.';
-  const fullPrompt = `${fullLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleFull, forbidden, code.typoHaltung, code.akzentHex)}`;
+    ? `Do not add, remove, replace or restyle the closure. ${capUnveraendertLock}`
+    : 'Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.';
+  const fullPrompt = `${fullLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleFull, forbidden, code.typoHaltung, code.akzentHex, !rezept)}`;
 
   // ── Split-Prompts (Fall C/D): Base und Cap GETRENNT, gleiche Bausteine ─
   // Einzelbild-Edit ist formtreu; zwei Produktbilder zusammen = Drift
@@ -900,38 +922,58 @@ async function assemblePrompt(
   if (avoidLine) baseLines.push(avoidLine);
   baseLines.push(studioLine);
   const closureRuleBase = 'Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle — the neck stays open exactly as in reference image 1.';
-  const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex)}`;
+  const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex, !rezept)}`;
 
-  // Cap: Rezept-Variante (Rezept vorhanden — das ganze Rezept reist mit,
-  // die Closure-Behandlung kommt daraus), sonst Recolor (Cap_Hex) oder
-  // Preserve (ohne Hex bleibt er roh).
-  const akzentLine = codeAkzentEn ? ` Add ${codeAkzentEn}.` : '';
-  // Geometrie-Lock fuer den Cap (v46, Live-Test XTAG: Pumpkopf wurde zu
-  // einem klobigen weissen Stufen-Pumpkopf umgeformt).
-  const capGeoLock = `This is a strict recolor and restyle of the SAME physical closure. Keep silhouette, proportions, wall thickness, collar, and every step and part of the pump/closure EXACTLY as in reference image 1 — identical geometry, identical mechanism. Change ONLY surface colour, finish and tint. Do not add stripes, bars, lines, dots, patterns, badges or any other graphic element beyond what this prompt explicitly specifies.`;
-  const capTailLock = `If any part is clear transparent glass in the reference image, keep that part clear — do not tint it. Do NOT add, remove, replace or restyle any part of the closure. Do NOT change its shape, proportions or size. The image contains ONLY this closure exactly as in reference image 1; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber that is not already in the reference image — the pump shaft or dip tube stays exactly as shown, nothing added around it. Clean seamless white studio background, soft neutral lighting, centered. No text, no label, no logo, no lettering anywhere.`;
-  const capRezeptPrompt = [
-    `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish.`,
-    capAnkerLine,
-    rezeptBlock,
-    `Apply to this closure exactly the closure treatment the recipe describes — and nothing beyond it.${code.capHex ? ` Its closure anchor colour is ${code.capHex} with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}; the recipe wins on any conflict.` : ''}`,
-    capRepaintLock,
-    capGeoLock,
-    capMaterialLine,
-    avoidLine,
-    capTailLock,
-  ].filter(Boolean).join(' ');
-  const capRecolorPrompt = [
-    `Keep the exact same closure shape, silhouette, proportions and every individual part exactly as shown in reference image 1 — change ONLY the surface colour and finish. Color the closure as ONE single solid ${code.capHex} tone across the whole closure with ${CAP_FINISH_EN[code.capFinish] || CAP_FINISH_EN.matt}.${akzentLine} Do NOT split it into multiple colored segments and do NOT use more than this one accent on it.`,
-    capAnkerLine,
-    capRepaintLock,
-    capGeoLock,
-    capMaterialLine,
-    avoidLine,
-    capTailLock,
-  ].filter(Boolean).join(' ');
+  // Cap-Render (Split): NUR noch Cleanup — Freisteller auf weissem Studio-
+  // Hintergrund, OHNE jede Farbaenderung (v48, DESIGN-ENTSCHEID). Das ist
+  // das bewaehrte Preserve-Muster; capRezept-/capRecolor-Prompts sind raus.
   const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
-  const capPrompt = split ? (rezept ? capRezeptPrompt : (code.capHex ? capRecolorPrompt : capPreservePrompt)) : null;
+  const capPrompt = split ? capPreservePrompt : null;
+
+  // ── Ehrliche Closure-Warnung statt Umlack (v48) ─────────────────────
+  // Die "Closure preference"-Zeile des Rezepts ist eine Wahl-Hilfe zwischen
+  // realen Verschluss-Varianten. Passt der GEWAEHLTE Cap nicht dazu, sagt
+  // das Blatt es — und nennt die passende Variante des Systems, wenn es
+  // eine gibt. Best-Effort: scheitert das Nachladen, faellt nur der
+  // Alternativ-Satz weg, nie der Render.
+  const FARBWORT = /(white|weiss|silver|silber|chrome|chrom|metallic|black|schwarz|matt|gold)/gi;
+  const normFarbe = (w: string) => {
+    const x = w.toLowerCase();
+    return x === 'weiss' ? 'white' : x === 'schwarz' ? 'black' : x === 'silber' ? 'silver' : x === 'chrom' ? 'chrome' : x;
+  };
+  const FARBE_DE: Record<string, string> = {
+    white: 'Weiss', silver: 'Silber', chrome: 'Chrom', metallic: 'Metallic',
+    black: 'Schwarz', matt: 'Matt', gold: 'Gold',
+  };
+  const prefWorte = [...new Set((closurePrefZeile.match(FARBWORT) || []).map(normFarbe))];
+  const passtZu = (text: string) => {
+    const t = text.toLowerCase();
+    return prefWorte.some(w => t.includes(w) || (w === 'chrome' && /silver|metallic|aluminium|aluminum/.test(t)) || (w === 'silver' && /chrome|metallic/.test(t)));
+  };
+  if (prefWorte.length && capFields) {
+    const gewaehltText = [...capAttrNamen, capClosureEn, String(capFields['Cap_Name'] || '')].join(' ');
+    if (!passtZu(gewaehltText)) {
+      let alternativ = '';
+      try {
+        const alleCapIds: string[] = (Array.isArray(sysFields['Caps']) ? sysFields['Caps'] : []).filter((id: string) => id !== selectedCapId);
+        if (alleCapIds.length) {
+          const formula = `OR(${alleCapIds.slice(0, 10).map(id => `RECORD_ID()='${id}'`).join(',')})`;
+          const geschwister = await airtableQuery(CAP_TABLE, formula, ['Cap_Name', 'Closure_Type', 'Cap_Attribute'], 10);
+          const attrAlle = [...new Set(geschwister.flatMap(g => Array.isArray(g.fields['Cap_Attribute']) ? g.fields['Cap_Attribute'] as string[] : []))];
+          const attrRecs = await holeAttr(attrAlle);
+          const attrName = new Map(attrRecs.map(r => [r.id, String(r.fields['A_Name (Wert)'] || '')]));
+          const treffer = geschwister.find(g => passtZu([
+            String(g.fields['Cap_Name'] || ''),
+            selectName(g.fields['Closure_Type']),
+            ...(Array.isArray(g.fields['Cap_Attribute']) ? (g.fields['Cap_Attribute'] as string[]).map(id => attrName.get(id) || '') : []),
+          ].join(' ')));
+          if (treffer) alternativ = ` Passende Variante: ${String(treffer.fields['Cap_Name'] || 'andere Cap-Variante dieses Systems')}.`;
+        }
+      } catch { alternativ = ''; }
+      const prefDe = prefWorte.map(w => FARBE_DE[w] || w).join('/');
+      farbsys.warnungen.push(`Diese Welt sieht einen Verschluss in ${prefDe} vor — dein gewählter Verschluss bleibt unverändert.${alternativ}`);
+    }
+  }
 
   // ── Konzept — deterministisch aus dem Code (kein LLM) ──────────────
   const displayHex = [code.bodyHex, code.capHex, code.akzentHex].filter(Boolean) as string[];
@@ -1225,7 +1267,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Prompts deterministisch assemblieren ─────────────────────
     const { fullPrompt, basePrompt, capPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId);
+      await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId, resolvedCapId);
 
     // ── 6. Render ───────────────────────────────────────────────────
     // image_urls = NUR das/die Produktfoto(s). Kein Referenz_Bild mehr:
