@@ -1290,15 +1290,18 @@ function merkmalZeile(m: Map<string, Set<string>>): string {
 // ist dasselbe bestellbare Teil wie in Klarglas). Gedeckelt auf +/-18, damit
 // das Ranking von Haiku die Reihenfolge behaelt und nur geschaerft wird.
 const SYNONYME: [RegExp, string, string][] = [
-  [/\b(eckig|kubisch|quadratisch|square|cubic)/i, 'A1_Body_Geometry', 'Cubical / Square'],
-  [/\b(zylind|cylind|rund(e|er|es)?\b)/i, 'A1_Body_Geometry', 'Cylindrical'],
+  // v69 — Grundform-Woerter (rund/eckig/quadratisch/schlank/freeform …)
+  // gehoeren dem Form-Feld des Systems und sind hier RAUS: sie erzeugten
+  // Attribut-Pillen ("Klassisch zylindrisch") statt der Form-Pille.
+  [/\b(kubisch|cubic)/i, 'A1_Body_Geometry', 'Cubical / Square'],
+  [/\b(zylind|cylind)/i, 'A1_Body_Geometry', 'Cylindrical'],
   [/\b(bauchig|kugel|spherical|bulbous)/i, 'A1_Body_Geometry', 'Spherical / Bulbous'],
   [/\b(facett|hexagon|sechseck)/i, 'A1_Body_Geometry', 'Hexagonal / Faceted'],
   [/\b(tropfen|teardrop)/i, 'A1_Body_Geometry', 'Teardrop'],
   [/(nach unten (verj[uü]ng|schmaler|enger)|unten schmal|oben breit|tapered down|umgekehrt konisch)/i, 'A1_Body_Geometry', 'Tapered Downwards'],
   [/(nach oben (verj[uü]ng|schmaler|enger)|oben schmal|unten breit|tapered up|pyramid|konisch)/i, 'A1_Body_Geometry', 'Tapered Upwards'],
-  [/\b(skulptur|freeform|organisch)/i, 'A1_Body_Geometry', 'Sculptural / Freeform'],
-  [/\b(schlank|hoch und schmal|elongated|tall)/i, 'A2_Body_Proportion', 'Tall & Narrow (Elongated)'],
+  [/\b(skulptur)/i, 'A1_Body_Geometry', 'Sculptural / Freeform'],
+  [/\b(hoch und schmal|elongated)/i, 'A2_Body_Proportion', 'Tall & Narrow (Elongated)'],
   [/\b(gedrungen|squat|breit und flach)/i, 'A2_Body_Proportion', 'Squat & Wide'],
   [/\b(reisegr|mini|travel)/i, 'A2_Body_Proportion', 'Mini / Travel Size'],
   [/\b(scharfe schulter|sharp shoulder|kantige schulter)/i, 'A3_Body_Shoulder', 'Sharp Shoulder'],
