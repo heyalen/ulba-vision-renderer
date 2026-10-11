@@ -1,7 +1,14 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 
-/* ── render.ts v48 — der vereinfachte Renderer ────────────────────────────
+/* ── render.ts v49 — der vereinfachte Renderer ────────────────────────────
+   v49: (1) NIE BLOCKIEREN — unbestätigte Anforderungen rendern normal mit
+   Warnung, belegte Ausschluesse werden automatisch Typ-B-umgeleitet; der
+   rote Produzierbarkeits-Fehler existiert nicht mehr. (2) Persistenz-
+   Garantie — der Cache-Record entsteht VOR dem fal-Call (Status Pending),
+   cacheId geht sofort mit der Antwort raus, Done/Error werden nachgetragen;
+   nur Done zaehlt als Cache-Hit. Felder: Status, Engine, Design_Code,
+   Teil_Name, Render_Log.
    Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
    (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
    was nur dem alten Mehr-Runden-Briefing diente, ist raus:
@@ -69,7 +76,7 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-const RENDER_VERSION = 'v48';
+const RENDER_VERSION = 'v49';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -505,7 +512,9 @@ type DesignCodeRec = {
   // 1 = Signaturtraeger faellt weg. 'verlust' benennt, WAS fehlt.
   stufe: 3 | 2 | 1;
   verlust: string[];
-  compatible: boolean;
+  // v49: SF-Hinweise (unbestätigt/ausgeschlossen) — gehen in
+  // farbsystem.warnungen. Ein Look blockiert NIE mehr.
+  sfWarnungen: string[];
   umleitung: string | null;
   brand: string;
   produkt: string;
@@ -638,52 +647,70 @@ async function assemblePrompt(
   };
   const TRANSPARENT_BEHANDLUNG = ['klar', 'frosted', 'getönt', 'getoent', 'klar_liquid_farbe'];
   const teileListe = (v: any) => String(v || '').split(/[,\n;]/).map((x: string) => x.trim()).filter(Boolean);
+  // ── v49 — NIE BLOCKIEREN (DESIGN-ENTSCHEID "jede Welt auf jedes Teil") ─
+  //   bestätigt      -> direkt (wie immer).
+  //   UNBESTAETIGT   -> Render laeuft NORMAL (volle Ausprägung), dazu eine
+  //                     Warnung "vor Musterung mit dem Lieferanten klären".
+  //                     Die alte Vorsichts-Umleitung bei unknown ist raus.
+  //   AUSGESCHLOSSEN -> automatische Typ-B-Umleitung (Farbe in die
+  //                     Fluessigkeit) bzw. Kaskade, plus Warnung "nur als
+  //                     <Umleitung> umsetzbar". Nie ein Block, nie ein Throw.
+  const ANFORDERUNG_DE: Record<string, string> = {
+    braucht_einfaerbbar: 'Körper einfärbbar', braucht_opak: 'opake Ausführung',
+    braucht_frostbar: 'Mattierung', braucht_klarglas: 'Klarglas-Körper',
+    braucht_cap_weiss: 'weisser Verschluss', braucht_metallcap: 'Metall-Verschluss',
+  };
   const designCodes: DesignCodeRec[] = designCodesAll
     .filter(r => selectName(r.fields['Status']) === 'Aktiv')
     .map(r => {
       const f = r.fields;
       const anford = multiSelectNames(f['Anforderungen']);
-      const states = anford.map(a => ({ a, s: checkAnforderung(a) }));
       let bodyBehandlung = (selectName(f['Body_Behandlung']) || 'opak_recolor').toLowerCase();
       let farbort = (selectName(f['Farbort']) || 'koerper').toLowerCase();
       let umleitung: string | null = null;
+      const sfWarnungen: string[] = [];
 
-      // AUSGESCHLOSSEN gewinnt immer: Lieferant sagt explizit "geht nicht".
-      const hardExcluded = states.filter(x => x.s === 'excluded').map(x => x.a);
-
-      // UNBEKANNT bei Koerper-Farbe: produzier-safe umleiten statt behaupten.
       const wantsBodyColor = ['getönt', 'getoent', 'opak_recolor'].includes(bodyBehandlung)
         && farbort === 'koerper';
       const bodyColorState = koerperFarbe();
       if (wantsBodyColor && bodyColorState === 'unknown') {
-        // Farbe in die FLUESSIGKEIT: klares Gebinde kann jeder liefern.
-        bodyBehandlung = 'klar_liquid_farbe';
-        farbort = 'liquid';
-        umleitung = `Typ B: Koerper-Faerbbarkeit unbestaetigt -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar (Machbarkeit per Muster bestaetigen)`;
+        // v49: NICHT mehr umleiten — normal rendern, ehrlich warnen.
+        sfWarnungen.push(`Anforderung 'Körper einfärbbar' ist für dieses Teil unbestätigt — vor Musterung mit dem Lieferanten klären.`);
       } else if (wantsBodyColor && bodyColorState === 'excluded') {
         bodyBehandlung = 'klar_liquid_farbe';
         farbort = 'liquid';
         umleitung = `Typ B: Koerper NICHT faerbbar (Lieferant) -> Farbe in die Fluessigkeit umgeleitet, Gebinde bleibt klar`;
+        sfWarnungen.push(`Dieser Look ist auf diesem Teil nur als Umleitung umsetzbar: die Farbe wandert in die Flüssigkeit, der Körper bleibt unverändert.`);
       }
-      // ── Ausspraegungs-Kaskade statt Rauswurf ──────────────────────
+      // ── Ausspraegungs-Kaskade (nur noch bei BELEGTEM Ausschluss) ──
       let stufe: 3 | 2 | 1 = umleitung ? 2 : 3;
       const verlust: string[] = [];
       if (umleitung) verlust.push('Körperfarbe — die Farbe sitzt jetzt in der Flüssigkeit, das Gebinde bleibt klar');
 
-      if (bodyBehandlung === 'frosted' && checkAnforderung('braucht_frostbar') !== 'ok') {
+      const frostState = checkAnforderung('braucht_frostbar');
+      if (bodyBehandlung === 'frosted' && frostState === 'unknown') {
+        sfWarnungen.push(`Anforderung 'Mattierung' ist für dieses Teil unbestätigt — vor Musterung mit dem Lieferanten klären.`);
+      } else if (bodyBehandlung === 'frosted' && frostState === 'excluded') {
         bodyBehandlung = isGlassBody ? 'klar' : 'opak_recolor';
         stufe = 1;
-        verlust.push('mattierte Oberfläche — dieses Teil ist nicht belegt mattierbar, der Körper bleibt glatt');
+        verlust.push('mattierte Oberfläche — dieses Teil ist laut Lieferant nicht mattierbar, der Körper bleibt glatt');
+        sfWarnungen.push(`Dieser Look ist auf diesem Teil nur ohne Mattierung umsetzbar (Lieferant schliesst sie aus).`);
       }
       if (anford.includes('braucht_klarglas') && !isGlassBody) {
         if (TRANSPARENT_BEHANDLUNG.includes(bodyBehandlung)) { bodyBehandlung = 'opak_recolor'; farbort = 'koerper'; }
         stufe = 1;
         verlust.push('durchsichtiger Körper — dieses Teil ist nicht aus Glas, die Haltung läuft über Farbe, Verschluss und Druck');
+        sfWarnungen.push(`Dieser Look lebt von Klarglas — auf diesem Teil läuft die Haltung über Farbe und Druck.`);
       }
-      // Was die Kaskade aufgeloest hat, darf nicht mehr sperren.
-      const geloest = new Set<string>(umleitung ? ['braucht_einfaerbbar', 'braucht_opak'] : []);
-      if (stufe === 1) { geloest.add('braucht_klarglas'); geloest.add('braucht_frostbar'); geloest.add('braucht_einfaerbbar'); geloest.add('braucht_opak'); }
-      const remaining = hardExcluded.filter(a => !geloest.has(a));
+      // Restliche Anforderungen: unbestätigt warnen, Ausschluss ehrlich
+      // benennen — aber nie blockieren ("beste ehrliche Interpretation").
+      for (const a of anford) {
+        if (['braucht_einfaerbbar', 'braucht_opak', 'braucht_frostbar', 'braucht_klarglas'].includes(a)) continue; // oben behandelt
+        const s = checkAnforderung(a);
+        const nameDe = ANFORDERUNG_DE[a] || a;
+        if (s === 'unknown') sfWarnungen.push(`Anforderung '${nameDe}' ist für dieses Teil unbestätigt — vor Musterung mit dem Lieferanten klären.`);
+        else if (s === 'excluded') sfWarnungen.push(`Anforderung '${nameDe}' ist auf diesem Teil nicht umsetzbar — der Render zeigt die beste ehrliche Interpretation.`);
+      }
       return {
         id: r.id,
         name: String(f['Name'] || ''),
@@ -698,8 +725,7 @@ async function assemblePrompt(
         akzentHex: String(f['Akzent_Hex'] || '').trim() || null,
         typoHaltung: (selectName(f['Typo_Haltung']) || '').toLowerCase(),
         anforderungen: anford,
-        stufe, verlust,
-        compatible: remaining.length === 0,
+        stufe, verlust, sfWarnungen,
         umleitung,
         brand: String(f['Brand'] || '').trim(),
         produkt: String(f['Produkt'] || '').trim(),
@@ -712,15 +738,12 @@ async function assemblePrompt(
     });
 
   // ── Der gewaehlte Code (forceCodeId ist die Entscheidung des Nutzers) ─
-  // Ist er auf diesem Teil NICHT produzierbar, brechen wir sichtbar ab,
-  // statt still auf einen anderen Look zu kippen (der "immer Pink"-Bug):
-  // ein anderer Look waere eine Luege.
-  const code = designCodes.find(c => c.id === forceCodeId && c.compatible) || null;
+  // v49: Produzierbarkeit blockiert NIE mehr — unbestätigt rendert normal
+  // mit Warnung, ausgeschlossen rendert umgeleitet mit Warnung. Der einzige
+  // verbliebene Fehler: die ID existiert nicht oder der Code ist inaktiv.
+  const code = designCodes.find(c => c.id === forceCodeId) || null;
   if (!code) {
-    const wanted = designCodes.find(c => c.id === forceCodeId);
-    throw new Error(wanted
-      ? `Look "${wanted.name}" ist auf diesem Teil nicht produzierbar (Anforderung unbestätigt/ausgeschlossen)`
-      : `Design-Code ${forceCodeId} nicht gefunden oder nicht aktiv`);
+    throw new Error(`Design-Code ${forceCodeId} nicht gefunden oder nicht aktiv`);
   }
 
   // ── Produkt-Basics + Gates ──────────────────────────────────────────
@@ -737,7 +760,11 @@ async function assemblePrompt(
   const forbiddenClosures = runGate(brief, CLOSURE_LEXICON, closureCoverage);
   const forbidden = [...new Set([...forbiddenMaterials, ...forbiddenClosures])];
 
-  const colorable = koerperFarbe() === 'ok';
+  // v49: 'unknown' rendert wie faerbbar (Nie-Blockieren-Policy; die Warnung
+  // traegt die Ehrlichkeit). Nur ein BELEGTER Ausschluss nimmt dem Koerper
+  // die Farbe — und der ist oben bereits zur Typ-B-Umleitung geworden.
+  const bodyFarbeState = koerperFarbe();
+  const colorable = bodyFarbeState !== 'excluded';
   const primaryMat = (material[0] || 'plastic').toLowerCase();
   const isPlastic = /pet|petg|pp|hdpe|acryl|surlyn|kunststoff|plastic/.test(primaryMat);
   const matEN = material.join(' / ') || 'plastic';
@@ -799,6 +826,9 @@ async function assemblePrompt(
   const traegerHexEcht = traegerOrt === 'Material' ? null
     : traegerOrt === 'Flüssigkeit' ? codeBodyHexFuellung : codeBodyHex;
   const farbsys = farbSystem(traegerHexEcht, traegerOrt, code.capHex, code.akzentHex, code.akzentCue, !!capFields || fall !== 'A');
+  // v49: SF-Hinweise (unbestätigt/Umleitung) landen als ehrliche Zeilen auf
+  // dem Blatt — das Frontend zeigt farbsystem.warnungen bereits an.
+  farbsys.warnungen.push(...code.sfWarnungen);
 
   // ── Geteilte Bausteine fuer ALLE Prompts (Vollbild, Split-Base, Cap) ─
   const attrLine = attrConstraints.length
@@ -981,7 +1011,9 @@ async function assemblePrompt(
     finish: [BODY_FINISH_DE[code.finishBody] || BODY_FINISH_DE.matt],
     dekoration: [
       ...(AKZENT_CUE_DE[code.akzentCue] ? [AKZENT_CUE_DE[code.akzentCue]] : []),
-      ...(colorable ? ['Einfärbung Primärbehälter'] : ['Farbe via Label/Cap (Behälter nicht einfärbbar)']),
+      ...(bodyFarbeState === 'ok' ? ['Einfärbung Primärbehälter']
+        : bodyFarbeState === 'unknown' ? ['Einfärbung Primärbehälter (unbestätigt — mit Lieferant klären)']
+        : ['Farbe via Liquid/Cap (Behälter nicht einfärbbar)']),
     ],
     farbkonzept: `${code.name} — Hex: ${displayHex.join(', ')}`,
     design_code: code.name,
@@ -1057,6 +1089,38 @@ async function ladeCodesLeicht(): Promise<CodeLeicht[]> {
   codesCache = { t: Date.now(), v };
   return v;
 }
+
+// ── Cache-Schreibhelfer (v49) ─────────────────────────────────────────
+// UNKNOWN_FIELD_NAME kippt nie den ganzen Record: das genannte Feld wird
+// gedroppt und erneut versucht (max. 5 Felder). Rueckgabe: Record-ID | null.
+async function airtableWrite(method: 'POST' | 'PATCH', url: string, fields: Record<string, any>): Promise<string | null> {
+  const f: Record<string, any> = { ...fields };
+  for (let i = 0; i < 6; i++) {
+    const res = await fetchT(url, {
+      method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
+      body: JSON.stringify({ fields: f }),
+      timeoutMs: 15000, label: 'airtable write',
+    });
+    const data = await res.json() as { id?: string; error?: any };
+    if (data.id) return data.id;
+    if (data.error?.type === 'UNKNOWN_FIELD_NAME') {
+      const m = String(data.error?.message || '').match(/"([^"]+)"/);
+      if (m?.[1] && m[1] in f) {
+        console.warn(`Cache: unbekanntes Feld "${m[1]}" entfernt, retry.`);
+        delete f[m[1]];
+        continue;
+      }
+    }
+    console.error('Airtable write Fehler:', JSON.stringify(data.error || data));
+    return null;
+  }
+  return null;
+}
+const cacheCreate = (fields: Record<string, any>) =>
+  airtableWrite('POST', `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`, fields);
+const cachePatch = (id: string, fields: Record<string, any>) =>
+  airtableWrite('PATCH', `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}/${id}`, fields);
 
 // ── Zugangs-Riegel ────────────────────────────────────────────────────
 // Nur die eigene Oberflaeche darf rufen, und auch die nicht endlos.
@@ -1192,9 +1256,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId, engine);
     let cached: any[] = [];
     if (!nocache) try {
+      // v49: nur Status 'Done' ist ein Treffer — Pending (laeuft noch) und
+      // Error (gescheitert) werden frisch gerendert.
       cached = await airtableQuery(
         CACHE_TABLE,
-        `{Cache_Key}='${key}'`,
+        `AND({Cache_Key}='${key}',{Status}='Done')`,
         ['Cache_Key', 'Bild', 'Cap_Bild', 'Rendering_Prompt', 'Konzept_Name', 'Konzept_Story', 'Konzept_Rationale', 'Szene_ID', 'Produzierbar', 'Board'],
         1
       );
@@ -1269,36 +1335,74 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { fullPrompt, basePrompt, capPrompt, forbidden, concept } =
       await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId, resolvedCapId);
 
-    // ── 6. Render ───────────────────────────────────────────────────
-    // image_urls = NUR das/die Produktfoto(s). Kein Referenz_Bild mehr:
-    // Seedream uebernimmt sonst Formen aus der Stil-Referenz (Live-Test
-    // XTAG — Geometrie-Kontamination). Detailtreue schlaegt alles.
-    // aspect_ratio = Format des jeweiligen Eingabefotos.
+    const renderingPrompt = useSplitRender ? basePrompt : fullPrompt;
+    const capPromptUsed: string | null = useSplitRender ? capPrompt : null;
+
+    // ── 6. Persistenz-Garantie (v49): Record VOR dem fal-Call ───────
+    // Der Cache-Record existiert ab jetzt IMMER (Status Pending), die
+    // cacheId geht mit der Antwort raus -> /api/bild?r= ist sofort stabil
+    // adressierbar und die Galerie verliert nie einen Lauf. Nur Status
+    // 'Done' zaehlt beim Lesen als Treffer; Error traegt den Fehlertext.
+    const boardJson = JSON.stringify({
+      palette: concept.palette, design_code: concept.design_code,
+      do_not: concept.do_not, farbsystem: concept.farbsystem,
+    });
+    const cacheId: string | null = await cacheCreate({
+      Cache_Key: key,
+      System: [systemId],
+      Teil_Name: String(sys.fields['Page Titel'] || ''),
+      Design_Code: [forceCodeId],
+      Status: 'Pending',
+      Engine: engine,
+      Query_Input: query, // roh, nie sanitisiert — Demand-Signal
+      Rendering_Prompt: renderingPrompt,
+      Cap_Prompt: capPromptUsed || '',
+      Konzept_Name: concept.konzept_name || '',
+      Konzept_Story: concept.story || '',
+      Konzept_Rationale: concept.rationale || '',
+      Szene_ID: concept.szene_id || '',
+      Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
+      Board: boardJson,
+      Tier: tier,
+      Fall: fall,
+      Created_At: new Date().toISOString(),
+    }).catch(() => null);
+
+    // ── 7. Render ───────────────────────────────────────────────────
+    // image_urls = NUR das/die Produktfoto(s); aspect_ratio = Format des
+    // jeweiligen Eingabefotos. Scheitert fal, wird der Record ehrlich auf
+    // Error gesetzt (Render_Log) und der Client bekommt den 500 wie bisher.
     let renderingUrl: string;
     let capRenderingUrl: string | null = null;
-    let capPromptUsed: string | null = null;
-    const renderingPrompt = useSplitRender ? basePrompt : fullPrompt;
-
-    if (useSplitRender) {
-      const [baseUrl, capUrl] = await Promise.all([
-        falEdit([primaryUrl], basePrompt, primaryAspect, falEndpoint),
-        falEdit([capImageUrl!], capPrompt!, capAspect, falEndpoint).catch((e) => {
-          // Cap-Recolor darf nie den Gesamt-Render killen: Fallback = Roh-Cap.
-          console.error('Cap-Recolor fehlgeschlagen — zeige Roh-Cap:', e);
-          return capImageUrl!;
-        }),
-      ]);
-      renderingUrl = baseUrl;
-      capRenderingUrl = capUrl;
-      capPromptUsed = capPrompt;
-    } else {
-      const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
-      renderingUrl = await falEdit(imgs, fullPrompt, primaryAspect, falEndpoint);
+    try {
+      if (useSplitRender) {
+        const [baseUrl, capUrl] = await Promise.all([
+          falEdit([primaryUrl], basePrompt, primaryAspect, falEndpoint),
+          falEdit([capImageUrl!], capPrompt!, capAspect, falEndpoint).catch((e) => {
+            // Cap-Cleanup darf nie den Gesamt-Render killen: Fallback = Roh-Cap.
+            console.error('Cap-Render fehlgeschlagen — zeige Roh-Cap:', e);
+            return capImageUrl!;
+          }),
+        ]);
+        renderingUrl = baseUrl;
+        capRenderingUrl = capUrl;
+      } else {
+        const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
+        renderingUrl = await falEdit(imgs, fullPrompt, primaryAspect, falEndpoint);
+      }
+    } catch (falErr) {
+      if (cacheId) {
+        await cachePatch(cacheId, {
+          Status: 'Error',
+          Render_Log: String(falErr instanceof Error ? falErr.message : falErr).slice(0, 2000),
+        }).catch(() => null);
+      }
+      throw falErr;
     }
 
-    // ── 7. AUSLIEFERN ZUERST, cachen danach ─────────────────────────
-    // fal-URLs leben ~1h, reicht zum Anzeigen. Cachen laeuft als
-    // Best-Effort DANACH; killt die 60s-Wand es, hat der Nutzer sein Bild.
+    // ── 8. AUSLIEFERN ZUERST, Bilder persistieren danach ────────────
+    // fal-URLs leben ~1h, reicht zum Anzeigen. Die cacheId ist bereits
+    // bekannt und geht sofort mit — Bild-Upload + Status Done folgen.
     if (!res.headersSent) {
       res.status(200).json({
         renderingUrl,
@@ -1307,7 +1411,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         briefUsed: effectiveBrief,
         rejected: forbidden,
         capId: resolvedCapId,
-        cacheId: null,          // Cache laeuft noch — beim naechsten Treffer gesetzt
+        cacheId,
         cached: false,
         fall,
         tier,
@@ -1315,127 +1419,56 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    // ── 8. Persistieren (Best-Effort, nach der Antwort) ─────────────
-    // Ab hier darf ALLES scheitern, ohne den Nutzer zu betreffen.
-    try {
-    const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 15000, label: 'fal img download' })).arrayBuffer());
-    const base64 = imgBuffer.toString('base64');
-    const boardJson = JSON.stringify({
-      palette: concept.palette,
-      design_code: concept.design_code,
-      do_not: concept.do_not,
-      farbsystem: concept.farbsystem,
-    });
-
-    const createRes = await fetch(
-      `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
-        },
-        body: JSON.stringify({
-          fields: {
-            Cache_Key: key,
-            System: [systemId],
-            Query_Input: query, // roh, nie sanitisiert — Demand-Signal
-            Rendering_Prompt: renderingPrompt, // Base-Prompt (Provenienz)
-            Cap_Prompt: capPromptUsed || '', // Cap-Prompt (Provenienz, symmetrisch)
-            Konzept_Name: concept.konzept_name || '',
-            Konzept_Story: concept.story || '',
-            Konzept_Rationale: concept.rationale || '',
-            Szene_ID: concept.szene_id || '',
-            Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
-            Board: boardJson,
-            Tier: tier,
-            Fall: fall,
-            Created_At: new Date().toISOString(),
-          },
-        }),
-      }
-    );
-
-    let createData = await createRes.json() as { id: string; error?: any };
-    // Haertung: unbekanntes Feld kippt NICHT den ganzen Record. Airtable
-    // nennt das fehlende Feld -> wir droppen es und versuchen EINMAL erneut.
-    if (!createData.id && createData.error?.type === 'UNKNOWN_FIELD_NAME') {
-      const m = String(createData.error?.message || '').match(/\"([^\"]+)\"/);
-      const badField = m?.[1];
-      if (badField) {
-        console.warn(`Cache: unbekanntes Feld "${badField}" entfernt, retry.`);
-        const retryBody = JSON.parse(JSON.stringify({ fields: {
-          Cache_Key: key, System: [systemId], Query_Input: query,
-          Rendering_Prompt: renderingPrompt, Cap_Prompt: capPromptUsed || '',
-          Konzept_Name: concept.konzept_name || '', Konzept_Story: concept.story || '',
-          Konzept_Rationale: concept.rationale || '', Szene_ID: concept.szene_id || '',
-          Produzierbar: concept.produzierbar ? JSON.stringify(concept.produzierbar) : '',
-          Board: boardJson,
-          Tier: tier, Fall: fall, Created_At: new Date().toISOString(),
-        }}));
-        delete retryBody.fields[badField];
-        const retryRes = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}`, {
+    // ── 9. Bilder in den Record (Best-Effort, nach der Antwort) ─────
+    // Ab hier darf alles scheitern, ohne den Nutzer zu betreffen. Ein
+    // haengen gebliebener Upload laesst den Record auf Pending/Error —
+    // und damit nie als Cache-Hit oder Galerie-Eintrag luegen.
+    if (cacheId) try {
+      const log: string[] = [];
+      const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 15000, label: 'fal img download' })).arrayBuffer());
+      const uploadRes = await fetch(
+        `https://content.airtable.com/v0/${AIRTABLE_BASE}/${cacheId}/${CACHE_IMAGE_FIELD}/uploadAttachment`,
+        {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
-          body: JSON.stringify(retryBody),
-        });
-        createData = await retryRes.json() as { id: string; error?: any };
+          body: JSON.stringify({
+            contentType: 'image/jpeg',
+            file: imgBuffer.toString('base64'),
+            filename: `render_${sys.fields['Page Titel'] || systemId}_${tier}_${Date.now()}.jpg`,
+          }),
+        }
+      );
+      if (!uploadRes.ok) {
+        const t = await uploadRes.text();
+        console.error('Airtable upload (Base) failed:', t);
+        await cachePatch(cacheId, { Status: 'Error', Render_Log: `Bild-Upload fehlgeschlagen: ${t.slice(0, 1500)}` }).catch(() => null);
+        return;
       }
-    }
-    if (!createData.id) {
-      console.error('Cache-Record Fehler (Antwort war bereits ausgeliefert):', JSON.stringify(createData.error || createData));
-      return;
-    }
-
-    const uploadRes = await fetch(
-      `https://content.airtable.com/v0/${AIRTABLE_BASE}/${createData.id}/${CACHE_IMAGE_FIELD}/uploadAttachment`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
-        },
-        body: JSON.stringify({
-          contentType: 'image/jpeg',
-          file: base64,
-          filename: `render_${sys.fields['Page Titel'] || systemId}_${tier}_${Date.now()}.jpg`,
-        }),
+      // Cap-Bild SYMMETRISCH als echten Anhang (Bytes, nicht die fal-URL).
+      if (capRenderingUrl) {
+        try {
+          const capBuf = Buffer.from(await (await fetchT(capRenderingUrl, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
+          const capUploadRes = await fetch(
+            `https://content.airtable.com/v0/${AIRTABLE_BASE}/${cacheId}/${CACHE_CAP_IMAGE_FIELD}/uploadAttachment`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
+              body: JSON.stringify({
+                contentType: 'image/jpeg',
+                file: capBuf.toString('base64'),
+                filename: `cap_${resolvedCapId || 'cap'}_${Date.now()}.jpg`,
+              }),
+            }
+          );
+          if (!capUploadRes.ok) log.push(`Cap-Upload fehlgeschlagen: ${(await capUploadRes.text()).slice(0, 500)}`);
+        } catch (e) {
+          log.push(`Cap-Upload fehlgeschlagen: ${String(e).slice(0, 500)}`);
+        }
       }
-    );
-
-    if (!uploadRes.ok) {
-      console.error('Airtable upload (Base) failed:', await uploadRes.text());
-    }
-
-    // Cap-Bild SYMMETRISCH zur Base als echten Anhang hochladen (Bytes, nicht
-    // die temporaere fal-URL). Non-fatal.
-    if (capRenderingUrl) {
-      try {
-        const capBuf = Buffer.from(await (await fetchT(capRenderingUrl, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
-        const capUploadRes = await fetch(
-          `https://content.airtable.com/v0/${AIRTABLE_BASE}/${createData.id}/${CACHE_CAP_IMAGE_FIELD}/uploadAttachment`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
-            },
-            body: JSON.stringify({
-              contentType: 'image/jpeg',
-              file: capBuf.toString('base64'),
-              filename: `cap_${resolvedCapId || 'cap'}_${Date.now()}.jpg`,
-            }),
-          }
-        );
-        if (!capUploadRes.ok) console.error('Airtable upload (Cap) failed:', await capUploadRes.text());
-      } catch (e) {
-        console.error('Cap-Upload fehlgeschlagen (Render wird dennoch ausgeliefert):', e);
-      }
-    }
-
+      await cachePatch(cacheId, { Status: 'Done', ...(log.length ? { Render_Log: log.join('\n') } : {}) }).catch(() => null);
     } catch (cacheErr) {
-      // Best-Effort-Cache gescheitert (z.B. 60s-Wand mitten im Upload).
-      console.error('Cache-Persist fehlgeschlagen (Antwort war bereits raus):', cacheErr);
+      console.error('Bild-Persist fehlgeschlagen (Antwort war bereits raus):', cacheErr);
+      await cachePatch(cacheId, { Status: 'Error', Render_Log: `Persist: ${String(cacheErr).slice(0, 1500)}` }).catch(() => null);
     }
     return;
   } catch (err) {
