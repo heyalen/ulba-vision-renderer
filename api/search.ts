@@ -1387,10 +1387,18 @@ function korrigiere(query: string): string {
   });
 }
 
+// v69 — Grundform-Woerter gehoeren dem Form-Feld des Systems, nie den
+// Attribut-Labels: "rund flasche" hatte die Pille "Klassisch zylindrisch"
+// erzeugt (Label-Levenshtein frass das Form-Wort). Das Form-Wort gewinnt
+// VOR jedem Label-Matching — diese Woerter sind fuer Labels tabu; die
+// Form-Pille baut der Handler aus parsed.formMentions.
+const FORM_WORT = /^(rund|round|oval|eckig|square|kantig|quadrat|schlank|slim|schmal|breit|wide|freeform|organisch|tall)/;
+
 function gewollteMerkmale(query: string, attrWerte: AttrWert[]): [string, string][] {
   const qw = woerter(query);
   const raus = new Map<string, string>();
   const frei = qw.map(() => true);
+  qw.forEach((w, i) => { if (FORM_WORT.test(w)) frei[i] = false; });
   for (const [re, kat, wert] of SYNONYME) {
     if (!re.test(query) || raus.has(kat)) continue;
     raus.set(kat, wert);
@@ -1958,14 +1966,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     };
 
     // Interne Felder nicht an Client leaken (capIds, excluded)
-    const publicResults = ranked.map(({ capIds, excluded, ...rest }) => ({ ...rest, merkmale: merkmalListe(rest.id, capIds) }));
+    // v69 — die Grundform des Systems reist als eigenes Merkmal mit
+    // (kat 'Form'): damit sind Form-Pillen client-seitig filterbar wie
+    // jede Merkmal-Pille, ohne Frontend-Aenderung.
+    const formLabel = (f: string) => `Form: ${f.charAt(0).toUpperCase()}${f.slice(1)}`;
+    const publicResults = ranked.map(({ capIds, excluded, ...rest }) => ({
+      ...rest,
+      merkmale: [
+        ...merkmalListe(rest.id, capIds),
+        ...(rest.form || []).map(fv => ({ kat: 'Form', wert: fv, label: formLabel(fv) })),
+      ],
+    }));
     // v67 — Merkmale, die die Query (tippfehler-tolerant) nennt, kommen als
     // aktive Filter-Pillen zurück (wie Typ/Material). Nur, wenn mindestens
     // ein Ergebnis passt — sonst lieber alles zeigen als nichts.
     // Keine Doppel-Pille: Material/Verschluss stehen schon als harte Filter oben.
-    const genannt = gewollt
-      .filter(([kat]) => !(kat.startsWith('D1_') && parsed.materialMentions.length) && !(kat.startsWith('F1_') && parsed.closureMentions.length))
-      .map(([kat, wert]) => ({ key: `${kat}::${wert}`, label: labelVon.get(`${kat}::${wert}`) || wert }));
+    const genannt = [
+      // v69 — Form-Woerter zuerst: die Pille heisst "Form: Rund" und filtert
+      // uebers Form-Feld, nicht ueber ein zufaellig aehnliches Attribut-Label.
+      ...parsed.formMentions.map(f => ({ key: `Form::${f}`, label: formLabel(f) })),
+      ...gewollt
+        .filter(([kat]) => !(kat.startsWith('D1_') && parsed.materialMentions.length) && !(kat.startsWith('F1_') && parsed.closureMentions.length))
+        .map(([kat, wert]) => ({ key: `${kat}::${wert}`, label: labelVon.get(`${kat}::${wert}`) || wert })),
+    ];
     const vorhanden = (k: string) => publicResults.some(r => r.merkmale.some(m => `${m.kat}::${m.wert}` === k));
     const merkmalWahl = genannt.filter(x => vorhanden(x.key));
     // Ehrlich sagen, was verstanden wurde, aber im Katalog fehlt ("schwarz").
