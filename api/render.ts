@@ -9,6 +9,12 @@ import { createHash } from 'crypto';
    cacheId geht sofort mit der Antwort raus, Done/Error werden nachgetragen;
    nur Done zaehlt als Cache-Hit. Felder: Status, Engine, Design_Code,
    Teil_Name, Render_Log.
+   v50: RENDER_ZONEN — traegt das System ein Zonen-JSON (Render_Zonen, von
+   der Zonen-Automation aus dem Foto gelesen), steuern primary_canvas/
+   redirect_canvas die Farb-Anwendung zonengenau: der Prompt benennt die
+   Ziel-Zone explizit ("apply ONLY to the inner cartridge; the outer clear
+   glass wall stays untouched") und ersetzt die Behandlungs-Heuristik.
+   Ohne Zonen exakt das bisherige Verhalten.
    Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
    (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
    was nur dem alten Mehr-Runden-Briefing diente, ist raus:
@@ -76,7 +82,7 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-const RENDER_VERSION = 'v49';
+const RENDER_VERSION = 'v50';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -830,6 +836,40 @@ async function assemblePrompt(
   // dem Blatt — das Frontend zeigt farbsystem.warnungen bereits an.
   farbsys.warnungen.push(...code.sfWarnungen);
 
+  // ── v50 — Render_Zonen: die Ziel-Zone kommt aus dem Foto, nicht aus
+  // der Heuristik. primary_canvas traegt die Welt; ist er nicht faerbbar,
+  // uebernimmt redirect_canvas. Zonen mit colorable 'none' werden dem
+  // Modell explizit als unantastbar benannt.
+  type Zone = { id: string; material?: string; transparent?: boolean; colorable?: string; notes?: string };
+  let zonen: { zones: Zone[]; primary: string; redirect: string | null } | null = null;
+  try {
+    const zr = sysFields['Render_Zonen'] ? JSON.parse(String(sysFields['Render_Zonen'])) : null;
+    if (zr && Array.isArray(zr.zones) && zr.zones.length && typeof zr.primary_canvas === 'string'
+        && zr.zones.some((z: any) => z && z.id === zr.primary_canvas)) {
+      zonen = {
+        zones: zr.zones as Zone[],
+        primary: zr.primary_canvas,
+        redirect: (typeof zr.redirect_canvas === 'string' && zr.zones.some((z: any) => z && z.id === zr.redirect_canvas)) ? zr.redirect_canvas : null,
+      };
+    }
+  } catch { zonen = null; }
+  const ZONE_EN: Record<string, string> = {
+    outer_wall: 'outer wall', inner_cartridge: 'inner cartridge', liquid: 'liquid content',
+    cap: 'closure', base: 'base', sleeve: 'sleeve',
+  };
+  let zonenLine = '';
+  let zonenFarbLine = '';
+  if (zonen) {
+    const zb = (id: string) => zonen!.zones.find(x => x.id === id);
+    const prim = zb(zonen.primary);
+    const zielId = (prim && prim.colorable !== 'none') ? zonen.primary : (zonen.redirect || zonen.primary);
+    const ziel = zb(zielId);
+    const zielEn = ZONE_EN[zielId] || zielId;
+    const unber = zonen.zones.filter(x => x.colorable === 'none' && x.id !== 'cap' && x.id !== zielId);
+    zonenLine = `Zone map of this exact part (read from its photo): ${zonen.zones.map(x => `the ${ZONE_EN[x.id] || x.id} is ${x.material || 'as shown'}${x.transparent ? ' (transparent)' : ''}${x.colorable === 'none' ? ' — it stays untouched' : ''}`).join('; ')}. Apply the world's colour treatment ONLY to the ${zielEn}${ziel && ziel.colorable === 'tint' ? ', as a translucent tint' : ''}${unber.length ? `; the ${unber.map(x => ZONE_EN[x.id] || x.id).join(' and ')} stay${unber.length === 1 ? 's' : ''} completely untouched, clear and uncoloured` : ''}.`;
+    zonenFarbLine = `The colour for the ${zielEn} is a saturated ${codeBodyHexFuellung} with ${bodyFinishEn}.`;
+  }
+
   // ── Geteilte Bausteine fuer ALLE Prompts (Vollbild, Split-Base, Cap) ─
   const attrLine = attrConstraints.length
     ? `Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`
@@ -914,17 +954,20 @@ async function assemblePrompt(
   if (capMaterialLine) fullLines.push(capMaterialLine);
   if (rezept) {
     // Rezept-Pfad: der kuratierte Block traegt Stil UND Deko exklusiv; die
-    // generierten Zeilen schrumpfen auf Anker + (falls konfliktfrei) Body.
+    // generierten Zeilen schrumpfen auf Anker + Ziel-Zone bzw. Body-Zeile.
     fullLines.push(rezeptBlock);
     if (ankerLine) fullLines.push(ankerLine);
-    if (!rezeptGewinnt) fullLines.push(bodyLineEn);
+    if (zonen) fullLines.push(zonenLine); // v50: Zonen ersetzen die Heuristik
+    else if (!rezeptGewinnt) fullLines.push(bodyLineEn);
   } else {
-    fullLines.push(bodyLineEn);
+    if (zonen) { fullLines.push(zonenLine); fullLines.push(zonenFarbLine); }
+    else fullLines.push(bodyLineEn);
     // v48: KEINE Cap-Farbzeile mehr. Akzent-Cues sitzen am Verschluss-Kragen
     // (metallic_band/gold_ring) — nur die koerpergebundene Praegung bleibt.
     if (codeAkzentEn && code.akzentCue === 'praegung') fullLines.push(`Add ${codeAkzentEn}.`);
-    // Farbhierarchie nur, wenn sie nicht den Verschluss adressiert.
-    if (farbsys.regelEn && farbsys.laut !== 'Gegenspieler') fullLines.push(farbsys.regelEn);
+    // Farbhierarchie nur ohne Zonen (die Zone-Zeile ist praeziser) und wenn
+    // sie nicht den Verschluss adressiert.
+    if (!zonen && farbsys.regelEn && farbsys.laut !== 'Gegenspieler') fullLines.push(farbsys.regelEn);
   }
   if (avoidLine) fullLines.push(avoidLine);
   fullLines.push(studioLine);
@@ -944,10 +987,14 @@ async function assemblePrompt(
   if (rezept) {
     baseLines.push(rezeptBlock);
     if (ankerLine) baseLines.push(ankerLine);
-    if (!rezeptGewinnt) baseLines.push(bodyLineEn);
+    if (zonen) baseLines.push(zonenLine); // v50: Zonen ersetzen die Heuristik
+    else if (!rezeptGewinnt) baseLines.push(bodyLineEn);
   } else {
-    baseLines.push(bodyLineEn);
-    if (farbsys.regelEn) baseLines.push(farbsys.regelEn);
+    if (zonen) { baseLines.push(zonenLine); baseLines.push(zonenFarbLine); }
+    else {
+      baseLines.push(bodyLineEn);
+      if (farbsys.regelEn) baseLines.push(farbsys.regelEn);
+    }
   }
   if (avoidLine) baseLines.push(avoidLine);
   baseLines.push(studioLine);
