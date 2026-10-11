@@ -73,6 +73,8 @@ type RenderEintrag = {
   systemId: string | null;
   codeId: string | null;
   konzeptName: string;
+  story: string;
+  warnungen: string[];
   engine: string;
   erstellt: string;
 };
@@ -99,7 +101,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       'sort[0][field]': 'Created_At',
       'sort[0][direction]': 'desc',
     });
-    ['Bild', 'Cap_Bild', 'Konzept_Name', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At']
+    ['Bild', 'Cap_Bild', 'Konzept_Name', 'Konzept_Story', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At', 'Board']
       .forEach(f => params.append('fields[]', f));
     const r = await fetchT(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}?${params}`,
@@ -115,6 +117,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const f = rec.fields || {};
         const sysLink: string[] = Array.isArray(f['System']) ? f['System'] : [];
         const codeLink: string[] = Array.isArray(f['Design_Code']) ? f['Design_Code'] : [];
+        // Warnungen aus dem Board-JSON (farbsystem.warnungen) — nur die
+        // Zeilen, nie das ganze Board (Payload klein halten).
+        let warnungen: string[] = [];
+        try {
+          const board = f['Board'] ? JSON.parse(f['Board']) : null;
+          if (Array.isArray(board?.farbsystem?.warnungen)) warnungen = board.farbsystem.warnungen.map(String).slice(0, 6);
+        } catch { warnungen = []; }
         return {
           id: rec.id,
           // Stabile Adresse: /api/bild (ulba-Frontend) loest den Anhang auf.
@@ -125,6 +134,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           systemId: sysLink[0] || null,
           codeId: codeLink[0] || null,
           konzeptName: String(f['Konzept_Name'] || ''),
+          story: String(f['Konzept_Story'] || ''),
+          warnungen,
           engine: typeof f['Engine'] === 'string' ? f['Engine'] : (f['Engine']?.name || 'seedream'),
           erstellt: String(f['Created_At'] || rec.createdTime || ''),
         };
