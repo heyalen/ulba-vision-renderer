@@ -109,7 +109,9 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // rosegold/gunmetal); nur nicht-metallischer Look laesst Metall unveraendert.
 // v58: deterministisches sharp-Komposit (ein Bild statt CSS-Stapel, kein
 // KI-Call), Persist in waitUntil (ueberlebt Seiten-Schliessen), Stale-Cleanup.
-const RENDER_VERSION = 'v58';
+// v59: Cache-Hit respektiert montiert (nie Cap auf Komposit stapeln);
+// Buehne zeigt Komposits contain statt cover (Frontend).
+const RENDER_VERSION = 'v59';
 
 // ── v56/v58: Silhouetten-Profil auf weissem Studiogrund ─────────────────
 // Nicht-Fast-Weiss-Scan in NATIVER Aufloesung (alle Kanaele > 245 =
@@ -1716,9 +1718,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             }
           : null;
 
+        // v59: montierte Records tragen den Verschluss schon im Bild — der
+        // Cache-Hit darf NIE zusaetzlich einen Cap zum Stapeln liefern.
+        const istMontiert = board?.montiert === true;
         return res.status(200).json({
           renderingUrl: cachedImg,
-          capRenderingUrl: imgUrl(cf['Cap_Bild']) || null,
+          capRenderingUrl: istMontiert ? null : (imgUrl(cf['Cap_Bild']) || null),
+          capScale: (typeof cf['Cap_Scale'] === 'number' && isFinite(cf['Cap_Scale'])) ? cf['Cap_Scale'] : null,
+          montiert: istMontiert,
           renderingPrompt: cf['Rendering_Prompt'] || '',
           briefUsed: effectiveBrief,
           cacheId: cached[0].id,
