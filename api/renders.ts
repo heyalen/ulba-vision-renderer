@@ -77,6 +77,9 @@ type RenderEintrag = {
   warnungen: string[];
   // v51: deutsche Umsetzungs-Schritte des Bauplans (Board-JSON) — fuers Overlay.
   umsetzung: string[];
+  // v56: gemessene Cap-Element-Breite relativ zur Body-Element-Breite;
+  // null bei alten Records -> Frontend-Fallback-Heuristik.
+  capScale: number | null;
   engine: string;
   erstellt: string;
 };
@@ -103,7 +106,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       'sort[0][field]': 'Created_At',
       'sort[0][direction]': 'desc',
     });
-    ['Bild', 'Cap_Bild', 'Konzept_Name', 'Konzept_Story', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At', 'Board']
+    ['Bild', 'Cap_Bild', 'Konzept_Name', 'Konzept_Story', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At', 'Board', 'Cap_Scale']
       .forEach(f => params.append('fields[]', f));
     const r = await fetchT(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}?${params}`,
@@ -141,6 +144,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           story: String(f['Konzept_Story'] || ''),
           warnungen,
           umsetzung,
+          capScale: (typeof f['Cap_Scale'] === 'number' && isFinite(f['Cap_Scale'])) ? f['Cap_Scale'] : null, // v56
           engine: typeof f['Engine'] === 'string' ? f['Engine'] : (f['Engine']?.name || 'seedream'),
           erstellt: String(f['Created_At'] || rec.createdTime || ''),
         };
