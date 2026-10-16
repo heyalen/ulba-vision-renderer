@@ -94,7 +94,9 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-const RENDER_VERSION = 'v51';
+// v52: Komposit-Pfad (Split-Renders werden zu EINEM Bild montiert, Fallback
+// getrennt), satte Tints (nie Lavendel), Teilflaechen-Labels (seitlich/partiell).
+const RENDER_VERSION = 'v52';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -895,7 +897,7 @@ async function assemblePrompt(
   // Deterministisch, VOR dem Prompt-Bau. Erzeugt die EN-Prompt-Zeilen
   // (kompLines), den Cap-Plan und die deutschen umsetzung-Schritte.
   type Komponenten = {
-    behaelter?: { farbe?: string | null; verlauf?: { von?: string; nach?: string; richtung?: string } | null; transparenz?: string; produkt_sichtbar?: boolean; finish?: string };
+    behaelter?: { farbe?: string | null; verlauf?: { von?: string; nach?: string; richtung?: string } | null; transparenz?: string; produkt_sichtbar?: boolean; finish?: string; farb_hinweis?: string | null };
     grafik?: { beschreibung?: string; abdeckung?: string };
     label?: { vorhanden?: boolean; farbe?: string | null; abdeckung?: string | null; stil?: string | null };
     verschluss?: { farbe?: string; finish?: string };
@@ -955,12 +957,14 @@ async function assemblePrompt(
       const map: Record<string, string> = {
         front_panel: 'covering only the front panel',
         wrap: 'as a wrap-around label with one clean seam',
-        seitlich: 'only on the side',
-        partiell: 'as a small partial panel on the front',
+        // v52: Teilflaeche heisst Teilflaeche — der Behaelter bleibt rundum
+        // sichtbar, das Label wirkt nie wie eine Vollfront.
+        seitlich: 'covering only about one third of the front width, offset to one side — a crisp rectangle with sharp edges, clearly NOT wrapping around; the container surface stays visible all around it',
+        partiell: 'as a small partial panel covering only about one third of the front width, offset to one side, with the container surface clearly visible around it',
       };
       return map[abdeckung || 'front_panel'] || 'covering only the front panel';
     };
-    const labelOrtDe = istTiegel ? 'nur seitlich (Tiegel-Regel: nie über die Deckelkante)' : istTube ? 'auf der Front' : ({ front_panel: 'auf dem Front-Panel', wrap: 'als Rundum-Etikett', seitlich: 'nur seitlich', partiell: 'als Teilpanel' } as Record<string, string>)[komp.label?.abdeckung || 'front_panel'] || 'auf dem Front-Panel';
+    const labelOrtDe = istTiegel ? 'nur seitlich (Tiegel-Regel: nie über die Deckelkante)' : istTube ? 'auf der Front' : ({ front_panel: 'auf dem Front-Panel', wrap: 'als Rundum-Etikett', seitlich: 'seitlich versetzt als Teilfläche (ca. 1/3 der Front)', partiell: 'als Teilpanel (ca. 1/3 der Front)' } as Record<string, string>)[komp.label?.abdeckung || 'front_panel'] || 'auf dem Front-Panel';
 
     const farbeFix = deko.has('farbe_fix');
     const kannMasse = deko.has('einfaerbung_masse');
@@ -993,7 +997,9 @@ async function assemblePrompt(
         kompLines.push(`Colour the container body as ONE solid opaque ${b.farbe} with ${kFinishEn}, applied in the material itself.`);
         umsetzung.push(`Körper opak ${b.farbe} eingefärbt (${kannMasse ? 'Masse-Einfärbung' : 'Sprühlackierung'})`);
       } else {
-        kompLines.push(`Tint the container ${b.farbe} as ${transparenzEn} material with ${kFinishEn}${b.produkt_sichtbar ? ' — the product inside stays visible through the tinted wall, reading softly milky through the colour, with a visible fill line' : ''}. Do not make it opaque.`);
+        // v52: Tints saufen sonst ab (Indigo wurde Lavendel) — der Ton bleibt
+        // dunkel und satt, Licht geht durch, die Farbe verwaessert nie.
+        kompLines.push(`Tint the container ${b.farbe} as deeply saturated ${transparenzEn} material with ${kFinishEn} — a dark, rich jewel tone: light passes through, but the tint itself stays dark, dense and intense; the colour never washes out, never pale, never pastel${b.produkt_sichtbar ? '; the product inside stays visible through the tinted wall, reading softly milky through the colour, with a visible fill line' : ''}. Do not make it opaque.`);
         umsetzung.push(`Körper ${b.transparenz === 'getoent' ? 'getönt' : 'leicht transparent'} ${b.farbe} eingefärbt${b.produkt_sichtbar ? ' — Produkt bleibt sichtbar' : ''}`);
       }
     } else if (zonen) {
@@ -1004,6 +1010,11 @@ async function assemblePrompt(
     } else {
       kompLines.push(bodyLineEn);
       umsetzung.push('Körperbehandlung wie Standard — keine Deko-Fähigkeiten getaggt');
+    }
+    // v52: optionaler Farb-Charakter aus dem Bauplan ("deep, dark, rich —
+    // never lavender") — verankert den Ton explizit gegen Verwaessern.
+    if (b.farb_hinweis && String(b.farb_hinweis).trim()) {
+      kompLines.push(`Colour character of the container: ${String(b.farb_hinweis).trim()}.`);
     }
     // Zonen-Zeile zusaetzlich (WO + Unantastbares), wenn nicht schon gepusht.
     if (zonen && !kompLines.includes(zonenLine)) kompLines.push(zonenLine);
@@ -1659,6 +1670,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ]);
         renderingUrl = baseUrl;
         capRenderingUrl = capUrl;
+        // v52: KOMPOSIT bevorzugt — die beiden FERTIGEN Renders werden zu
+        // EINEM Produktbild montiert. Das ist reine Assembly auf bereits
+        // final gefaerbten Bildern (die alte Drift entstand aus zwei ROH-
+        // Fotos im selben Gestaltungs-Prompt). Scheitert die Montage, bleibt
+        // die getrennte Darstellung: Body gross, Cap daneben.
+        try {
+          const composePrompt = `Image 1 shows the container body, image 2 its closure. Assemble them into ONE finished product photo: place the closure from image 2 onto the open neck of the container in image 1, correctly seated, upright, at natural scale. Keep BOTH parts EXACTLY as shown — identical shapes, proportions, colours, materials, finishes and lighting; do not redesign, recolor, restyle or re-light either part, do not add or remove anything. Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no logo, no lettering anywhere.`;
+          const komposit = await falEdit([baseUrl, capUrl], composePrompt, primaryAspect, falEndpoint);
+          if (komposit) { renderingUrl = komposit; capRenderingUrl = null; }
+        } catch (e) {
+          console.error('Komposit fehlgeschlagen — getrennte Darstellung bleibt:', e);
+        }
       } else {
         const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
         renderingUrl = await falEdit(imgs, fullPrompt, primaryAspect, falEndpoint);
@@ -1698,7 +1721,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // und damit nie als Cache-Hit oder Galerie-Eintrag luegen.
     if (cacheId) try {
       const log: string[] = [];
-      const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 15000, label: 'fal img download' })).arrayBuffer());
+      // v52: 15s rissen heute ab ("Persist: Timeout 15000ms") — der Download
+      // ist Best-Effort NACH der Antwort, er darf sich Zeit nehmen.
+      const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 45000, label: 'fal img download' })).arrayBuffer());
       const uploadRes = await fetch(
         `https://content.airtable.com/v0/${AIRTABLE_BASE}/${cacheId}/${CACHE_IMAGE_FIELD}/uploadAttachment`,
         {
