@@ -69,6 +69,8 @@ type RenderEintrag = {
   id: string;
   bildUrl: string;
   capBildUrl: string | null;
+  // v60: Body-Einzelrender (nur Montage-Records) — fuer die Thumbnails.
+  bodyBildUrl: string | null;
   weltName: string;
   teilName: string;
   systemId: string | null;
@@ -135,7 +137,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       'sort[0][field]': 'Created_At',
       'sort[0][direction]': 'desc',
     });
-    ['Bild', 'Cap_Bild', 'Konzept_Name', 'Konzept_Story', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At', 'Board', 'Cap_Scale']
+    ['Bild', 'Cap_Bild', 'Body_Bild', 'Konzept_Name', 'Konzept_Story', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At', 'Board', 'Cap_Scale']
       .forEach(f => params.append('fields[]', f));
     const r = await fetchT(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}?${params}`,
@@ -166,8 +168,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           id: rec.id,
           // Stabile Adresse: /api/bild (ulba-Frontend) loest den Anhang auf.
           bildUrl: `/api/bild?r=${rec.id}`,
-          // v58: beim Komposit traegt Bild schon den Verschluss — kein Stapel.
-          capBildUrl: (!montiert && hatAnhang(f['Cap_Bild'])) ? `/api/bild?r=${rec.id}&k=cap` : null,
+          // v60: Einzelbilder reisen immer mit — die UI zeigt sie als
+          // Koerper·Verschluss-Thumbnails; gestapelt wird nur ohne montiert.
+          capBildUrl: hatAnhang(f['Cap_Bild']) ? `/api/bild?r=${rec.id}&k=cap` : null,
+          bodyBildUrl: hatAnhang(f['Body_Bild']) ? `/api/bild?r=${rec.id}&k=body` : null,
           weltName: String(f['Konzept_Name'] || ''),
           teilName: String(f['Teil_Name'] || ''),
           systemId: sysLink[0] || null,
