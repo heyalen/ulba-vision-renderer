@@ -81,6 +81,8 @@ type RenderEintrag = {
   // v56: gemessene Cap-Element-Breite relativ zur Body-Element-Breite;
   // null bei alten Records -> Frontend-Fallback-Heuristik.
   capScale: number | null;
+  // v59: true = Bild ist das fertige Komposit -> Buehne zeigt es contain.
+  montiert: boolean;
   engine: string;
   erstellt: string;
 };
@@ -175,6 +177,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           warnungen,
           umsetzung,
           capScale: (typeof f['Cap_Scale'] === 'number' && isFinite(f['Cap_Scale'])) ? f['Cap_Scale'] : null, // v56
+          montiert, // v59
           engine: typeof f['Engine'] === 'string' ? f['Engine'] : (f['Engine']?.name || 'seedream'),
           erstellt: String(f['Created_At'] || rec.createdTime || ''),
         };
