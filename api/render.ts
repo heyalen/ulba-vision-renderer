@@ -38,8 +38,6 @@ import { createHash } from 'crypto';
    v46: Referenz_Bild wieder RAUS aus image_urls (Live-Test XTAG: Seedream
    uebernimmt Formen aus der Stil-Referenz — Geometrie-Kontamination;
    Detailtreue schlaegt alles). Stil kommt jetzt aus Design_Code.
-   Render_Rezept: prompt-fertiger englischer Text, verbatim in den Prompt,
-   VOR den mechanischen Farb-/Finish-Zeilen; leer -> heutiges Verhalten.
    Dazu haerterer Geometrie-Lock (strict recolor of the SAME object) und
    das Seitenverhaeltnis des Produktfotos statt 'auto'.
    v47 (Re-Test XTAG: Pumpkopf-Drift trotz Text-Lock): (1) Geometrie-Anker
@@ -52,13 +50,16 @@ import { createHash } from 'crypto';
    hatte schlanke Flaschen gestreckt).
    v48 (Re-Test: Chrom-Pumpkopf weiss uebermalt, Streifen aus der Grafik-
    Regel, DESIGN-ENTSCHEID): "Der Verschluss wird GEWAEHLT, nie umlackiert."
-   (1) Jede Cap-Umfaerbung ist raus — der gewaehlte Cap erscheint exakt wie
-   fotografiert, Cap_Hex und die Closure-Zeile des Rezepts gehen nie mehr in
-   Bild-Prompts; (2) ein vorhandenes Rezept besitzt die Deko EXKLUSIV
-   (grafikRegel + Akzent-Cues fallen dann weg — Aqua Minimal sagt NONE, also
-   keine Streifen); (3) passt der gewaehlte Cap nicht zur Closure-Praeferenz
-   des Rezepts, kommt eine ehrliche Warnung in farbsystem.warnungen — mit
-   der passenden Cap-Variante des Systems, falls es eine gibt. */
+   (1) Jede pauschale Cap-Umfaerbung ist raus — Cap_Hex geht nie mehr in
+   Bild-Prompts; (2) passt der gewaehlte Cap nicht zur Soll-Farbe der Welt,
+   kommt eine ehrliche Warnung in farbsystem.warnungen — mit der passenden
+   Cap-Variante des Systems, falls es eine gibt.
+   v54 (3-Felder-Modell, Alens Konsolidierung): Render_Rezept ist KOMPLETT
+   aus dem Render-Pfad entfernt. Der Komponenten-Bauplan (Design_Komponenten)
+   ist die einzige Welt-Quelle fuer den Bild-Prompt; die Closure-Praeferenz
+   fuer Variantenwahl/Warnung kommt aus Design_Komponenten.verschluss
+   (Hex -> white/black/silver/gold + Finish). Welten OHNE Komponenten fallen
+   auf das Achsen-Verhalten zurueck (Sicherheitsnetz, nicht Rezept-basiert). */
 
 // ── fetch mit hartem Timeout ──────────────────────────────────────────────
 // Ohne dies wartet ein haengender externer Call (fal.ai / Airtable) bis
@@ -98,7 +99,8 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // farb_hinweis. v53: Komposit-Call wieder raus (Kosten + Qualitaetsrisiko,
 // Alens Entscheid) — im Split-Fall exakt ZWEI Renders (Body + gewaehlter Cap),
 // das Frontend stapelt die beiden Bilder per CSS zu einem Produkt.
-const RENDER_VERSION = 'v53';
+// v54: 3-Felder-Modell — Render_Rezept komplett raus, Bauplan einzige Quelle.
+const RENDER_VERSION = 'v54';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -343,10 +345,9 @@ function grafikRegel(typoHaltung: string | null | undefined, akzentHex: string |
  * FORM / MATERIAL / VERSCHLUSS / forbidden bleiben hart gesperrt (Invariante).
  * closureRule variiert pro Pfad (Vollbild A/B, Split-Base ohne Cap).
  */
-// mitGrafik=false (Rezept vorhanden): das Rezept definiert die Deko
-// abschliessend — die achsen-generierte Grafikebene faellt komplett weg
-// (v48; die Linien-Spec hatte sonst Streifen erzeugt, die das Rezept nie
-// bestellt hat).
+// mitGrafik=false (Bauplan vorhanden, v54): der Komponenten-Bauplan definiert
+// die Deko abschliessend — die achsen-generierte Grafikebene faellt komplett
+// weg (die Linien-Spec hatte sonst Streifen erzeugt, die niemand bestellt hat).
 function buildHardRule(closureRule: string, forbidden: string[], typoHaltung?: string | null, akzentHex?: string | null, mitGrafik: boolean = true): string {
   return [
     'CRITICAL RULES — these override everything above.',
@@ -516,10 +517,6 @@ function wirkstoffTreffer(text: string, liste: WirkstoffRef[]): WirkstoffRef | n
 type DesignCodeRec = {
   id: string;
   name: string;
-  // Render_Rezept (fldPnvXZEc5pXZyNg): prompt-fertiger englischer Stil-Block,
-  // von Alen kuratiert. Gefuellt -> verbatim in den Prompt; leer -> Fallback
-  // auf die aus Achsen/Hex generierten Stilzeilen (heutiges Verhalten).
-  rezept: string | null;
   bodyBehandlung: string;
   farbort: string;
   bodyHex: string | null;
@@ -543,7 +540,7 @@ type DesignCodeRec = {
   wirkungBeschreibung: string | null;
   doNot: string[]; // Do_Not des Codes — Geschmacks-Verbote (deutsch, kuratiert)
   // v51: Bauplan-JSON (Design_Komponenten) — besitzt bei Vorhandensein den
-  // Bild-Prompt exklusiv (praeziser als die Rezept-Prosa).
+  // Bild-Prompt exklusiv (v54: einzige Welt-Quelle fuer den Prompt).
   komponenten: string | null;
 };
 
@@ -744,7 +741,6 @@ async function assemblePrompt(
       return {
         id: r.id,
         name: String(f['Name'] || ''),
-        rezept: (() => { const v = fieldAny(f, ['Render_Rezept', 'Render Rezept']); return v ? String(v).trim() : null; })(),
         bodyBehandlung,
         farbort,
         bodyHex: String(f['Body_Hex'] || '').trim() || null,
@@ -1056,8 +1052,9 @@ async function assemblePrompt(
           umsetzung.push(`Verschluss ${vFarbe}${komp.verschluss?.finish ? ` ${komp.verschluss.finish}` : ''} (Masse-Einfärbung des Kunststoff-Caps)`);
         }
       } else {
+        // Warnung dazu kommt aus dem Closure-Warnblock unten (v54, mit
+        // passender Varianten-Empfehlung) — hier nur der Umsetzungs-Schritt.
         umsetzung.push(`Verschluss bleibt wie fotografiert (Metall/nicht einfärbbar) — die Welt sieht ${vFarbe} vor`);
-        farbsys.warnungen.push(`Diese Welt sieht einen Verschluss in ${vFarbe} vor — dein Verschluss ist nicht einfärbbar und bleibt unverändert.`);
       }
     }
   }
@@ -1113,31 +1110,6 @@ async function assemblePrompt(
     ? `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no letters, no numbers, no logo anywhere on the product — any label stays completely blank.`
     : `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`;
   const codeAkzentEn = akzentCueEn(code.akzentCue, code.akzentHex);
-  // ── Render_Rezept: kuratierter Stil-Block, verbatim, VOR den mechanischen
-  // Farb-/Finish-Zeilen. Das Rezept gewinnt bei jedem Konflikt — insbesondere
-  // bei Umleitung/klar_liquid_farbe (Live-Test XTAG: #00AEEF blass statt
-  // gesaettigt). Kein Rezept -> das generierte Verhalten.
-  // v48: Die "Closure preference"-Schlusszeile des Rezepts ist eine WAHL-Hilfe
-  // zwischen realen Cap-Varianten, nie eine Umlack-Anweisung — sie wird vor
-  // dem Prompt abgetrennt und speist nur die ehrliche Warnung (s. unten).
-  const rezept = code.rezept;
-  const rezeptZeilen = (rezept || '').split(/\n/);
-  const closurePrefZeile = rezeptZeilen.find(z => /closure preference/i.test(z)) || '';
-  const rezeptFuerPrompt = rezeptZeilen.filter(z => !/closure preference/i.test(z)).join('\n').trim();
-  const rezeptBlock = rezeptFuerPrompt
-    ? `STYLE RECIPE for this design world — follow it precisely; on any conflict with the colour lines in this prompt, the recipe wins: ${rezeptFuerPrompt}`
-    : '';
-  // Hex-Anker: nur Body + Akzent. Cap_Hex geht NIE mehr in Bild-Prompts —
-  // der Verschluss wird gewaehlt, nie umlackiert (v48).
-  const hexAnker = [
-    code.bodyHex ? `body ${code.bodyHex}` : '',
-    code.akzentHex ? `accent ${code.akzentHex}` : '',
-  ].filter(Boolean).join(', ');
-  const ankerLine = rezept && hexAnker ? `Colour anchors reinforcing the recipe (body and accent only — never the closure): ${hexAnker}.` : '';
-  // Rezept gewinnt die Body-Zeile: bei Typ-B-Umleitung oder klar_liquid_farbe
-  // wuerde die mechanische Zeile ("liquid is a clean X") dem Rezept
-  // widersprechen — dann faellt sie weg. Sonst bleibt sie als Verstaerkung.
-  const rezeptGewinnt = !!rezept && (!!code.umleitung || code.bodyBehandlung === 'klar_liquid_farbe');
 
   // ── Vollbild-Prompt (Fall A/B, ein Render) ─────────────────────────
   const fullLines: string[] = [];
@@ -1161,16 +1133,8 @@ async function assemblePrompt(
   fullLines.push(materialLine);
   if (capMaterialLine) fullLines.push(capMaterialLine);
   if (komp) {
-    // v51: der Bauplan besitzt den Bild-Prompt exklusiv — er ist praeziser
-    // als die Rezept-Prosa (die weiter das Konzept/Warnungen speist).
+    // v51/v54: der Bauplan besitzt den Bild-Prompt exklusiv.
     for (const l of kompLines) fullLines.push(l);
-  } else if (rezept) {
-    // Rezept-Pfad: der kuratierte Block traegt Stil UND Deko exklusiv; die
-    // generierten Zeilen schrumpfen auf Anker + Ziel-Zone bzw. Body-Zeile.
-    fullLines.push(rezeptBlock);
-    if (ankerLine) fullLines.push(ankerLine);
-    if (zonen) fullLines.push(zonenLine); // v50: Zonen ersetzen die Heuristik
-    else if (!rezeptGewinnt) fullLines.push(bodyLineEn);
   } else {
     if (zonen) { fullLines.push(zonenLine); fullLines.push(zonenFarbLine); }
     else fullLines.push(bodyLineEn);
@@ -1191,7 +1155,7 @@ async function assemblePrompt(
     : fall === 'A'
     ? `Do not add, remove, replace or restyle the closure. ${capUnveraendertLock}`
     : 'Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.';
-  const fullPrompt = `${fullLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleFull, forbidden, code.typoHaltung, code.akzentHex, !rezept && !komp)}`;
+  const fullPrompt = `${fullLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleFull, forbidden, code.typoHaltung, code.akzentHex, !komp)}`;
 
   // ── Split-Prompts (Fall C/D): Base und Cap GETRENNT, gleiche Bausteine ─
   // Einzelbild-Edit ist formtreu; zwei Produktbilder zusammen = Drift
@@ -1205,11 +1169,6 @@ async function assemblePrompt(
   baseLines.push(materialLine);
   if (komp) {
     for (const l of kompLines) baseLines.push(l); // v51: Bauplan exklusiv
-  } else if (rezept) {
-    baseLines.push(rezeptBlock);
-    if (ankerLine) baseLines.push(ankerLine);
-    if (zonen) baseLines.push(zonenLine); // v50: Zonen ersetzen die Heuristik
-    else if (!rezeptGewinnt) baseLines.push(bodyLineEn);
   } else {
     if (zonen) { baseLines.push(zonenLine); baseLines.push(zonenFarbLine); }
     else {
@@ -1220,11 +1179,11 @@ async function assemblePrompt(
   if (avoidLine) baseLines.push(avoidLine);
   baseLines.push(studioLine);
   const closureRuleBase = 'Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle — the neck stays open exactly as in reference image 1.';
-  const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex, !rezept && !komp)}`;
+  const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex, !komp)}`;
 
   // Cap-Render (Split): NUR noch Cleanup — Freisteller auf weissem Studio-
   // Hintergrund, OHNE jede Farbaenderung (v48, DESIGN-ENTSCHEID). Das ist
-  // das bewaehrte Preserve-Muster; capRezept-/capRecolor-Prompts sind raus.
+  // das bewaehrte Preserve-Muster.
   const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
   // v51: Split-Cap darf eingefaerbt werden, wenn der Plan es sagt — gleicher
   // Cleanup, nur Farbe/Finish aendern sich (Geometrie-Lock wie v47).
@@ -1233,29 +1192,40 @@ async function assemblePrompt(
     : null;
   const capPrompt = split ? (capRecolorPrompt || capPreservePrompt) : null;
 
-  // ── Ehrliche Closure-Warnung statt Umlack (v48) ─────────────────────
-  // Die "Closure preference"-Zeile des Rezepts ist eine Wahl-Hilfe zwischen
-  // realen Verschluss-Varianten. Passt der GEWAEHLTE Cap nicht dazu, sagt
-  // das Blatt es — und nennt die passende Variante des Systems, wenn es
-  // eine gibt. Best-Effort: scheitert das Nachladen, faellt nur der
-  // Alternativ-Satz weg, nie der Render.
-  const FARBWORT = /(white|weiss|silver|silber|chrome|chrom|metallic|black|schwarz|matt|gold)/gi;
-  const normFarbe = (w: string) => {
-    const x = w.toLowerCase();
-    return x === 'weiss' ? 'white' : x === 'schwarz' ? 'black' : x === 'silber' ? 'silver' : x === 'chrom' ? 'chrome' : x;
-  };
+  // ── Ehrliche Closure-Warnung (v54: Quelle = Bauplan-Verschluss) ─────
+  // Der Bauplan nennt den Soll-Verschluss (Design_Komponenten.verschluss).
+  // Bleibt der gewaehlte Cap unveraendert (kein Recolor-Plan) und passt er
+  // nicht zum Soll, sagt das Blatt es — und nennt die passende Variante des
+  // Systems, wenn es eine gibt. Best-Effort: scheitert das Nachladen, faellt
+  // nur der Alternativ-Satz weg, nie der Render.
   const FARBE_DE: Record<string, string> = {
     white: 'Weiss', silver: 'Silber', chrome: 'Chrom', metallic: 'Metallic',
     black: 'Schwarz', matt: 'Matt', gold: 'Gold',
   };
-  const prefWorte = [...new Set((closurePrefZeile.match(FARBWORT) || []).map(normFarbe))];
+  const prefWorte: string[] = [];
+  if (komp?.verschluss) {
+    // Hex -> Keyword (white/black/silver/gold); Finish ergaenzt matt/metallic.
+    const hexWort = (h: string | null | undefined): string | null => {
+      const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim());
+      if (!m) return null;
+      const r = parseInt(m[1].slice(0, 2), 16), g = parseInt(m[1].slice(2, 4), 16), b = parseInt(m[1].slice(4, 6), 16);
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      if (max - min < 30) return max >= 225 ? 'white' : max <= 55 ? 'black' : 'silver';
+      if (r > 170 && g > 120 && b < 110) return 'gold';
+      return null;
+    };
+    const w = hexWort(komp.verschluss.farbe);
+    if (w) prefWorte.push(w);
+    if (komp.verschluss.finish === 'metallic') prefWorte.push('metallic');
+    if (komp.verschluss.finish === 'matt') prefWorte.push('matt');
+  }
   const passtZu = (text: string) => {
     const t = text.toLowerCase();
     return prefWorte.some(w => t.includes(w) || (w === 'chrome' && /silver|metallic|aluminium|aluminum/.test(t)) || (w === 'silver' && /chrome|metallic/.test(t)));
   };
-  // v51: mit Bauplan uebernimmt der Verschluss-Plan die Logik (inkl. eigener
-  // Warnung) — die Rezept-Praeferenz-Warnung gilt nur noch ohne Bauplan.
-  if (!komp && prefWorte.length && capFields) {
+  // Nur wenn der Cap unveraendert bleibt (kein Einfaerb-Plan) kann er
+  // falsch sein — ein Recolor-Plan erfuellt das Soll ohnehin.
+  if (prefWorte.length && capFields && !capPlanEinfaerben) {
     const gewaehltText = [...capAttrNamen, capClosureEn, String(capFields['Cap_Name'] || '')].join(' ');
     if (!passtZu(gewaehltText)) {
       let alternativ = '';
