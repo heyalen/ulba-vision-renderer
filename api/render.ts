@@ -15,6 +15,18 @@ import { createHash } from 'crypto';
    Ziel-Zone explizit ("apply ONLY to the inner cartridge; the outer clear
    glass wall stays untouched") und ersetzt die Behandlungs-Heuristik.
    Ohne Zonen exakt das bisherige Verhalten.
+   v51: KOMPONENTEN-MODELL (DESIGN-ENTSCHEID) — die Welt ist ein BAUPLAN
+   aus Design-Komponenten (Design_Komponenten-JSON am Code), das Teil
+   traegt Deko-Faehigkeiten (System.Deko_Faehigkeiten, Cap.Einfaerbbar),
+   der Renderer UEBERSETZT deterministisch: farbe_fix -> Welt aufs Etikett;
+   einfaerbung_masse -> Masse-Einfaerbung (Transparenz der Welt respektiert);
+   Verlauf/Grafik -> Direktdruck, sonst Etikett. Das pauschale Etiketten-
+   Verbot faellt: Labels sind erste Klasse, praezise beschrieben, Tiegel-
+   Label NUR seitlich; die No-Text-Regel bleibt global. Verschluss wird in
+   Welt-Farbe eingefaerbt, wenn Cap.Einfaerbbar UND der Nutzer nicht
+   explizit eine Cap-Variante gewaehlt hat (capExplizit) — Metall bleibt
+   immer wie fotografiert. concept.umsetzung erklaert die Schritte deutsch.
+   Ohne Design_Komponenten exakt das v50-Verhalten.
    Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
    (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
    was nur dem alten Mehr-Runden-Briefing diente, ist raus:
@@ -82,7 +94,7 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-const RENDER_VERSION = 'v50';
+const RENDER_VERSION = 'v51';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -526,6 +538,9 @@ type DesignCodeRec = {
   produkt: string;
   wirkungBeschreibung: string | null;
   doNot: string[]; // Do_Not des Codes — Geschmacks-Verbote (deutsch, kuratiert)
+  // v51: Bauplan-JSON (Design_Komponenten) — besitzt bei Vorhandensein den
+  // Bild-Prompt exklusiv (praeziser als die Rezept-Prosa).
+  komponenten: string | null;
 };
 
 type Concept = {
@@ -542,6 +557,8 @@ type Concept = {
   };
   do_not?: string[];
   farbsystem?: FarbSystem;
+  // v51: deutsche Umsetzungs-Schritte der Mapping-Engine fuer die UI.
+  umsetzung?: string[];
   render?: { bodyLineEn: string; capHex: string | null; capFinishEn: string; akzentEn: string };
 };
 
@@ -582,7 +599,10 @@ async function assemblePrompt(
   forceCodeId: string,
   // v48: ID des gewaehlten Caps — fuer die Closure-Warnung (Geschwister-
   // Varianten des Systems nachschlagen, den gewaehlten ausnehmen).
-  selectedCapId: string | null
+  selectedCapId: string | null,
+  // v51: true nur, wenn der Nutzer AKTIV eine Cap-Variante angeklickt hat
+  // (Frontend-Flag). Dann bleibt der Verschluss immer wie fotografiert.
+  capExplizit: boolean
 ): Promise<{
   fullPrompt: string; basePrompt: string; capPrompt: string | null;
   forbidden: string[]; concept: Concept;
@@ -740,6 +760,7 @@ async function assemblePrompt(
           return v ? String(v).trim() : null;
         })(),
         doNot: teileListe(fieldAny(f, ['Do_Not', 'Do_not', 'DoNot'])),
+        komponenten: (() => { const v = fieldAny(f, ['Design_Komponenten']); return v ? String(v).trim() : null; })(),
       };
     });
 
@@ -870,6 +891,164 @@ async function assemblePrompt(
     zonenFarbLine = `The colour for the ${zielEn} is a saturated ${codeBodyHexFuellung} with ${bodyFinishEn}.`;
   }
 
+  // ── v51 — MAPPING-ENGINE: Bauplan × Deko-Faehigkeiten × Zonen × Cap ──
+  // Deterministisch, VOR dem Prompt-Bau. Erzeugt die EN-Prompt-Zeilen
+  // (kompLines), den Cap-Plan und die deutschen umsetzung-Schritte.
+  type Komponenten = {
+    behaelter?: { farbe?: string | null; verlauf?: { von?: string; nach?: string; richtung?: string } | null; transparenz?: string; produkt_sichtbar?: boolean; finish?: string };
+    grafik?: { beschreibung?: string; abdeckung?: string };
+    label?: { vorhanden?: boolean; farbe?: string | null; abdeckung?: string | null; stil?: string | null };
+    verschluss?: { farbe?: string; finish?: string };
+    akzente?: string[];
+  };
+  let komp: Komponenten | null = null;
+  try {
+    const k = code.komponenten ? JSON.parse(code.komponenten) : null;
+    if (k && k.behaelter && typeof k.behaelter === 'object') komp = k as Komponenten;
+  } catch { komp = null; }
+
+  const deko = new Set(multiSelectNames(sysFields['Deko_Faehigkeiten']).map(s => s.toLowerCase()));
+  const capEinfaerbbar = !!(capFields && capFields['Einfaerbbar'] === true);
+  const kompLines: string[] = [];
+  const umsetzung: string[] = [];
+  // Cap-Plan: einfaerben nur bei Kunststoff-Cap UND ohne explizite Nutzer-Wahl.
+  let capPlanEinfaerben = false;
+  let capPlanFarbe: string | null = null;
+  let capPlanFinishEn = 'a clean matt finish';
+  // true sobald der Plan ein Etikett vorsieht — dann faellt das pauschale
+  // Label-Verbot aus den Preserve-Zeilen (No-Text bleibt global).
+  let kompLabelGeplant = false;
+
+  if (komp) {
+    const b = komp.behaelter || {};
+    const verlauf = (b.verlauf && b.verlauf.von && b.verlauf.nach) ? b.verlauf : null;
+    const grafikTxt = String(komp.grafik?.beschreibung || '').trim();
+    const grafikSichtbar = !!komp.grafik && komp.grafik.abdeckung !== 'keine' && grafikTxt && grafikTxt.toLowerCase() !== 'none';
+    const TRANS_EN: Record<string, string> = {
+      opak: 'opaque', transparent: 'clear transparent',
+      leicht_transparent: 'lightly translucent', getoent: 'tinted translucent',
+    };
+    const transparenzEn = TRANS_EN[b.transparenz || 'opak'] || 'opaque';
+    const FINISH_EN_K: Record<string, string> = {
+      glossy: 'a clean glossy finish', matt: 'a premium matte finish',
+      soft_touch: 'a soft-touch matte coating', metallic: 'a metallic finish',
+    };
+    const kFinishEn = FINISH_EN_K[b.finish || 'glossy'] || FINISH_EN_K.glossy;
+    const RICHTUNG_EN: Record<string, string> = {
+      vertikal_oben_nach_unten: 'vertically, fully saturated at the top and fading cleanly downwards',
+      vertikal_unten_nach_oben: 'vertically, fully saturated at the bottom and fading cleanly upwards',
+      horizontal: 'horizontally', diagonal: 'diagonally',
+    };
+    const verlaufEn = verlauf
+      ? `a smooth gradient from ${verlauf.von} to ${verlauf.nach}, running ${RICHTUNG_EN[verlauf.richtung || ''] || 'vertically'}`
+      : '';
+    const weltBildEn = [verlauf ? verlaufEn : (b.farbe ? `the solid colour ${b.farbe}` : ''), grafikSichtbar ? grafikTxt : '']
+      .filter(Boolean).join(', plus ') || 'the world colour';
+
+    // Label-Geometrie nach Teiltyp: Tiegel IMMER seitlich, Tube front.
+    const typeNameK = selectName(sysFields['Type']).toLowerCase();
+    const istTiegel = /tiegel|jar/.test(typeNameK);
+    const istTube = /tube/.test(typeNameK);
+    const labelOrtEn = (abdeckung: string | null | undefined): string => {
+      if (istTiegel) return 'ONLY on the side wall of the jar — a clean band that never wraps fully around and NEVER touches or crosses the lid edge or the top';
+      if (istTube) return 'on the front face of the tube';
+      const map: Record<string, string> = {
+        front_panel: 'covering only the front panel',
+        wrap: 'as a wrap-around label with one clean seam',
+        seitlich: 'only on the side',
+        partiell: 'as a small partial panel on the front',
+      };
+      return map[abdeckung || 'front_panel'] || 'covering only the front panel';
+    };
+    const labelOrtDe = istTiegel ? 'nur seitlich (Tiegel-Regel: nie über die Deckelkante)' : istTube ? 'auf der Front' : ({ front_panel: 'auf dem Front-Panel', wrap: 'als Rundum-Etikett', seitlich: 'nur seitlich', partiell: 'als Teilpanel' } as Record<string, string>)[komp.label?.abdeckung || 'front_panel'] || 'auf dem Front-Panel';
+
+    const farbeFix = deko.has('farbe_fix');
+    const kannMasse = deko.has('einfaerbung_masse');
+    const kannDruck = deko.has('direktdruck');
+    const kannEtikett = deko.has('etikett');
+    const kannLack = deko.has('spruehlackierung');
+
+    // ── 1) Behaelter-Strategie ───────────────────────────────────────
+    let labelTraegtWelt = false;
+    if (farbeFix && (kannEtikett || kannDruck)) {
+      // Behaelterfarbe unantastbar (z.B. Braunglas) -> Welt wandert auf
+      // Etikett (bevorzugt) oder Direktdruck; das Material bleibt sichtbar.
+      if (kannEtikett) {
+        kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, printed edge to edge on the label, smooth flat edges, NO text, no letters, no logos.`);
+        labelTraegtWelt = true;
+        umsetzung.push(`${verlauf ? 'Verlauf' : 'Farbwelt'} als Etikett ${labelOrtDe} — die Behälterfarbe ist fix und bleibt sichtbar`);
+      } else {
+        kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible. Apply the design world as direct print on the surface: ${weltBildEn}, covering only part of the surface, NO text, no logos.`);
+        umsetzung.push(`${verlauf ? 'Verlauf' : 'Farbwelt'} als Direktdruck — die Behälterfarbe ist fix`);
+      }
+    } else if ((verlauf || grafikSichtbar) && kannDruck) {
+      kompLines.push(`Apply the design world as DIRECT PRINT onto the container surface: ${weltBildEn}. The print lies flat on the material and follows its curvature${b.transparenz !== 'opak' ? `; the container wall itself stays ${transparenzEn}` : ''}. ${b.finish ? `The surface has ${kFinishEn}.` : ''} NO text, no letters, no logos in the print.`);
+      umsetzung.push(`${verlauf ? 'Verlauf' : 'Grafik'} als Direktdruck auf den Körper`);
+    } else if ((verlauf || grafikSichtbar) && kannEtikett) {
+      kompLines.push(`Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, smooth flat edges, NO text, no logos. The container material outside the label stays untouched.`);
+      labelTraegtWelt = true;
+      umsetzung.push(`${verlauf ? 'Verlauf' : 'Grafik'} als Etikett ${labelOrtDe} — Direktdruck ist auf diesem Teil nicht verfügbar`);
+    } else if ((kannMasse || kannLack) && b.farbe) {
+      if ((b.transparenz || 'opak') === 'opak') {
+        kompLines.push(`Colour the container body as ONE solid opaque ${b.farbe} with ${kFinishEn}, applied in the material itself.`);
+        umsetzung.push(`Körper opak ${b.farbe} eingefärbt (${kannMasse ? 'Masse-Einfärbung' : 'Sprühlackierung'})`);
+      } else {
+        kompLines.push(`Tint the container ${b.farbe} as ${transparenzEn} material with ${kFinishEn}${b.produkt_sichtbar ? ' — the product inside stays visible through the tinted wall, reading softly milky through the colour, with a visible fill line' : ''}. Do not make it opaque.`);
+        umsetzung.push(`Körper ${b.transparenz === 'getoent' ? 'getönt' : 'leicht transparent'} ${b.farbe} eingefärbt${b.produkt_sichtbar ? ' — Produkt bleibt sichtbar' : ''}`);
+      }
+    } else if (zonen) {
+      // WO uebernimmt die Zonen-Zeile (v50); Farbe der Welt in die Ziel-Zone.
+      kompLines.push(zonenLine);
+      kompLines.push(`The colour for that zone is ${weltBildEn}.`);
+      umsetzung.push('Farbwelt in die sichtbare Innen-Zone — der Körper selbst trägt keine Dekoration');
+    } else {
+      kompLines.push(bodyLineEn);
+      umsetzung.push('Körperbehandlung wie Standard — keine Deko-Fähigkeiten getaggt');
+    }
+    // Zonen-Zeile zusaetzlich (WO + Unantastbares), wenn nicht schon gepusht.
+    if (zonen && !kompLines.includes(zonenLine)) kompLines.push(zonenLine);
+
+    // ── 2) Welt-Label (eigener Baustein, falls nicht schon Welt-Traeger) ─
+    if (komp.label?.vorhanden && !labelTraegtWelt && kannEtikett) {
+      kompLines.push(`Add a clean ${komp.label.farbe || '#FFFFFF'} label ${labelOrtEn(komp.label.abdeckung)}${komp.label.stil ? ` — ${komp.label.stil}` : ''}; smooth flat edges, NO text, no letters, no logos on it.`);
+      umsetzung.push(`${komp.label.farbe === '#FFFFFF' || !komp.label.farbe ? 'Weisses' : 'Farbiges'} Label ${labelOrtDe}`);
+    }
+
+    kompLabelGeplant = labelTraegtWelt || !!(komp.label?.vorhanden && kannEtikett);
+
+    // ── 3) Akzente ───────────────────────────────────────────────────
+    if (Array.isArray(komp.akzente) && komp.akzente.length) {
+      kompLines.push(`Accents, exactly as listed and nothing more: ${komp.akzente.slice(0, 3).join('; ')}.`);
+    }
+
+    // ── 4) Verschluss-Plan ───────────────────────────────────────────
+    // v51 ersetzt den v48-Absolutismus: ein KUNSTSTOFF-Cap darf in die
+    // Welt-Farbe (Masse-Einfaerbung ist real) — ausser der Nutzer hat
+    // explizit eine Variante gewaehlt. Metall bleibt immer unveraendert.
+    const vFarbe = komp.verschluss?.farbe || null;
+    const CAP_FIN_K: Record<string, string> = { matt: 'a clean matt finish', glossy: 'a clean glossy finish', metallic: 'a polished metallic finish' };
+    capPlanFinishEn = CAP_FIN_K[komp.verschluss?.finish || 'matt'] || CAP_FIN_K.matt;
+    if (vFarbe) {
+      if (capExplizit) {
+        umsetzung.push(`Verschluss wie von dir gewählt — bleibt unverändert (die Welt sieht ${vFarbe} vor)`);
+      } else if (capEinfaerbbar || (!capFields && fall === 'A')) {
+        // Fall A ohne Cap-Record: der Verschluss im Foto; Einfaerbung nur,
+        // wenn kein Metall-Hinweis in den System-Attributen steckt.
+        const metallCapHinweis = attrNamen.some(n => /metallic ring|metal|chrome|aluminium|aluminum/i.test(n));
+        if (!capFields && metallCapHinweis) {
+          umsetzung.push(`Verschluss bleibt wie fotografiert (Metall) — die Welt sieht ${vFarbe} vor`);
+        } else {
+          capPlanEinfaerben = true;
+          capPlanFarbe = vFarbe;
+          umsetzung.push(`Verschluss ${vFarbe}${komp.verschluss?.finish ? ` ${komp.verschluss.finish}` : ''} (Masse-Einfärbung des Kunststoff-Caps)`);
+        }
+      } else {
+        umsetzung.push(`Verschluss bleibt wie fotografiert (Metall/nicht einfärbbar) — die Welt sieht ${vFarbe} vor`);
+        farbsys.warnungen.push(`Diese Welt sieht einen Verschluss in ${vFarbe} vor — dein Verschluss ist nicht einfärbbar und bleibt unverändert.`);
+      }
+    }
+  }
+
   // ── Geteilte Bausteine fuer ALLE Prompts (Vollbild, Split-Base, Cap) ─
   const attrLine = attrConstraints.length
     ? `Fixed physical characteristics of this exact product: ${attrConstraints.slice(0, 10).join('; ')}.`
@@ -904,13 +1083,22 @@ async function assemblePrompt(
   // nie umlackiert"): der Umlack selbst war der Trigger der Form-Drift —
   // deshalb gibt es ihn nicht mehr. Der Cap bleibt exakt wie fotografiert.
   const capUnveraendertLock = `The closure in the photo stays completely unchanged — identical colour, material, finish, geometry.`;
+  // v51: Kunststoff-Cap wird in die Welt-Farbe eingefaerbt (Masse-Einfaerbung
+  // ist real) — mit v47-Geometrie-Lock: NUR Farbe/Finish, nie die Form.
+  const capRecolorLock = (capPlanEinfaerben && capPlanFarbe)
+    ? `Recolor ONLY the closure to a solid ${capPlanFarbe} with ${capPlanFinishEn} — mass-coloured plastic, not paint. Keep its exact geometry: every collar ring, step, edge, thread and the actuator shape stay identical to the photo; change nothing but its colour and finish.`
+    : '';
   const materialLine = `The body is ${matEN}${isPlastic ? ' — it must clearly read as a plastic container, never as solid metal, aluminium, steel, glass or ceramic' : ''}.`;
   const capMaterialLine = capMaterial ? `The cap is ${capMaterial}.` : '';
   const avoidLine = doNotZeile((traegerOrt === 'Material')
     // Transparenz-Verbote rausfiltern, wenn die Wand sichtbar klar bleibt.
     ? code.doNot.filter(d => !/transparen|durchsichtig|klarglas/i.test(d))
     : code.doNot);
-  const studioLine = `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`;
+  const studioLine = kompLabelGeplant
+    // v51: Label ist geplant — das Verbot schrumpft auf No-Text (das Etikett
+    // selbst bleibt komplett blanko).
+    ? `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no letters, no numbers, no logo anywhere on the product — any label stays completely blank.`
+    : `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no label graphics, no logo, no lettering anywhere on the product.`;
   const codeAkzentEn = akzentCueEn(code.akzentCue, code.akzentHex);
   // ── Render_Rezept: kuratierter Stil-Block, verbatim, VOR den mechanischen
   // Farb-/Finish-Zeilen. Das Rezept gewinnt bei jedem Konflikt — insbesondere
@@ -940,19 +1128,30 @@ async function assemblePrompt(
 
   // ── Vollbild-Prompt (Fall A/B, ein Render) ─────────────────────────
   const fullLines: string[] = [];
-  fullLines.push(`Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
+  fullLines.push(kompLabelGeplant
+    // v51: Label geplant -> das pauschale Label-Verbot faellt; die Deko-
+    // Beschreibung unten besitzt, WAS auf die Oberflaeche darf.
+    ? `Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in reference image 1 — change ONLY surface colours, finishes and the decoration described below.`
+    : `Keep the exact same packaging shape, silhouette, proportions, neck and closure as shown in reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material.`);
   if (geoAnkerLine) fullLines.push(geoAnkerLine);
   if (attrLine) fullLines.push(attrLine);
   if (fall === 'B') {
     // v19-Carmen-Muster, v48 reaktiviert: der Ersatz-Cap wird eingesetzt,
-    // wie er fotografiert ist — nie umgefaerbt.
-    fullLines.push(`Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap. Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.`);
+    // wie er fotografiert ist. v51: ist er Kunststoff (Einfaerbbar) und der
+    // Nutzer hat nicht explizit gewaehlt, wird er in die Welt-Farbe gefaerbt.
+    fullLines.push((capPlanEinfaerben && capPlanFarbe)
+      ? `Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 — identical geometry, parts and proportions as image 2, do not merge them, do not invent a new cap — but recolor that cap to a solid ${capPlanFarbe} with ${capPlanFinishEn}; change nothing about its shape.`
+      : `Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap. Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.`);
   } else {
-    fullLines.push(capUnveraendertLock);
+    fullLines.push((capPlanEinfaerben && capPlanFarbe) ? capRecolorLock : capUnveraendertLock);
   }
   fullLines.push(materialLine);
   if (capMaterialLine) fullLines.push(capMaterialLine);
-  if (rezept) {
+  if (komp) {
+    // v51: der Bauplan besitzt den Bild-Prompt exklusiv — er ist praeziser
+    // als die Rezept-Prosa (die weiter das Konzept/Warnungen speist).
+    for (const l of kompLines) fullLines.push(l);
+  } else if (rezept) {
     // Rezept-Pfad: der kuratierte Block traegt Stil UND Deko exklusiv; die
     // generierten Zeilen schrumpfen auf Anker + Ziel-Zone bzw. Body-Zeile.
     fullLines.push(rezeptBlock);
@@ -971,20 +1170,29 @@ async function assemblePrompt(
   }
   if (avoidLine) fullLines.push(avoidLine);
   fullLines.push(studioLine);
-  const closureRuleFull = fall === 'A'
+  const closureRuleFull = (capPlanEinfaerben && capPlanFarbe)
+    // v51: der Cap-Plan besitzt die Closure-Regel — Form-Lock bleibt hart.
+    ? (fall === 'A'
+        ? `Do not add, remove, replace or reshape the closure. ${capRecolorLock}`
+        : `Use ONLY the closure shown in image 2 with its exact geometry, parts and proportions — recolor it to a solid ${capPlanFarbe} with ${capPlanFinishEn} and change nothing else about it.`)
+    : fall === 'A'
     ? `Do not add, remove, replace or restyle the closure. ${capUnveraendertLock}`
     : 'Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.';
-  const fullPrompt = `${fullLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleFull, forbidden, code.typoHaltung, code.akzentHex, !rezept)}`;
+  const fullPrompt = `${fullLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleFull, forbidden, code.typoHaltung, code.akzentHex, !rezept && !komp)}`;
 
   // ── Split-Prompts (Fall C/D): Base und Cap GETRENNT, gleiche Bausteine ─
   // Einzelbild-Edit ist formtreu; zwei Produktbilder zusammen = Drift
   // (bewiesen, 2x reproduziert). Beide Prompts zitieren DENSELBEN Code.
   const baseLines: string[] = [];
-  baseLines.push(`Keep the exact same body shape, silhouette and proportions as reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck.`);
+  baseLines.push(kompLabelGeplant
+    ? `Keep the exact same body shape, silhouette and proportions as reference image 1 — change ONLY surface colours, finishes and the decoration described below. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck.`
+    : `Keep the exact same body shape, silhouette and proportions as reference image 1 — change ONLY the surface color and finish. Do NOT add any label, sticker, printed panel or white patch — the surface stays one uninterrupted, continuous material. Preserve the exact narrow threaded neck exactly as in the reference image — same width, same threads, same shoulder; do NOT widen, flare, open up or reshape the neck.`);
   if (geoAnkerLine) baseLines.push(geoAnkerLine);
   if (attrLine) baseLines.push(attrLine);
   baseLines.push(materialLine);
-  if (rezept) {
+  if (komp) {
+    for (const l of kompLines) baseLines.push(l); // v51: Bauplan exklusiv
+  } else if (rezept) {
     baseLines.push(rezeptBlock);
     if (ankerLine) baseLines.push(ankerLine);
     if (zonen) baseLines.push(zonenLine); // v50: Zonen ersetzen die Heuristik
@@ -999,13 +1207,18 @@ async function assemblePrompt(
   if (avoidLine) baseLines.push(avoidLine);
   baseLines.push(studioLine);
   const closureRuleBase = 'Do NOT add, draw, imply or attach any cap, closure, lid, dropper, pipette or pump anywhere on the bottle — the neck stays open exactly as in reference image 1.';
-  const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex, !rezept)}`;
+  const basePrompt = `${baseLines.filter(Boolean).join(' ')}\n\n${buildHardRule(closureRuleBase, forbidden, code.typoHaltung, code.akzentHex, !rezept && !komp)}`;
 
   // Cap-Render (Split): NUR noch Cleanup — Freisteller auf weissem Studio-
   // Hintergrund, OHNE jede Farbaenderung (v48, DESIGN-ENTSCHEID). Das ist
   // das bewaehrte Preserve-Muster; capRezept-/capRecolor-Prompts sind raus.
   const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
-  const capPrompt = split ? capPreservePrompt : null;
+  // v51: Split-Cap darf eingefaerbt werden, wenn der Plan es sagt — gleicher
+  // Cleanup, nur Farbe/Finish aendern sich (Geometrie-Lock wie v47).
+  const capRecolorPrompt = (capPlanEinfaerben && capPlanFarbe)
+    ? `Recolor this closure to a solid ${capPlanFarbe} with ${capPlanFinishEn} — mass-coloured plastic, not paint. Keep its EXACT shape: identical parts, identical proportions, every collar ring, step, edge, thread and the actuator shape stay exactly as in the reference image; change nothing but colour and finish. Place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`
+    : null;
+  const capPrompt = split ? (capRecolorPrompt || capPreservePrompt) : null;
 
   // ── Ehrliche Closure-Warnung statt Umlack (v48) ─────────────────────
   // Die "Closure preference"-Zeile des Rezepts ist eine Wahl-Hilfe zwischen
@@ -1027,7 +1240,9 @@ async function assemblePrompt(
     const t = text.toLowerCase();
     return prefWorte.some(w => t.includes(w) || (w === 'chrome' && /silver|metallic|aluminium|aluminum/.test(t)) || (w === 'silver' && /chrome|metallic/.test(t)));
   };
-  if (prefWorte.length && capFields) {
+  // v51: mit Bauplan uebernimmt der Verschluss-Plan die Logik (inkl. eigener
+  // Warnung) — die Rezept-Praeferenz-Warnung gilt nur noch ohne Bauplan.
+  if (!komp && prefWorte.length && capFields) {
     const gewaehltText = [...capAttrNamen, capClosureEn, String(capFields['Cap_Name'] || '')].join(' ');
     if (!passtZu(gewaehltText)) {
       let alternativ = '';
@@ -1089,6 +1304,8 @@ async function assemblePrompt(
     },
     do_not: code.doNot.slice(0, 4),
     farbsystem: farbsys,
+    // v51: deutsche Umsetzungs-Schritte des Bauplans — fuer die UI.
+    ...(komp && umsetzung.length ? { umsetzung } : {}),
     render: {
       bodyLineEn,
       capHex: code.capHex,
@@ -1265,6 +1482,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     forceCodeId = null,
     nocache: nocacheRoh = false,
     engine: engineRoh = 'seedream',
+    capExplizit: capExplizitRoh = false,
   } = req.body as {
     systemId: string;
     query: string;
@@ -1272,12 +1490,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     tier?: Tier;
     forceCodeId?: string | null;
     nocache?: boolean;
+    // v51: true NUR wenn der Nutzer aktiv eine Cap-Variante angeklickt hat —
+    // dann bleibt der Verschluss immer wie fotografiert (nie eingefaerbt).
+    capExplizit?: boolean;
     // A/B-Schalter (v47): 'gemini' rendert mit Gemini 2.5 Flash Image —
     // bekannt stark bei Identitaets-/Formtreue in Edits. Frontend sendet
     // nichts -> Default seedream, kein Frontend-Change noetig.
     engine?: Engine;
   };
   const engine: Engine = engineRoh === 'gemini' ? 'gemini' : 'seedream';
+  const capExplizit = capExplizitRoh === true;
   const falEndpoint = engine === 'gemini' ? FAL_GEMINI_EDIT : FAL_SEEDREAM_EDIT;
 
   if (!systemId || !query) {
@@ -1300,7 +1522,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId, engine);
+    // v51: capExplizit aendert den Prompt (Cap eingefaerbt oder nicht) —
+    // deshalb trennt das Suffix die beiden Welten im Cache.
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId, engine) + (capExplizit ? '_x' : '');
     let cached: any[] = [];
     if (!nocache) try {
       // v49: nur Status 'Done' ist ein Treffer — Pending (laeuft noch) und
@@ -1335,6 +1559,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               design_code: board.design_code,
               do_not: board.do_not,
               farbsystem: board.farbsystem,
+              umsetzung: board.umsetzung, // v51
             }
           : null;
 
@@ -1380,7 +1605,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Prompts deterministisch assemblieren ─────────────────────
     const { fullPrompt, basePrompt, capPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId, resolvedCapId);
+      await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId, resolvedCapId, capExplizit);
 
     const renderingPrompt = useSplitRender ? basePrompt : fullPrompt;
     const capPromptUsed: string | null = useSplitRender ? capPrompt : null;
@@ -1393,6 +1618,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const boardJson = JSON.stringify({
       palette: concept.palette, design_code: concept.design_code,
       do_not: concept.do_not, farbsystem: concept.farbsystem,
+      ...(concept.umsetzung ? { umsetzung: concept.umsetzung } : {}), // v51
     });
     const cacheId: string | null = await cacheCreate({
       Cache_Key: key,
