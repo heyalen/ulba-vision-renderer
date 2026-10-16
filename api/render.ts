@@ -104,7 +104,9 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v55: Cap-Wahl = nur Mechanik; Farbe IMMER von der Welt (wenn Einfaerbbar).
 // v56: massstabsgetreuer Cap-Stapel — Silhouetten-Messung beider Split-
 // Renders (weisser Studiogrund), capScale in Antwort + Cap_Scale im Cache.
-const RENDER_VERSION = 'v56';
+// v57: Metall-Cap wird bei METALLIC-Welt-Look eloxiert (gold/silber/kupfer/
+// rosegold/gunmetal); nur nicht-metallischer Look laesst Metall unveraendert.
+const RENDER_VERSION = 'v57';
 
 // ── v56: Silhouetten-Messung auf weissem Studiogrund ────────────────────
 // Downscale auf 256px (glaettet JPEG-Rauschen), Nicht-Fast-Weiss-Scan
@@ -145,6 +147,20 @@ async function messeSilhouette(buf: Buffer): Promise<SilMass | null> {
     return { imgW: B, maxW, neckW, silH: bottom - top + 1 };
   } catch { return null; }
 }
+// v57: typische Metalltoene (gold/silber/kupfer/rosegold/gunmetal) — eloxiertes
+// Aluminium gibt es real in jeder Metallic-Farbe, deshalb darf ein Metall-Cap
+// in einen METALLIC-Welt-Look umgefaerbt werden.
+function istMetallTon(h: string | null | undefined): boolean {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim());
+  if (!m) return false;
+  const r = parseInt(m[1].slice(0, 2), 16), g = parseInt(m[1].slice(2, 4), 16), b = parseInt(m[1].slice(4, 6), 16);
+  const max = Math.max(r, g, b), sat = max - Math.min(r, g, b);
+  if (sat < 30 && max >= 55 && max <= 230) return true;            // Silber/Gunmetal
+  if (r > 160 && g > 100 && b < 130 && r > b + 60) return true;    // Gold/Kupfer/Messing
+  if (r > 170 && g > 120 && g < 200 && b > 100 && b < 180 && r > g && g > b) return true; // Roségold
+  return false;
+}
+
 // Typ-Faktor: wie viel breiter als der Hals der Verschluss real sitzt.
 function capTypFaktor(closureText: string): number {
   const t = closureText.toLowerCase();
@@ -963,6 +979,9 @@ async function assemblePrompt(
   let capPlanEinfaerben = false;
   let capPlanFarbe: string | null = null;
   let capPlanFinishEn = 'a clean matt finish';
+  // v57: true = Metall-Cap wird in Metallic-Welt-Farbe eloxiert (statt
+  // Kunststoff-Masse-Einfaerbung) — anderes Prompt-Wording, gleicher GeoLock.
+  let capPlanMetall = false;
   // true sobald der Plan ein Etikett vorsieht — dann faellt das pauschale
   // Label-Verbot aus den Preserve-Zeilen (No-Text bleibt global).
   let kompLabelGeplant = false;
@@ -1079,31 +1098,33 @@ async function assemblePrompt(
     }
 
     // ── 4) Verschluss-Plan ───────────────────────────────────────────
-    // v51 ersetzt den v48-Absolutismus: ein KUNSTSTOFF-Cap darf in die
-    // Welt-Farbe (Masse-Einfaerbung ist real) — ausser der Nutzer hat
-    // explizit eine Variante gewaehlt. Metall bleibt immer unveraendert.
+    // v55 (Alens Regel): Die Cap-WAHL bestimmt nur Mechanik/Geometrie — die
+    // FARBE kommt IMMER von der Welt, sofern der Cap einfaerbbar ist.
+    // v57 (Alens Verfeinerung): ein METALL-Cap wird DOCH umgefaerbt, wenn
+    // die Welt einen METALLIC-Verschluss vorsieht (finish 'metallic' oder
+    // typischer Metallton) — eloxiertes Alu gibt es in jeder Metallic-Farbe.
+    // Nur bei nicht-metallischem Welt-Look bleibt Metall wie fotografiert.
     const vFarbe = komp.verschluss?.farbe || null;
     const CAP_FIN_K: Record<string, string> = { matt: 'a clean matt finish', glossy: 'a clean glossy finish', metallic: 'a polished metallic finish' };
     capPlanFinishEn = CAP_FIN_K[komp.verschluss?.finish || 'matt'] || CAP_FIN_K.matt;
-    // v55 (Alens Regel): Die Cap-WAHL bestimmt nur Mechanik/Geometrie — die
-    // FARBE kommt IMMER von der Welt, sofern der Cap einfaerbbar ist. Einzige
-    // Ausnahme: Einfaerbbar=false (Metall/Chrom) -> wie fotografiert + Hinweis.
+    const zielMetallic = komp.verschluss?.finish === 'metallic' || istMetallTon(vFarbe);
     if (vFarbe) {
-      if (capEinfaerbbar || (!capFields && fall === 'A')) {
-        // Fall A ohne Cap-Record: der Verschluss im Foto; Einfaerbung nur,
-        // wenn kein Metall-Hinweis in den System-Attributen steckt.
-        const metallCapHinweis = attrNamen.some(n => /metallic ring|metal|chrome|aluminium|aluminum/i.test(n));
-        if (!capFields && metallCapHinweis) {
-          umsetzung.push(`Verschluss bleibt wie fotografiert (Metall) — die Welt sieht ${vFarbe} vor`);
-        } else {
-          capPlanEinfaerben = true;
-          capPlanFarbe = vFarbe;
-          umsetzung.push(`Verschluss ${vFarbe}${komp.verschluss?.finish ? ` ${komp.verschluss.finish}` : ''} (Masse-Einfärbung des Kunststoff-Caps)`);
-        }
+      // Fall A ohne Cap-Record: der Verschluss im Foto; Metall-Hinweis aus
+      // den System-Attributen entscheidet Kunststoff- vs. Metall-Pfad.
+      const metallCapHinweis = attrNamen.some(n => /metallic ring|metal|chrome|aluminium|aluminum/i.test(n));
+      if (capEinfaerbbar || (!capFields && fall === 'A' && !metallCapHinweis)) {
+        capPlanEinfaerben = true;
+        capPlanFarbe = vFarbe;
+        umsetzung.push(`Verschluss ${vFarbe}${komp.verschluss?.finish ? ` ${komp.verschluss.finish}` : ''} (Masse-Einfärbung des Kunststoff-Caps)`);
+      } else if (zielMetallic) {
+        capPlanEinfaerben = true;
+        capPlanFarbe = vFarbe;
+        capPlanMetall = true;
+        umsetzung.push(`Verschluss eloxiert in ${vFarbe} metallic — Metallcharakter und Geometrie bleiben`);
       } else {
         // Warnung dazu kommt aus dem Closure-Warnblock unten (v54, mit
         // passender Varianten-Empfehlung) — hier nur der Umsetzungs-Schritt.
-        umsetzung.push(`Verschluss bleibt wie fotografiert (Metall/nicht einfärbbar) — die Welt sieht ${vFarbe} vor`);
+        umsetzung.push(`Verschluss bleibt wie fotografiert (Metall, Welt-Look nicht metallisch) — die Welt sieht ${vFarbe} vor`);
       }
     }
   }
@@ -1144,8 +1165,13 @@ async function assemblePrompt(
   const capUnveraendertLock = `The closure in the photo stays completely unchanged — identical colour, material, finish, geometry.`;
   // v51: Kunststoff-Cap wird in die Welt-Farbe eingefaerbt (Masse-Einfaerbung
   // ist real) — mit v47-Geometrie-Lock: NUR Farbe/Finish, nie die Form.
+  // v57: Metall-Cap wird bei Metallic-Welt-Look eloxiert (gleicher GeoLock,
+  // Metallcharakter bleibt) — die Farb-Phrase traegt den Unterschied.
+  const capFarbPhrase = capPlanMetall
+    ? `anodized metallic ${capPlanFarbe} — keep the metallic character, reflections and highlights intact, only the metal's colour tone changes`
+    : `a solid ${capPlanFarbe} with ${capPlanFinishEn}`;
   const capRecolorLock = (capPlanEinfaerben && capPlanFarbe)
-    ? `Recolor ONLY the closure to a solid ${capPlanFarbe} with ${capPlanFinishEn} — mass-coloured plastic, not paint. Keep its exact geometry: every collar ring, step, edge, thread and the actuator shape stay identical to the photo; change nothing but its colour and finish.`
+    ? `Recolor ONLY the closure to ${capFarbPhrase}${capPlanMetall ? '' : ' — mass-coloured plastic, not paint'}. Keep its exact geometry: every collar ring, step, edge, thread and the actuator shape stay identical to the photo; change nothing but its colour${capPlanMetall ? ' tone' : ' and finish'}.`
     : '';
   const materialLine = `The body is ${matEN}${isPlastic ? ' — it must clearly read as a plastic container, never as solid metal, aluminium, steel, glass or ceramic' : ''}.`;
   const capMaterialLine = capMaterial ? `The cap is ${capMaterial}.` : '';
@@ -1174,7 +1200,7 @@ async function assemblePrompt(
     // wie er fotografiert ist. v51: ist er Kunststoff (Einfaerbbar) und der
     // Nutzer hat nicht explizit gewaehlt, wird er in die Welt-Farbe gefaerbt.
     fullLines.push((capPlanEinfaerben && capPlanFarbe)
-      ? `Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 — identical geometry, parts and proportions as image 2, do not merge them, do not invent a new cap — but recolor that cap to a solid ${capPlanFarbe} with ${capPlanFinishEn}; change nothing about its shape.`
+      ? `Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 — identical geometry, parts and proportions as image 2, do not merge them, do not invent a new cap — but recolor that cap to ${capFarbPhrase}; change nothing about its shape.`
       : `Image 1 shows the bottle WITH its existing cap, image 2 the replacement cap. REPLACE the original cap from image 1 with the cap from image 2 exactly as shown — do not merge them, do not invent a new cap. Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.`);
   } else {
     fullLines.push((capPlanEinfaerben && capPlanFarbe) ? capRecolorLock : capUnveraendertLock);
@@ -1200,7 +1226,7 @@ async function assemblePrompt(
     // v51: der Cap-Plan besitzt die Closure-Regel — Form-Lock bleibt hart.
     ? (fall === 'A'
         ? `Do not add, remove, replace or reshape the closure. ${capRecolorLock}`
-        : `Use ONLY the closure shown in image 2 with its exact geometry, parts and proportions — recolor it to a solid ${capPlanFarbe} with ${capPlanFinishEn} and change nothing else about it.`)
+        : `Use ONLY the closure shown in image 2 with its exact geometry, parts and proportions — recolor it to ${capFarbPhrase} and change nothing else about it.`)
     : fall === 'A'
     ? `Do not add, remove, replace or restyle the closure. ${capUnveraendertLock}`
     : 'Use ONLY the closure shown in image 2, EXACTLY as photographed — identical colour, material, finish and geometry. Do NOT recolor, retint or restyle it. Ignore any closure colour mentioned elsewhere in this prompt.';
@@ -1237,7 +1263,7 @@ async function assemblePrompt(
   // v51: Split-Cap darf eingefaerbt werden, wenn der Plan es sagt — gleicher
   // Cleanup, nur Farbe/Finish aendern sich (Geometrie-Lock wie v47).
   const capRecolorPrompt = (capPlanEinfaerben && capPlanFarbe)
-    ? `Recolor this closure to a solid ${capPlanFarbe} with ${capPlanFinishEn} — mass-coloured plastic, not paint. Keep its EXACT shape: identical parts, identical proportions, every collar ring, step, edge, thread and the actuator shape stay exactly as in the reference image; change nothing but colour and finish. Place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`
+    ? `Recolor this closure to ${capFarbPhrase}${capPlanMetall ? '' : ' — mass-coloured plastic, not paint'}. Keep its EXACT shape: identical parts, identical proportions, every collar ring, step, edge, thread and the actuator shape stay exactly as in the reference image; change nothing but colour${capPlanMetall ? ' tone' : ' and finish'}. Place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`
     : null;
   const capPrompt = split ? (capRecolorPrompt || capPreservePrompt) : null;
 
