@@ -91,6 +91,7 @@ const CAP_TABLE = 'tblQvnXPhiKGMoqDp';
 const CACHE_TABLE = 'tblsOp1WKPGIquBKQ';
 const CACHE_IMAGE_FIELD = 'fldFd5qi64yELhKna';
 const CACHE_CAP_IMAGE_FIELD = 'fld1aoVYgaUtHsiWC'; // Cap_Bild (Anhang, symmetrisch zu Bild)
+const CACHE_BODY_IMAGE_FIELD = 'fldRc7kwZx0KOv6Og'; // Body_Bild (v60: Einzelrender neben Komposit)
 const DESIGN_CODE_TABLE = 'tbl24ezzCjRQDYRnJ';
 const ATTRIBUT_TABLE = 'tblsWJ0q2sQ7sXwvk';
 const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
@@ -111,31 +112,58 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // KI-Call), Persist in waitUntil (ueberlebt Seiten-Schliessen), Stale-Cleanup.
 // v59: Cache-Hit respektiert montiert (nie Cap auf Komposit stapeln);
 // Buehne zeigt Komposits contain statt cover (Frontend).
-const RENDER_VERSION = 'v59';
+// v60: Flood-Fill-Silhouette (weisse Caps auf Weiss), Sanity-Guards gegen
+// Fleck-Komposits, Body_Bild-Einzelrender + Koerper·Verschluss-Thumbnails.
+const RENDER_VERSION = 'v60';
 
-// ── v56/v58: Silhouetten-Profil auf weissem Studiogrund ─────────────────
-// Nicht-Fast-Weiss-Scan in NATIVER Aufloesung (alle Kanaele > 245 =
-// Hintergrund): Bildmasse, BBox, maximale Silhouettenbreite, Halsbreite
-// (minimale Breite im obersten Viertel) + Hals-Zentrum. Traegt die v56-
-// Messung UND die v58-Montage. Best-Effort: jeder Fehler -> null.
+// ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
+// Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
+// (Fleck-Komposits). Jetzt: BFS von den Bildraendern ueber zusammen-
+// haengende Fast-Weiss-Pixel = Hintergrund; alles andere (auch innen-
+// liegende helle Pixel) = Objekt. Gerechnet auf 256px-Downscale, alle
+// Werte in DS-Einheiten + `skala` zum Hochrechnen auf native Masse.
 type Profil = {
-  w: number; h: number; top: number; bottom: number; minL: number; maxR: number;
-  maxW: number; neckW: number; neckCx: number;
-  breiten: Int32Array; links: Int32Array;
+  w: number; h: number; skala: number;            // native Masse + DS->nativ
+  dsW: number; dsH: number;
+  top: number; bottom: number; minL: number; maxR: number; // DS-Einheiten
+  maxW: number; neckW: number; neckCx: number;             // DS-Einheiten
+  breiten: Int32Array; links: Int32Array;                  // pro DS-Zeile
 };
 async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
   try {
-    const { data, info } = await sharp(buf).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const meta = await sharp(buf).metadata();
+    const nativW = meta.width || 0, nativH = meta.height || 0;
+    if (!nativW || !nativH) return null;
+    const { data, info } = await sharp(buf)
+      .removeAlpha().resize(256, 256, { fit: 'inside' }).raw()
+      .toBuffer({ resolveWithObject: true });
     const B = info.width, H = info.height, C = info.channels;
+    const hell = (p: number) => { const i = p * C; return data[i] > 245 && data[i + 1] > 245 && data[i + 2] > 245; };
+    // BFS: Hintergrund = von aussen erreichbare Fast-Weiss-Region.
+    const bg = new Uint8Array(B * H);
+    const queue = new Int32Array(B * H);
+    let qt = 0;
+    const push = (x: number, y: number) => {
+      const p = y * B + x;
+      if (!bg[p] && hell(p)) { bg[p] = 1; queue[qt++] = p; }
+    };
+    for (let x = 0; x < B; x++) { push(x, 0); push(x, H - 1); }
+    for (let y = 0; y < H; y++) { push(0, y); push(B - 1, y); }
+    for (let qh = 0; qh < qt; qh++) {
+      const p = queue[qh], x = p % B, y = (p - x) / B;
+      if (x > 0) push(x - 1, y);
+      if (x < B - 1) push(x + 1, y);
+      if (y > 0) push(x, y - 1);
+      if (y < H - 1) push(x, y + 1);
+    }
+    // Objekt = alles, was NICHT Hintergrund ist.
     const breiten = new Int32Array(H);
     const links = new Int32Array(H).fill(-1);
     let top = -1, bottom = -1, maxW = 0, minL = B, maxR = -1;
     for (let y = 0; y < H; y++) {
       let l = -1, r = -1;
-      const row = y * B * C;
       for (let x = 0; x < B; x++) {
-        const i = row + x * C;
-        if (data[i] > 245 && data[i + 1] > 245 && data[i + 2] > 245) continue;
+        if (bg[y * B + x]) continue;
         if (l < 0) l = x;
         r = x;
       }
@@ -148,14 +176,14 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
         if (r > maxR) maxR = r;
       }
     }
-    if (top < 0 || maxW < 16) return null; // leer/fast leer -> unbrauchbar
+    if (top < 0 || maxW < 8) return null; // leer/fast leer -> unbrauchbar
     const viertel = top + Math.max(1, Math.round((bottom - top + 1) * 0.25));
     let neckW = 0x7fffffff, neckCx = Math.round((minL + maxR) / 2);
     for (let y = top; y < viertel; y++) {
       if (breiten[y] > 0 && breiten[y] < neckW) { neckW = breiten[y]; neckCx = links[y] + Math.round(breiten[y] / 2); }
     }
     if (neckW === 0x7fffffff) neckW = maxW;
-    return { w: B, h: H, top, bottom, minL, maxR, maxW, neckW, neckCx, breiten, links };
+    return { w: nativW, h: nativH, skala: nativW / B, dsW: B, dsH: H, top, bottom, minL, maxR, maxW, neckW, neckCx, breiten, links };
   } catch { return null; }
 }
 
@@ -180,19 +208,32 @@ async function montiereKomposit(
         if (pc.breiten[y] > 0.35 * pc.maxW) { capUnten = y; break; }
       }
     }
-    const cropW = pc.maxR - pc.minL + 1;
-    const cropH = capUnten - pc.top + 1;
-    if (cropW < 8 || cropH < 8) return null;
-    const zielW = Math.min(pb.w, Math.max(16, Math.round(pb.neckW * faktor)));
+    // DS-Masse des Crops + Guard 1: ein Cap ist nie ein flacher Strich.
+    const cropWds = pc.maxR - pc.minL + 1;
+    const cropHds = capUnten - pc.top + 1;
+    if (cropWds < 4 || cropHds < 0.25 * cropWds) return null;
+    // DS -> native Pixel (geclampt auf die Bildgrenzen).
+    const sc = pc.skala;
+    const cropL = Math.max(0, Math.min(pc.w - 1, Math.round(pc.minL * sc)));
+    const cropT = Math.max(0, Math.min(pc.h - 1, Math.round(pc.top * sc)));
+    const cropW = Math.max(8, Math.min(pc.w - cropL, Math.round(cropWds * sc)));
+    const cropH = Math.max(8, Math.min(pc.h - cropT, Math.round(cropHds * sc)));
+    const neckWn = Math.round(pb.neckW * pb.skala);
+    const bodyTopN = Math.round(pb.top * pb.skala);
+    const neckCxN = Math.round(pb.neckCx * pb.skala);
+    const zielW = Math.min(pb.w, Math.max(16, Math.round(neckWn * faktor)));
     const capKlein = await sharp(capBuf)
-      .extract({ left: pc.minL, top: pc.top, width: cropW, height: cropH })
+      .extract({ left: cropL, top: cropT, width: cropW, height: cropH })
       .resize({ width: zielW })
       .toBuffer();
     const capH = (await sharp(capKlein).metadata()).height || Math.round(cropH * zielW / cropW);
     const overlap = Math.max(3, Math.round(capH * 0.02));
-    const erweiterung = Math.max(0, capH - overlap - pb.top);
-    const capLeft = Math.min(pb.w - zielW, Math.max(0, pb.neckCx - Math.round(zielW / 2)));
-    const capTop = Math.max(0, erweiterung + pb.top + overlap - capH);
+    // Guard 2+3 (v60): der Aufsatz muss SICHTBAR sein — skalierte Cap-Hoehe
+    // >= 4% der Body-Hoehe und ueber der Hals-Oberkante bleibt echtes Cap.
+    if (capH < 0.04 * pb.h || capH - overlap < 0.03 * pb.h) return null;
+    const erweiterung = Math.max(0, capH - overlap - bodyTopN);
+    const capLeft = Math.min(pb.w - zielW, Math.max(0, neckCxN - Math.round(zielW / 2)));
+    const capTop = Math.max(0, erweiterung + bodyTopN + overlap - capH);
     const jpeg = await sharp({
       create: { width: pb.w, height: pb.h + erweiterung, channels: 3, background: { r: 255, g: 255, b: 255 } },
     })
@@ -202,9 +243,9 @@ async function montiereKomposit(
       ])
       .jpeg({ quality: 92 })
       .toBuffer();
-    // capScale (Element-Verhaeltnis) weiter berechnen — Stapel-Fallback/Galerie.
+    // capScale (Element-Verhaeltnis, DS-Ratios sind skaleninvariant).
     const sil = Math.min(0.6, Math.max(0.18, (pb.neckW * faktor) / pb.maxW));
-    const capScale = Math.round(sil * (pb.maxW / pb.w) * (pc.w / pc.maxW) * 1000) / 1000;
+    const capScale = Math.round(sil * (pb.maxW / pb.dsW) * (pc.dsW / pc.maxW) * 1000) / 1000;
     return { jpeg, capScale };
   } catch (e) {
     console.error('Montage fehlgeschlagen:', e);
@@ -1718,12 +1759,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             }
           : null;
 
-        // v59: montierte Records tragen den Verschluss schon im Bild — der
-        // Cache-Hit darf NIE zusaetzlich einen Cap zum Stapeln liefern.
+        // v59/v60: montiert sagt dem Frontend, dass Bild das Komposit ist
+        // (nie Cap draufstapeln) — die Einzelbilder reisen trotzdem mit
+        // (Koerper·Verschluss-Thumbnails).
         const istMontiert = board?.montiert === true;
         return res.status(200).json({
           renderingUrl: cachedImg,
-          capRenderingUrl: istMontiert ? null : (imgUrl(cf['Cap_Bild']) || null),
+          capRenderingUrl: imgUrl(cf['Cap_Bild']) || null,
+          bodyRenderingUrl: imgUrl(cf['Body_Bild']) || null, // v60
           capScale: (typeof cf['Cap_Scale'] === 'number' && isFinite(cf['Cap_Scale'])) ? cf['Cap_Scale'] : null,
           montiert: istMontiert,
           renderingPrompt: cf['Rendering_Prompt'] || '',
@@ -1846,6 +1889,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let capBuf: Buffer | null = null;
     let kompositBuf: Buffer | null = null;
     let montiert = false;
+    let bodyRenderingUrl: string | null = null; // v60: Body-Einzelrender (Montage-Fall)
     const capUrlFuerPersist = capRenderingUrl; // Original-Cap wird immer gespeichert
     if (useSplitRender && capRenderingUrl) {
       try {
@@ -1865,8 +1909,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         try {
           if (await ladeAttachmentHoch(cacheId, CACHE_IMAGE_FIELD, kompositBuf, `komposit_${sys.fields['Page Titel'] || systemId}_${Date.now()}.jpg`)) {
             montiert = true;
+            // v60: beide Einzelbilder bleiben in der Antwort (UI zeigt
+            // Koerper · Verschluss als Mini-Thumbnails neben dem Komposit).
+            bodyRenderingUrl = renderingUrl;
             renderingUrl = `/api/bild?r=${cacheId}`; // stabile Route, same-origin im Frontend
-            capRenderingUrl = null; // ein Bild — kein Stapel noetig
           }
         } catch (e) { console.error('Komposit-Upload fehlgeschlagen — Fallback Stapel:', e); }
       }
@@ -1879,6 +1925,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       res.status(200).json({
         renderingUrl,
         capRenderingUrl,
+        bodyRenderingUrl, // v60: Einzel-Body im Montage-Fall (sonst = renderingUrl)
         capScale,
         montiert, // v58: true = renderingUrl ist bereits das fertige Komposit
         renderingPrompt,
@@ -1909,6 +1956,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             await cachePatch(cacheId, { Status: 'Error', Render_Log: 'Bild-Upload fehlgeschlagen' }).catch(() => null);
             return;
           }
+        }
+        // v60: im Montage-Fall den Body-Einzelrender zusaetzlich sichern.
+        if (montiert && bodyBuf) {
+          try {
+            if (!(await ladeAttachmentHoch(cacheId, CACHE_BODY_IMAGE_FIELD, bodyBuf, `body_${sys.fields['Page Titel'] || systemId}_${Date.now()}.jpg`))) {
+              log.push('Body-Upload fehlgeschlagen');
+            }
+          } catch (e) { log.push(`Body-Upload fehlgeschlagen: ${String(e).slice(0, 500)}`); }
         }
         // Cap-Bild IMMER zusaetzlich als echten Anhang (auch beim Komposit).
         if (capUrlFuerPersist) {
