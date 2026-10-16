@@ -1,5 +1,6 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
+import sharp from 'sharp';
 
 /* ── render.ts v49 — der vereinfachte Renderer ────────────────────────────
    v49: (1) NIE BLOCKIEREN — unbestätigte Anforderungen rendern normal mit
@@ -101,7 +102,56 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // das Frontend stapelt die beiden Bilder per CSS zu einem Produkt.
 // v54: 3-Felder-Modell — Render_Rezept komplett raus, Bauplan einzige Quelle.
 // v55: Cap-Wahl = nur Mechanik; Farbe IMMER von der Welt (wenn Einfaerbbar).
-const RENDER_VERSION = 'v55';
+// v56: massstabsgetreuer Cap-Stapel — Silhouetten-Messung beider Split-
+// Renders (weisser Studiogrund), capScale in Antwort + Cap_Scale im Cache.
+const RENDER_VERSION = 'v56';
+
+// ── v56: Silhouetten-Messung auf weissem Studiogrund ────────────────────
+// Downscale auf 256px (glaettet JPEG-Rauschen), Nicht-Fast-Weiss-Scan
+// (alle Kanaele > 245 = Hintergrund). Liefert Bildmasse, maximale
+// Silhouettenbreite und die minimale Breite im obersten Viertel der
+// Silhouette (= Hals/Gewinde). Best-Effort: jeder Fehler -> null.
+type SilMass = { imgW: number; maxW: number; neckW: number; silH: number };
+async function messeSilhouette(buf: Buffer): Promise<SilMass | null> {
+  try {
+    const { data, info } = await sharp(buf)
+      .removeAlpha()
+      .resize(256, 256, { fit: 'inside' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const B = info.width, H = info.height, C = info.channels;
+    let top = -1, bottom = -1, maxW = 0;
+    const breiten: number[] = new Array(H).fill(0);
+    for (let y = 0; y < H; y++) {
+      let l = -1, r = -1;
+      for (let x = 0; x < B; x++) {
+        const i = (y * B + x) * C;
+        if (data[i] > 245 && data[i + 1] > 245 && data[i + 2] > 245) continue;
+        if (l < 0) l = x;
+        r = x;
+      }
+      if (l >= 0) {
+        breiten[y] = r - l + 1;
+        if (top < 0) top = y;
+        bottom = y;
+        if (breiten[y] > maxW) maxW = breiten[y];
+      }
+    }
+    if (top < 0 || maxW < 8) return null; // leer/fast leer -> unbrauchbar
+    const viertel = top + Math.max(1, Math.round((bottom - top + 1) * 0.25));
+    let neckW = Infinity;
+    for (let y = top; y < viertel; y++) if (breiten[y] > 0) neckW = Math.min(neckW, breiten[y]);
+    if (!isFinite(neckW)) neckW = maxW;
+    return { imgW: B, maxW, neckW, silH: bottom - top + 1 };
+  } catch { return null; }
+}
+// Typ-Faktor: wie viel breiter als der Hals der Verschluss real sitzt.
+function capTypFaktor(closureText: string): number {
+  const t = closureText.toLowerCase();
+  if (/pump|spray|pipette|airless|dropper/.test(t)) return 1.1; // Kragen ≈ Hals
+  if (/screw|schraub|snap/.test(t)) return 1.25; // Kappe etwas breiter
+  return 1.2;
+}
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -1653,6 +1703,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       throw falErr;
     }
 
+    // ── 7b. v56: Massstab messen (Best-Effort, VOR der Antwort) ─────
+    // Beide Split-Outputs werden einmal heruntergeladen (die Buffers
+    // speist auch der Persist-Schritt), Silhouetten vermessen und daraus
+    // die Cap-ELEMENT-Breite relativ zur Body-Element-Breite berechnet:
+    // sil = clamp(neckW * typFaktor / bodyMaxW, 0.18..0.6), dann um die
+    // Weissraender beider Bilder korrigiert (Element != Silhouette).
+    let capScale: number | null = null;
+    let bodyBuf: Buffer | null = null;
+    let capBuf: Buffer | null = null;
+    if (useSplitRender && capRenderingUrl) {
+      try {
+        [bodyBuf, capBuf] = await Promise.all([
+          fetchT(renderingUrl, { timeoutMs: 12000, label: 'mess body' }).then(async r => Buffer.from(await r.arrayBuffer())),
+          fetchT(capRenderingUrl, { timeoutMs: 12000, label: 'mess cap' }).then(async r => Buffer.from(await r.arrayBuffer())),
+        ]);
+        const [mb, mc] = await Promise.all([messeSilhouette(bodyBuf), messeSilhouette(capBuf)]);
+        if (mb && mc) {
+          const closureText = capFields
+            ? [selectName(capFields['Closure_Type']), ...multiSelectNames(capFields['Closure_Type']), String(capFields['Cap_Name'] || '')].join(' ')
+            : '';
+          const sil = Math.min(0.6, Math.max(0.18, (mb.neckW * capTypFaktor(closureText)) / mb.maxW));
+          capScale = Math.round(sil * (mb.maxW / mb.imgW) * (mc.imgW / mc.maxW) * 1000) / 1000;
+        }
+      } catch (e) {
+        console.error('Massstab-Messung uebersprungen:', e);
+        capScale = null;
+      }
+    }
+
     // ── 8. AUSLIEFERN ZUERST, Bilder persistieren danach ────────────
     // fal-URLs leben ~1h, reicht zum Anzeigen. Die cacheId ist bereits
     // bekannt und geht sofort mit — Bild-Upload + Status Done folgen.
@@ -1660,6 +1739,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       res.status(200).json({
         renderingUrl,
         capRenderingUrl,
+        capScale,
         renderingPrompt,
         briefUsed: effectiveBrief,
         rejected: forbidden,
@@ -1680,7 +1760,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const log: string[] = [];
       // v52: 15s rissen heute ab ("Persist: Timeout 15000ms") — der Download
       // ist Best-Effort NACH der Antwort, er darf sich Zeit nehmen.
-      const imgBuffer: Buffer = Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 45000, label: 'fal img download' })).arrayBuffer());
+      // v56: die Mess-Buffers werden wiederverwendet (kein Doppel-Download).
+      const imgBuffer: Buffer = bodyBuf || Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 45000, label: 'fal img download' })).arrayBuffer());
       const uploadRes = await fetch(
         `https://content.airtable.com/v0/${AIRTABLE_BASE}/${cacheId}/${CACHE_IMAGE_FIELD}/uploadAttachment`,
         {
@@ -1702,7 +1783,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Cap-Bild SYMMETRISCH als echten Anhang (Bytes, nicht die fal-URL).
       if (capRenderingUrl) {
         try {
-          const capBuf = Buffer.from(await (await fetchT(capRenderingUrl, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
+          const capUpBuf = capBuf || Buffer.from(await (await fetchT(capRenderingUrl, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
           const capUploadRes = await fetch(
             `https://content.airtable.com/v0/${AIRTABLE_BASE}/${cacheId}/${CACHE_CAP_IMAGE_FIELD}/uploadAttachment`,
             {
@@ -1710,7 +1791,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
               body: JSON.stringify({
                 contentType: 'image/jpeg',
-                file: capBuf.toString('base64'),
+                file: capUpBuf.toString('base64'),
                 filename: `cap_${resolvedCapId || 'cap'}_${Date.now()}.jpg`,
               }),
             }
@@ -1720,7 +1801,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           log.push(`Cap-Upload fehlgeschlagen: ${String(e).slice(0, 500)}`);
         }
       }
-      await cachePatch(cacheId, { Status: 'Done', ...(log.length ? { Render_Log: log.join('\n') } : {}) }).catch(() => null);
+      await cachePatch(cacheId, {
+        Status: 'Done',
+        ...(capScale != null ? { Cap_Scale: capScale } : {}), // v56
+        ...(log.length ? { Render_Log: log.join('\n') } : {}),
+      }).catch(() => null);
     } catch (cacheErr) {
       console.error('Bild-Persist fehlgeschlagen (Antwort war bereits raus):', cacheErr);
       await cachePatch(cacheId, { Status: 'Error', Render_Log: `Persist: ${String(cacheErr).slice(0, 1500)}` }).catch(() => null);
