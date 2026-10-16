@@ -22,10 +22,10 @@ import { createHash } from 'crypto';
    einfaerbung_masse -> Masse-Einfaerbung (Transparenz der Welt respektiert);
    Verlauf/Grafik -> Direktdruck, sonst Etikett. Das pauschale Etiketten-
    Verbot faellt: Labels sind erste Klasse, praezise beschrieben, Tiegel-
-   Label NUR seitlich; die No-Text-Regel bleibt global. Verschluss wird in
-   Welt-Farbe eingefaerbt, wenn Cap.Einfaerbbar UND der Nutzer nicht
-   explizit eine Cap-Variante gewaehlt hat (capExplizit) — Metall bleibt
-   immer wie fotografiert. concept.umsetzung erklaert die Schritte deutsch.
+   Label NUR seitlich; die No-Text-Regel bleibt global. Verschluss (v55,
+   Alens Regel): die Cap-WAHL bestimmt nur Mechanik/Geometrie — die FARBE
+   kommt IMMER von der Welt, sofern Cap.Einfaerbbar; Metall/Chrom bleibt
+   wie fotografiert + Hinweis. concept.umsetzung erklaert die Schritte deutsch.
    Ohne Design_Komponenten exakt das v50-Verhalten.
    Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
    (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
@@ -100,7 +100,8 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // Alens Entscheid) — im Split-Fall exakt ZWEI Renders (Body + gewaehlter Cap),
 // das Frontend stapelt die beiden Bilder per CSS zu einem Produkt.
 // v54: 3-Felder-Modell — Render_Rezept komplett raus, Bauplan einzige Quelle.
-const RENDER_VERSION = 'v54';
+// v55: Cap-Wahl = nur Mechanik; Farbe IMMER von der Welt (wenn Einfaerbbar).
+const RENDER_VERSION = 'v55';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -600,10 +601,7 @@ async function assemblePrompt(
   forceCodeId: string,
   // v48: ID des gewaehlten Caps — fuer die Closure-Warnung (Geschwister-
   // Varianten des Systems nachschlagen, den gewaehlten ausnehmen).
-  selectedCapId: string | null,
-  // v51: true nur, wenn der Nutzer AKTIV eine Cap-Variante angeklickt hat
-  // (Frontend-Flag). Dann bleibt der Verschluss immer wie fotografiert.
-  capExplizit: boolean
+  selectedCapId: string | null
 ): Promise<{
   fullPrompt: string; basePrompt: string; capPrompt: string | null;
   forbidden: string[]; concept: Concept;
@@ -1037,10 +1035,11 @@ async function assemblePrompt(
     const vFarbe = komp.verschluss?.farbe || null;
     const CAP_FIN_K: Record<string, string> = { matt: 'a clean matt finish', glossy: 'a clean glossy finish', metallic: 'a polished metallic finish' };
     capPlanFinishEn = CAP_FIN_K[komp.verschluss?.finish || 'matt'] || CAP_FIN_K.matt;
+    // v55 (Alens Regel): Die Cap-WAHL bestimmt nur Mechanik/Geometrie — die
+    // FARBE kommt IMMER von der Welt, sofern der Cap einfaerbbar ist. Einzige
+    // Ausnahme: Einfaerbbar=false (Metall/Chrom) -> wie fotografiert + Hinweis.
     if (vFarbe) {
-      if (capExplizit) {
-        umsetzung.push(`Verschluss wie von dir gewählt — bleibt unverändert (die Welt sieht ${vFarbe} vor)`);
-      } else if (capEinfaerbbar || (!capFields && fall === 'A')) {
+      if (capEinfaerbbar || (!capFields && fall === 'A')) {
         // Fall A ohne Cap-Record: der Verschluss im Foto; Einfaerbung nur,
         // wenn kein Metall-Hinweis in den System-Attributen steckt.
         const metallCapHinweis = attrNamen.some(n => /metallic ring|metal|chrome|aluminium|aluminum/i.test(n));
@@ -1465,7 +1464,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     forceCodeId = null,
     nocache: nocacheRoh = false,
     engine: engineRoh = 'seedream',
-    capExplizit: capExplizitRoh = false,
   } = req.body as {
     systemId: string;
     query: string;
@@ -1473,16 +1471,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     tier?: Tier;
     forceCodeId?: string | null;
     nocache?: boolean;
-    // v51: true NUR wenn der Nutzer aktiv eine Cap-Variante angeklickt hat —
-    // dann bleibt der Verschluss immer wie fotografiert (nie eingefaerbt).
-    capExplizit?: boolean;
     // A/B-Schalter (v47): 'gemini' rendert mit Gemini 2.5 Flash Image —
     // bekannt stark bei Identitaets-/Formtreue in Edits. Frontend sendet
     // nichts -> Default seedream, kein Frontend-Change noetig.
     engine?: Engine;
   };
   const engine: Engine = engineRoh === 'gemini' ? 'gemini' : 'seedream';
-  const capExplizit = capExplizitRoh === true;
   const falEndpoint = engine === 'gemini' ? FAL_GEMINI_EDIT : FAL_SEEDREAM_EDIT;
 
   if (!systemId || !query) {
@@ -1505,9 +1499,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // ── 1. Cache Check ──────────────────────────────────────────────
-    // v51: capExplizit aendert den Prompt (Cap eingefaerbt oder nicht) —
-    // deshalb trennt das Suffix die beiden Welten im Cache.
-    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId, engine) + (capExplizit ? '_x' : '');
+    // (v55: capExplizit ist raus — die Cap-Wahl steckt in selectedCapId,
+    // die Farbe kommt immer von der Welt; ein ignorierter Body-Param
+    // aelterer Frontends aendert den Key nicht.)
+    const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId, engine);
     let cached: any[] = [];
     if (!nocache) try {
       // v49: nur Status 'Done' ist ein Treffer — Pending (laeuft noch) und
@@ -1588,7 +1583,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── 5. Prompts deterministisch assemblieren ─────────────────────
     const { fullPrompt, basePrompt, capPrompt, forbidden, concept } =
-      await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId, resolvedCapId, capExplizit);
+      await assemblePrompt(effectiveBrief, fall, useSplitRender, sys.fields, capFields, forceCodeId, resolvedCapId);
 
     const renderingPrompt = useSplitRender ? basePrompt : fullPrompt;
     const capPromptUsed: string | null = useSplitRender ? capPrompt : null;
