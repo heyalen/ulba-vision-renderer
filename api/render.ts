@@ -1,6 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 import sharp from 'sharp';
+import { waitUntil } from '@vercel/functions';
 
 /* ── render.ts v49 — der vereinfachte Renderer ────────────────────────────
    v49: (1) NIE BLOCKIEREN — unbestätigte Anforderungen rendern normal mit
@@ -106,46 +107,142 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // Renders (weisser Studiogrund), capScale in Antwort + Cap_Scale im Cache.
 // v57: Metall-Cap wird bei METALLIC-Welt-Look eloxiert (gold/silber/kupfer/
 // rosegold/gunmetal); nur nicht-metallischer Look laesst Metall unveraendert.
-const RENDER_VERSION = 'v57';
+// v58: deterministisches sharp-Komposit (ein Bild statt CSS-Stapel, kein
+// KI-Call), Persist in waitUntil (ueberlebt Seiten-Schliessen), Stale-Cleanup.
+const RENDER_VERSION = 'v58';
 
-// ── v56: Silhouetten-Messung auf weissem Studiogrund ────────────────────
-// Downscale auf 256px (glaettet JPEG-Rauschen), Nicht-Fast-Weiss-Scan
-// (alle Kanaele > 245 = Hintergrund). Liefert Bildmasse, maximale
-// Silhouettenbreite und die minimale Breite im obersten Viertel der
-// Silhouette (= Hals/Gewinde). Best-Effort: jeder Fehler -> null.
-type SilMass = { imgW: number; maxW: number; neckW: number; silH: number };
-async function messeSilhouette(buf: Buffer): Promise<SilMass | null> {
+// ── v56/v58: Silhouetten-Profil auf weissem Studiogrund ─────────────────
+// Nicht-Fast-Weiss-Scan in NATIVER Aufloesung (alle Kanaele > 245 =
+// Hintergrund): Bildmasse, BBox, maximale Silhouettenbreite, Halsbreite
+// (minimale Breite im obersten Viertel) + Hals-Zentrum. Traegt die v56-
+// Messung UND die v58-Montage. Best-Effort: jeder Fehler -> null.
+type Profil = {
+  w: number; h: number; top: number; bottom: number; minL: number; maxR: number;
+  maxW: number; neckW: number; neckCx: number;
+  breiten: Int32Array; links: Int32Array;
+};
+async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
   try {
-    const { data, info } = await sharp(buf)
-      .removeAlpha()
-      .resize(256, 256, { fit: 'inside' })
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const { data, info } = await sharp(buf).removeAlpha().raw().toBuffer({ resolveWithObject: true });
     const B = info.width, H = info.height, C = info.channels;
-    let top = -1, bottom = -1, maxW = 0;
-    const breiten: number[] = new Array(H).fill(0);
+    const breiten = new Int32Array(H);
+    const links = new Int32Array(H).fill(-1);
+    let top = -1, bottom = -1, maxW = 0, minL = B, maxR = -1;
     for (let y = 0; y < H; y++) {
       let l = -1, r = -1;
+      const row = y * B * C;
       for (let x = 0; x < B; x++) {
-        const i = (y * B + x) * C;
+        const i = row + x * C;
         if (data[i] > 245 && data[i + 1] > 245 && data[i + 2] > 245) continue;
         if (l < 0) l = x;
         r = x;
       }
       if (l >= 0) {
-        breiten[y] = r - l + 1;
+        breiten[y] = r - l + 1; links[y] = l;
         if (top < 0) top = y;
         bottom = y;
         if (breiten[y] > maxW) maxW = breiten[y];
+        if (l < minL) minL = l;
+        if (r > maxR) maxR = r;
       }
     }
-    if (top < 0 || maxW < 8) return null; // leer/fast leer -> unbrauchbar
+    if (top < 0 || maxW < 16) return null; // leer/fast leer -> unbrauchbar
     const viertel = top + Math.max(1, Math.round((bottom - top + 1) * 0.25));
-    let neckW = Infinity;
-    for (let y = top; y < viertel; y++) if (breiten[y] > 0) neckW = Math.min(neckW, breiten[y]);
-    if (!isFinite(neckW)) neckW = maxW;
-    return { imgW: B, maxW, neckW, silH: bottom - top + 1 };
+    let neckW = 0x7fffffff, neckCx = Math.round((minL + maxR) / 2);
+    for (let y = top; y < viertel; y++) {
+      if (breiten[y] > 0 && breiten[y] < neckW) { neckW = breiten[y]; neckCx = links[y] + Math.round(breiten[y] / 2); }
+    }
+    if (neckW === 0x7fffffff) neckW = maxW;
+    return { w: B, h: H, top, bottom, minL, maxR, maxW, neckW, neckCx, breiten, links };
   } catch { return null; }
+}
+
+// ── v58: deterministisches Komposit (sharp, KEIN KI-Call) ───────────────
+// Cap-Render wird auf seine Silhouette gecroppt (bei Pump/Spray/Pipette
+// faellt das Tauchrohr weg: Schnitt unter der letzten Zeile mit Breite
+// > 35% der Cap-Maxbreite), auf Halsbreite x TypFaktor skaliert und
+// mittig, 1-2% ueberlappend auf die Hals-Oberkante des Body-Renders
+// montiert. Ergebnis: EIN JPEG in Body-Groesse (oben erweitert, falls
+// der Cap ueber den Bildrand ragt) + der capScale fuers Stapel-Fallback.
+async function montiereKomposit(
+  bodyBuf: Buffer, capBuf: Buffer, closureText: string
+): Promise<{ jpeg: Buffer; capScale: number } | null> {
+  try {
+    const [pb, pc] = await Promise.all([silhouettenProfil(bodyBuf), silhouettenProfil(capBuf)]);
+    if (!pb || !pc) return null;
+    const faktor = capTypFaktor(closureText);
+    const mitRohr = /pump|spray|pipette|airless|dropper/i.test(closureText);
+    let capUnten = pc.bottom;
+    if (mitRohr) {
+      for (let y = pc.bottom; y >= pc.top; y--) {
+        if (pc.breiten[y] > 0.35 * pc.maxW) { capUnten = y; break; }
+      }
+    }
+    const cropW = pc.maxR - pc.minL + 1;
+    const cropH = capUnten - pc.top + 1;
+    if (cropW < 8 || cropH < 8) return null;
+    const zielW = Math.min(pb.w, Math.max(16, Math.round(pb.neckW * faktor)));
+    const capKlein = await sharp(capBuf)
+      .extract({ left: pc.minL, top: pc.top, width: cropW, height: cropH })
+      .resize({ width: zielW })
+      .toBuffer();
+    const capH = (await sharp(capKlein).metadata()).height || Math.round(cropH * zielW / cropW);
+    const overlap = Math.max(3, Math.round(capH * 0.02));
+    const erweiterung = Math.max(0, capH - overlap - pb.top);
+    const capLeft = Math.min(pb.w - zielW, Math.max(0, pb.neckCx - Math.round(zielW / 2)));
+    const capTop = Math.max(0, erweiterung + pb.top + overlap - capH);
+    const jpeg = await sharp({
+      create: { width: pb.w, height: pb.h + erweiterung, channels: 3, background: { r: 255, g: 255, b: 255 } },
+    })
+      .composite([
+        { input: bodyBuf, top: erweiterung, left: 0 },
+        { input: capKlein, top: capTop, left: capLeft },
+      ])
+      .jpeg({ quality: 92 })
+      .toBuffer();
+    // capScale (Element-Verhaeltnis) weiter berechnen — Stapel-Fallback/Galerie.
+    const sil = Math.min(0.6, Math.max(0.18, (pb.neckW * faktor) / pb.maxW));
+    const capScale = Math.round(sil * (pb.maxW / pb.w) * (pc.w / pc.maxW) * 1000) / 1000;
+    return { jpeg, capScale };
+  } catch (e) {
+    console.error('Montage fehlgeschlagen:', e);
+    return null;
+  }
+}
+
+// v58: Attachment-Upload als Helfer (Komposit VOR der Antwort, Rest danach).
+async function ladeAttachmentHoch(recId: string, fieldId: string, buf: Buffer, filename: string): Promise<boolean> {
+  const r = await fetch(
+    `https://content.airtable.com/v0/${AIRTABLE_BASE}/${recId}/${fieldId}/uploadAttachment`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
+      body: JSON.stringify({ contentType: 'image/jpeg', file: buf.toString('base64'), filename }),
+    }
+  );
+  if (!r.ok) console.error('Upload fehlgeschlagen:', (await r.text()).slice(0, 500));
+  return r.ok;
+}
+
+// v58: Stale-Cleanup — Pending aelter als 10 Min wird ehrlich Error (ein
+// frueh geschlossener Tab konnte den Persist bisher killen; Altlasten
+// sollen die Galerie nicht blockieren). Best-Effort, max. 10 pro Lauf.
+async function staleCleanup(): Promise<void> {
+  try {
+    const params = new URLSearchParams({
+      filterByFormula: `AND({Status}='Pending', DATETIME_DIFF(NOW(), {Created_At}, 'minutes') > 10)`,
+      pageSize: '10',
+    });
+    params.append('fields[]', 'Status');
+    const r = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}?${params}`, {
+      headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` }, label: 'stale scan', timeoutMs: 10000,
+    });
+    if (!r.ok) return;
+    const data = await r.json() as { records?: Array<{ id: string }> };
+    for (const rec of data.records || []) {
+      await cachePatch(rec.id, { Status: 'Error', Render_Log: 'Stale: Pending > 10 Min — automatisch bereinigt (v58)' }).catch(() => null);
+    }
+  } catch { /* Kuer */ }
 }
 // v57: typische Metalltoene (gold/silber/kupfer/rosegold/gunmetal) — eloxiertes
 // Aluminium gibt es real in jeder Metallic-Farbe, deshalb darf ein Metall-Cap
@@ -1579,6 +1676,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // die Farbe kommt immer von der Welt; ein ignorierter Body-Param
     // aelterer Frontends aendert den Key nicht.)
     const key = cacheKey(systemId, effectiveBrief, selectedCapId, tier, forceCodeId, engine);
+    // v58: Altlasten-Bereinigung parallel zum Cache-Read (Best-Effort).
+    waitUntil(staleCleanup());
     let cached: any[] = [];
     if (!nocache) try {
       // v49: nur Status 'Done' ist ein Treffer — Pending (laeuft noch) und
@@ -1729,32 +1828,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       throw falErr;
     }
 
-    // ── 7b. v56: Massstab messen (Best-Effort, VOR der Antwort) ─────
+    // ── 7b. v58: Montage + Massstab (Best-Effort, VOR der Antwort) ──
     // Beide Split-Outputs werden einmal heruntergeladen (die Buffers
-    // speist auch der Persist-Schritt), Silhouetten vermessen und daraus
-    // die Cap-ELEMENT-Breite relativ zur Body-Element-Breite berechnet:
-    // sil = clamp(neckW * typFaktor / bodyMaxW, 0.18..0.6), dann um die
-    // Weissraender beider Bilder korrigiert (Element != Silhouette).
+    // speisen auch den Persist-Schritt). Primaerpfad: deterministisches
+    // sharp-Komposit (EIN Bild, sofort als Bild-Attachment hochgeladen,
+    // Antwort zeigt auf die stabile /api/bild-Route). Scheitert Montage
+    // oder Upload: zwei Bilder + capScale-Stapel wie v56.
     let capScale: number | null = null;
     let bodyBuf: Buffer | null = null;
     let capBuf: Buffer | null = null;
+    let kompositBuf: Buffer | null = null;
+    let montiert = false;
+    const capUrlFuerPersist = capRenderingUrl; // Original-Cap wird immer gespeichert
     if (useSplitRender && capRenderingUrl) {
       try {
         [bodyBuf, capBuf] = await Promise.all([
           fetchT(renderingUrl, { timeoutMs: 12000, label: 'mess body' }).then(async r => Buffer.from(await r.arrayBuffer())),
           fetchT(capRenderingUrl, { timeoutMs: 12000, label: 'mess cap' }).then(async r => Buffer.from(await r.arrayBuffer())),
         ]);
-        const [mb, mc] = await Promise.all([messeSilhouette(bodyBuf), messeSilhouette(capBuf)]);
-        if (mb && mc) {
-          const closureText = capFields
-            ? [selectName(capFields['Closure_Type']), ...multiSelectNames(capFields['Closure_Type']), String(capFields['Cap_Name'] || '')].join(' ')
-            : '';
-          const sil = Math.min(0.6, Math.max(0.18, (mb.neckW * capTypFaktor(closureText)) / mb.maxW));
-          capScale = Math.round(sil * (mb.maxW / mb.imgW) * (mc.imgW / mc.maxW) * 1000) / 1000;
-        }
+        const closureText = capFields
+          ? [selectName(capFields['Closure_Type']), ...multiSelectNames(capFields['Closure_Type']), String(capFields['Cap_Name'] || '')].join(' ')
+          : '';
+        const mont = await montiereKomposit(bodyBuf, capBuf, closureText);
+        if (mont) { kompositBuf = mont.jpeg; capScale = mont.capScale; }
       } catch (e) {
-        console.error('Massstab-Messung uebersprungen:', e);
-        capScale = null;
+        console.error('Montage/Messung uebersprungen:', e);
+      }
+      if (kompositBuf && cacheId) {
+        try {
+          if (await ladeAttachmentHoch(cacheId, CACHE_IMAGE_FIELD, kompositBuf, `komposit_${sys.fields['Page Titel'] || systemId}_${Date.now()}.jpg`)) {
+            montiert = true;
+            renderingUrl = `/api/bild?r=${cacheId}`; // stabile Route, same-origin im Frontend
+            capRenderingUrl = null; // ein Bild — kein Stapel noetig
+          }
+        } catch (e) { console.error('Komposit-Upload fehlgeschlagen — Fallback Stapel:', e); }
       }
     }
 
@@ -1766,6 +1873,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         renderingUrl,
         capRenderingUrl,
         capScale,
+        montiert, // v58: true = renderingUrl ist bereits das fertige Komposit
         renderingPrompt,
         briefUsed: effectiveBrief,
         rejected: forbidden,
@@ -1778,64 +1886,47 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    // ── 9. Bilder in den Record (Best-Effort, nach der Antwort) ─────
-    // Ab hier darf alles scheitern, ohne den Nutzer zu betreffen. Ein
-    // haengen gebliebener Upload laesst den Record auf Pending/Error —
+    // ── 9. Bilder in den Record — v58 in waitUntil ──────────────────
+    // waitUntil haelt die Function auch nach Response-Ende am Leben:
+    // Alen kann die Seite schliessen, der Speicher-Schritt laeuft fertig.
+    // Ein haengen gebliebener Upload laesst den Record auf Pending/Error —
     // und damit nie als Cache-Hit oder Galerie-Eintrag luegen.
-    if (cacheId) try {
-      const log: string[] = [];
-      // v52: 15s rissen heute ab ("Persist: Timeout 15000ms") — der Download
-      // ist Best-Effort NACH der Antwort, er darf sich Zeit nehmen.
-      // v56: die Mess-Buffers werden wiederverwendet (kein Doppel-Download).
-      const imgBuffer: Buffer = bodyBuf || Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 45000, label: 'fal img download' })).arrayBuffer());
-      const uploadRes = await fetch(
-        `https://content.airtable.com/v0/${AIRTABLE_BASE}/${cacheId}/${CACHE_IMAGE_FIELD}/uploadAttachment`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
-          body: JSON.stringify({
-            contentType: 'image/jpeg',
-            file: imgBuffer.toString('base64'),
-            filename: `render_${sys.fields['Page Titel'] || systemId}_${tier}_${Date.now()}.jpg`,
-          }),
+    if (cacheId) waitUntil((async () => {
+      try {
+        const log: string[] = [];
+        if (!montiert) {
+          // v56: Mess-Buffer wird wiederverwendet (kein Doppel-Download);
+          // beim Komposit haengt das Bild bereits am Record.
+          const imgBuffer: Buffer = bodyBuf || Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 45000, label: 'fal img download' })).arrayBuffer());
+          if (!(await ladeAttachmentHoch(cacheId, CACHE_IMAGE_FIELD, imgBuffer, `render_${sys.fields['Page Titel'] || systemId}_${tier}_${Date.now()}.jpg`))) {
+            await cachePatch(cacheId, { Status: 'Error', Render_Log: 'Bild-Upload fehlgeschlagen' }).catch(() => null);
+            return;
+          }
         }
-      );
-      if (!uploadRes.ok) {
-        const t = await uploadRes.text();
-        console.error('Airtable upload (Base) failed:', t);
-        await cachePatch(cacheId, { Status: 'Error', Render_Log: `Bild-Upload fehlgeschlagen: ${t.slice(0, 1500)}` }).catch(() => null);
-        return;
-      }
-      // Cap-Bild SYMMETRISCH als echten Anhang (Bytes, nicht die fal-URL).
-      if (capRenderingUrl) {
-        try {
-          const capUpBuf = capBuf || Buffer.from(await (await fetchT(capRenderingUrl, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
-          const capUploadRes = await fetch(
-            `https://content.airtable.com/v0/${AIRTABLE_BASE}/${cacheId}/${CACHE_CAP_IMAGE_FIELD}/uploadAttachment`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
-              body: JSON.stringify({
-                contentType: 'image/jpeg',
-                file: capUpBuf.toString('base64'),
-                filename: `cap_${resolvedCapId || 'cap'}_${Date.now()}.jpg`,
-              }),
+        // Cap-Bild IMMER zusaetzlich als echten Anhang (auch beim Komposit).
+        if (capUrlFuerPersist) {
+          try {
+            const capUpBuf = capBuf || Buffer.from(await (await fetchT(capUrlFuerPersist, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
+            if (!(await ladeAttachmentHoch(cacheId, CACHE_CAP_IMAGE_FIELD, capUpBuf, `cap_${resolvedCapId || 'cap'}_${Date.now()}.jpg`))) {
+              log.push('Cap-Upload fehlgeschlagen');
             }
-          );
-          if (!capUploadRes.ok) log.push(`Cap-Upload fehlgeschlagen: ${(await capUploadRes.text()).slice(0, 500)}`);
-        } catch (e) {
-          log.push(`Cap-Upload fehlgeschlagen: ${String(e).slice(0, 500)}`);
+          } catch (e) {
+            log.push(`Cap-Upload fehlgeschlagen: ${String(e).slice(0, 500)}`);
+          }
         }
+        await cachePatch(cacheId, {
+          Status: 'Done',
+          ...(capScale != null ? { Cap_Scale: capScale } : {}), // v56
+          // v58: Galerie erkennt am Board-Flag, dass Bild = fertiges Komposit
+          // ist (kein Stapel, kein capBildUrl noetig).
+          ...(montiert ? { Board: (() => { try { return JSON.stringify({ ...JSON.parse(boardJson), montiert: true }); } catch { return boardJson; } })() } : {}),
+          ...(log.length ? { Render_Log: log.join('\n') } : {}),
+        }).catch(() => null);
+      } catch (cacheErr) {
+        console.error('Bild-Persist fehlgeschlagen (Antwort war bereits raus):', cacheErr);
+        await cachePatch(cacheId, { Status: 'Error', Render_Log: `Persist: ${String(cacheErr).slice(0, 1500)}` }).catch(() => null);
       }
-      await cachePatch(cacheId, {
-        Status: 'Done',
-        ...(capScale != null ? { Cap_Scale: capScale } : {}), // v56
-        ...(log.length ? { Render_Log: log.join('\n') } : {}),
-      }).catch(() => null);
-    } catch (cacheErr) {
-      console.error('Bild-Persist fehlgeschlagen (Antwort war bereits raus):', cacheErr);
-      await cachePatch(cacheId, { Status: 'Error', Render_Log: `Persist: ${String(cacheErr).slice(0, 1500)}` }).catch(() => null);
-    }
+    })());
     return;
   } catch (err) {
     // Fehler VOR der Auslieferung (fal-Timeout, Airtable-Read, Assembly).
