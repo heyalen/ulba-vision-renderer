@@ -1,4 +1,5 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
+import { waitUntil } from '@vercel/functions';
 
 /* ── api/renders.ts — das Render-Archiv (v49/C2) ─────────────────────────
    GET, optional ?systemId=rec… → Liste der fertigen Renders (Status Done,
@@ -96,6 +97,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const systemId = typeof req.query.systemId === 'string' && /^rec[A-Za-z0-9]{14}$/.test(req.query.systemId)
     ? req.query.systemId : null;
 
+  // v58: Altlasten (Pending > 10 Min, z.B. frueh geschlossener Tab vor der
+  // waitUntil-Aera) best-effort als Error markieren — die Galerie soll nie
+  // auf ewig-Pendings warten. Laeuft via waitUntil neben der Antwort.
+  waitUntil((async () => {
+    try {
+      const p = new URLSearchParams({
+        filterByFormula: `AND({Status}='Pending', DATETIME_DIFF(NOW(), {Created_At}, 'minutes') > 10)`,
+        pageSize: '10',
+      });
+      p.append('fields[]', 'Status');
+      const r = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}?${p}`, {
+        headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` }, label: 'stale scan',
+      });
+      if (!r.ok) return;
+      const d = await r.json() as { records?: Array<{ id: string }> };
+      for (const rec of d.records || []) {
+        await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}/${rec.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.AIRTABLE_PAT}` },
+          body: JSON.stringify({ fields: { Status: 'Error', Render_Log: 'Stale: Pending > 10 Min — automatisch bereinigt (v58)' } }),
+          label: 'stale patch',
+        }).catch(() => null);
+      }
+    } catch { /* Kuer — die Liste kommt trotzdem */ }
+  })());
+
   try {
     // Nur fertige Laeufe, neueste zuerst. Das System-Link-Feld laesst sich
     // per Formel nicht nach Record-ID filtern (ARRAYJOIN liefert Namen) —
@@ -126,16 +153,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // Zeilen, nie das ganze Board (Payload klein halten).
         let warnungen: string[] = [];
         let umsetzung: string[] = [];
+        let montiert = false;
         try {
           const board = f['Board'] ? JSON.parse(f['Board']) : null;
           if (Array.isArray(board?.farbsystem?.warnungen)) warnungen = board.farbsystem.warnungen.map(String).slice(0, 6);
           if (Array.isArray(board?.umsetzung)) umsetzung = board.umsetzung.map(String).slice(0, 8); // v51
+          montiert = board?.montiert === true; // v58: Bild ist bereits Komposit
         } catch { warnungen = []; umsetzung = []; }
         return {
           id: rec.id,
           // Stabile Adresse: /api/bild (ulba-Frontend) loest den Anhang auf.
           bildUrl: `/api/bild?r=${rec.id}`,
-          capBildUrl: hatAnhang(f['Cap_Bild']) ? `/api/bild?r=${rec.id}&k=cap` : null,
+          // v58: beim Komposit traegt Bild schon den Verschluss — kein Stapel.
+          capBildUrl: (!montiert && hatAnhang(f['Cap_Bild'])) ? `/api/bild?r=${rec.id}&k=cap` : null,
           weltName: String(f['Konzept_Name'] || ''),
           teilName: String(f['Teil_Name'] || ''),
           systemId: sysLink[0] || null,
