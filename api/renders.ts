@@ -75,6 +75,8 @@ type RenderEintrag = {
   konzeptName: string;
   story: string;
   warnungen: string[];
+  // v51: deutsche Umsetzungs-Schritte des Bauplans (Board-JSON) — fuers Overlay.
+  umsetzung: string[];
   engine: string;
   erstellt: string;
 };
@@ -120,10 +122,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // Warnungen aus dem Board-JSON (farbsystem.warnungen) — nur die
         // Zeilen, nie das ganze Board (Payload klein halten).
         let warnungen: string[] = [];
+        let umsetzung: string[] = [];
         try {
           const board = f['Board'] ? JSON.parse(f['Board']) : null;
           if (Array.isArray(board?.farbsystem?.warnungen)) warnungen = board.farbsystem.warnungen.map(String).slice(0, 6);
-        } catch { warnungen = []; }
+          if (Array.isArray(board?.umsetzung)) umsetzung = board.umsetzung.map(String).slice(0, 8); // v51
+        } catch { warnungen = []; umsetzung = []; }
         return {
           id: rec.id,
           // Stabile Adresse: /api/bild (ulba-Frontend) loest den Anhang auf.
@@ -136,6 +140,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           konzeptName: String(f['Konzept_Name'] || ''),
           story: String(f['Konzept_Story'] || ''),
           warnungen,
+          umsetzung,
           engine: typeof f['Engine'] === 'string' ? f['Engine'] : (f['Engine']?.name || 'seedream'),
           erstellt: String(f['Created_At'] || rec.createdTime || ''),
         };
