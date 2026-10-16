@@ -94,9 +94,11 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 
 // Cache-Version: bei JEDER Aenderung an Render-Logik/Prompt hochzaehlen.
 // Fliesst in den Cache-Key -> alte Eintraege werden automatisch ungueltig.
-// v52: Komposit-Pfad (Split-Renders werden zu EINEM Bild montiert, Fallback
-// getrennt), satte Tints (nie Lavendel), Teilflaechen-Labels (seitlich/partiell).
-const RENDER_VERSION = 'v52';
+// v52: satte Tints (nie Lavendel), Teilflaechen-Labels (seitlich/partiell),
+// farb_hinweis. v53: Komposit-Call wieder raus (Kosten + Qualitaetsrisiko,
+// Alens Entscheid) — im Split-Fall exakt ZWEI Renders (Body + gewaehlter Cap),
+// das Frontend stapelt die beiden Bilder per CSS zu einem Produkt.
+const RENDER_VERSION = 'v53';
 // Default-Modell Seedream (A/B 04.08.: hielt Detail + Matt-Haptik besser);
 // Gemini 2.5 Flash Image als optionale Engine fuer den Formtreue-Vergleich
 // (engine='gemini' im Body). Beide teilen bei fal das I/O-Schema.
@@ -1668,20 +1670,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             return capImageUrl!;
           }),
         ]);
+        // v53: exakt ZWEI Renders, kein Assembly-Call — capRenderingUrl geht
+        // immer mit raus, das Frontend stapelt Cap ueber Body (CSS).
         renderingUrl = baseUrl;
         capRenderingUrl = capUrl;
-        // v52: KOMPOSIT bevorzugt — die beiden FERTIGEN Renders werden zu
-        // EINEM Produktbild montiert. Das ist reine Assembly auf bereits
-        // final gefaerbten Bildern (die alte Drift entstand aus zwei ROH-
-        // Fotos im selben Gestaltungs-Prompt). Scheitert die Montage, bleibt
-        // die getrennte Darstellung: Body gross, Cap daneben.
-        try {
-          const composePrompt = `Image 1 shows the container body, image 2 its closure. Assemble them into ONE finished product photo: place the closure from image 2 onto the open neck of the container in image 1, correctly seated, upright, at natural scale. Keep BOTH parts EXACTLY as shown — identical shapes, proportions, colours, materials, finishes and lighting; do not redesign, recolor, restyle or re-light either part, do not add or remove anything. Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no logo, no lettering anywhere.`;
-          const komposit = await falEdit([baseUrl, capUrl], composePrompt, primaryAspect, falEndpoint);
-          if (komposit) { renderingUrl = komposit; capRenderingUrl = null; }
-        } catch (e) {
-          console.error('Komposit fehlgeschlagen — getrennte Darstellung bleibt:', e);
-        }
       } else {
         const imgs = (fall === 'A' || !capImageUrl) ? [primaryUrl] : [primaryUrl, capImageUrl];
         renderingUrl = await falEdit(imgs, fullPrompt, primaryAspect, falEndpoint);
