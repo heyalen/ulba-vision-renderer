@@ -114,7 +114,11 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // Buehne zeigt Komposits contain statt cover (Frontend).
 // v60: Flood-Fill-Silhouette (weisse Caps auf Weiss), Sanity-Guards gegen
 // Fleck-Komposits, Body_Bild-Einzelrender + Koerper·Verschluss-Thumbnails.
-const RENDER_VERSION = 'v60';
+// v62: Komponenten-Erkennung (groesste zusammenhaengende Silhouette — fixt
+// Katalogbilder mit zwei Ansichten), Hand-Kalibrierung pro Cap (Montage_
+// Skala/Versatz_Y/Crop gewinnen gegen Auto, fuer Komposit UND Stapel) und
+// Konfidenz-Ampel (Montage_Konfidenz auto_ok/pruefen, Neck_Norm-Anker).
+const RENDER_VERSION = 'v62';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -128,6 +132,9 @@ type Profil = {
   top: number; bottom: number; minL: number; maxR: number; // DS-Einheiten
   maxW: number; neckW: number; neckCx: number;             // DS-Einheiten
   breiten: Int32Array; links: Int32Array;                  // pro DS-Zeile
+  // v62: Diagnose fuer die Konfidenz-Ampel.
+  nSignifikant: number;  // Komponenten >= 15% der groessten (1 = sauber)
+  neckStabil: boolean;   // Hals-Minimum eindeutig (Plateau >= 2 Zeilen)
 };
 async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
   try {
@@ -156,14 +163,49 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
       if (y > 0) push(x, y - 1);
       if (y < H - 1) push(x, y + 1);
     }
-    // Objekt = alles, was NICHT Hintergrund ist.
+    // v62: Objekt-Pixel (= !bg) in zusammenhaengende KOMPONENTEN zerlegen —
+    // Katalogbilder zeigen oft ZWEI Ansichten nebeneinander, dazu Logos und
+    // Flecken. Nur die GROESSTE Komponente zaehlt (Gleichstand: zentralste).
+    const comp = new Int32Array(B * H).fill(-1);
+    const groesse: number[] = [];
+    const schwX: number[] = [];
+    const schwY: number[] = [];
+    let nComp = 0;
+    for (let p0 = 0; p0 < B * H; p0++) {
+      if (bg[p0] || comp[p0] >= 0) continue;
+      const id = nComp++;
+      groesse.push(0); schwX.push(0); schwY.push(0);
+      comp[p0] = id;
+      queue[0] = p0;
+      let qt2 = 1;
+      for (let qh = 0; qh < qt2; qh++) {
+        const p = queue[qh], x = p % B, y = (p - x) / B;
+        groesse[id]++; schwX[id] += x; schwY[id] += y;
+        if (x > 0 && !bg[p - 1] && comp[p - 1] < 0) { comp[p - 1] = id; queue[qt2++] = p - 1; }
+        if (x < B - 1 && !bg[p + 1] && comp[p + 1] < 0) { comp[p + 1] = id; queue[qt2++] = p + 1; }
+        if (y > 0 && !bg[p - B] && comp[p - B] < 0) { comp[p - B] = id; queue[qt2++] = p - B; }
+        if (y < H - 1 && !bg[p + B] && comp[p + B] < 0) { comp[p + B] = id; queue[qt2++] = p + B; }
+      }
+    }
+    if (!nComp) return null;
+    let best = 0;
+    for (let i = 1; i < nComp; i++) {
+      if (groesse[i] > groesse[best] * 1.02) { best = i; continue; }
+      if (groesse[i] >= groesse[best] * 0.98) {
+        const di = Math.hypot(schwX[i] / groesse[i] - B / 2, schwY[i] / groesse[i] - H / 2);
+        const db = Math.hypot(schwX[best] / groesse[best] - B / 2, schwY[best] / groesse[best] - H / 2);
+        if (di < db) best = i;
+      }
+    }
+    const nSignifikant = groesse.filter(g => g >= 0.15 * groesse[best]).length;
+    // Zeilen-Profil NUR ueber die Gewinner-Komponente.
     const breiten = new Int32Array(H);
     const links = new Int32Array(H).fill(-1);
     let top = -1, bottom = -1, maxW = 0, minL = B, maxR = -1;
     for (let y = 0; y < H; y++) {
       let l = -1, r = -1;
       for (let x = 0; x < B; x++) {
-        if (bg[y * B + x]) continue;
+        if (comp[y * B + x] !== best) continue;
         if (l < 0) l = x;
         r = x;
       }
@@ -183,7 +225,12 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
       if (breiten[y] > 0 && breiten[y] < neckW) { neckW = breiten[y]; neckCx = links[y] + Math.round(breiten[y] / 2); }
     }
     if (neckW === 0x7fffffff) neckW = maxW;
-    return { w: nativW, h: nativH, skala: nativW / B, dsW: B, dsH: H, top, bottom, minL, maxR, maxW, neckW, neckCx, breiten, links };
+    // v62: Hals stabil, wenn das Minimum ein Plateau bildet (>= 2 Zeilen
+    // innerhalb 110%) — ein einzelner Ausreisser ist kein Gewinde.
+    let plateau = 0;
+    for (let y = top; y < viertel; y++) if (breiten[y] > 0 && breiten[y] <= neckW * 1.1) plateau++;
+    const neckStabil = plateau >= 2;
+    return { w: nativW, h: nativH, skala: nativW / B, dsW: B, dsH: H, top, bottom, minL, maxR, maxW, neckW, neckCx, breiten, links, nSignifikant, neckStabil };
   } catch { return null; }
 }
 
@@ -194,12 +241,39 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
 // mittig, 1-2% ueberlappend auf die Hals-Oberkante des Body-Renders
 // montiert. Ergebnis: EIN JPEG in Body-Groesse (oben erweitert, falls
 // der Cap ueber den Bildrand ragt) + der capScale fuers Stapel-Fallback.
+// v62: Hand-Kalibrierung pro Cap — gesetzte Werte gewinnen gegen die
+// Auto-Messung. skala = Cap-Breite als Anteil der Body-BILDbreite;
+// versatzY = Cap-UNTERKANTE in % der Body-Bildhoehe (groesser = tiefer);
+// crop = Quell-Ausschnitt in % (eine von mehreren Katalog-Ansichten).
+export type MontageKal = {
+  skala: number | null;
+  versatzY: number | null;
+  crop: { x: number; y: number; w: number; h: number } | null;
+};
+type MontageDiag = {
+  hand: boolean; capKomponenten: number; capHFrac: number;
+  neckStabil: boolean; neckFrac: number; bodyMaxFrac: number;
+};
 async function montiereKomposit(
-  bodyBuf: Buffer, capBuf: Buffer, closureText: string
-): Promise<{ jpeg: Buffer; capScale: number } | null> {
+  bodyBuf: Buffer, capBuf: Buffer, closureText: string, kal?: MontageKal | null
+): Promise<{ jpeg: Buffer; capScale: number; diag: MontageDiag } | null> {
   try {
-    const [pb, pc] = await Promise.all([silhouettenProfil(bodyBuf), silhouettenProfil(capBuf)]);
+    // Optionaler Quell-Crop ZUERST (waehlt z.B. eine von zwei Ansichten).
+    let capQuelle = capBuf;
+    if (kal?.crop) {
+      const m = await sharp(capBuf).metadata();
+      const W = m.width || 0, H = m.height || 0;
+      if (W && H) {
+        const L = Math.max(0, Math.min(W - 8, Math.round(kal.crop.x / 100 * W)));
+        const T = Math.max(0, Math.min(H - 8, Math.round(kal.crop.y / 100 * H)));
+        const CW = Math.max(8, Math.min(W - L, Math.round(kal.crop.w / 100 * W)));
+        const CH = Math.max(8, Math.min(H - T, Math.round(kal.crop.h / 100 * H)));
+        capQuelle = await sharp(capBuf).extract({ left: L, top: T, width: CW, height: CH }).toBuffer();
+      }
+    }
+    const [pb, pc] = await Promise.all([silhouettenProfil(bodyBuf), silhouettenProfil(capQuelle)]);
     if (!pb || !pc) return null;
+    const hand = typeof kal?.skala === 'number' && kal.skala > 0;
     const faktor = capTypFaktor(closureText);
     const mitRohr = /pump|spray|pipette|airless|dropper/i.test(closureText);
     let capUnten = pc.bottom;
@@ -221,19 +295,27 @@ async function montiereKomposit(
     const neckWn = Math.round(pb.neckW * pb.skala);
     const bodyTopN = Math.round(pb.top * pb.skala);
     const neckCxN = Math.round(pb.neckCx * pb.skala);
-    const zielW = Math.min(pb.w, Math.max(16, Math.round(neckWn * faktor)));
-    const capKlein = await sharp(capBuf)
+    // Zielbreite: Hand-Skala (Anteil der Body-Bildbreite, auf die sichtbare
+    // Cap-Silhouette bezogen) ODER Auto (Halsbreite x TypFaktor).
+    const zielW = hand
+      ? Math.min(pb.w, Math.max(16, Math.round((kal!.skala as number) * pb.w * (cropW / pc.w))))
+      : Math.min(pb.w, Math.max(16, Math.round(neckWn * faktor)));
+    const capKlein = await sharp(capQuelle)
       .extract({ left: cropL, top: cropT, width: cropW, height: cropH })
       .resize({ width: zielW })
       .toBuffer();
     const capH = (await sharp(capKlein).metadata()).height || Math.round(cropH * zielW / cropW);
     const overlap = Math.max(3, Math.round(capH * 0.02));
-    // Guard 2+3 (v60): der Aufsatz muss SICHTBAR sein — skalierte Cap-Hoehe
-    // >= 4% der Body-Hoehe und ueber der Hals-Oberkante bleibt echtes Cap.
-    if (capH < 0.04 * pb.h || capH - overlap < 0.03 * pb.h) return null;
-    const erweiterung = Math.max(0, capH - overlap - bodyTopN);
+    // Guards (v60) nur im Auto-Pfad — Hand-Werte sind Alens Entscheid.
+    if (!hand && (capH < 0.04 * pb.h || capH - overlap < 0.03 * pb.h)) return null;
+    // Cap-Unterkante: Hand-Versatz (absolut, % der Body-Bildhoehe) oder
+    // Auto-Anker = Hals-Oberkante + Ueberlappung.
+    const capBottomN = (hand && typeof kal?.versatzY === 'number')
+      ? Math.max(8, Math.min(pb.h, Math.round(kal.versatzY / 100 * pb.h)))
+      : bodyTopN + overlap;
+    const erweiterung = Math.max(0, capH - capBottomN);
     const capLeft = Math.min(pb.w - zielW, Math.max(0, neckCxN - Math.round(zielW / 2)));
-    const capTop = Math.max(0, erweiterung + bodyTopN + overlap - capH);
+    const capTop = Math.max(0, erweiterung + capBottomN - capH);
     const jpeg = await sharp({
       create: { width: pb.w, height: pb.h + erweiterung, channels: 3, background: { r: 255, g: 255, b: 255 } },
     })
@@ -243,14 +325,35 @@ async function montiereKomposit(
       ])
       .jpeg({ quality: 92 })
       .toBuffer();
-    // capScale (Element-Verhaeltnis, DS-Ratios sind skaleninvariant).
-    const sil = Math.min(0.6, Math.max(0.18, (pb.neckW * faktor) / pb.maxW));
-    const capScale = Math.round(sil * (pb.maxW / pb.dsW) * (pc.dsW / pc.maxW) * 1000) / 1000;
-    return { jpeg, capScale };
+    // capScale (Element-Verhaeltnis fuer den Stapel-Fallback): Hand-Skala
+    // direkt, sonst Auto (DS-Ratios sind skaleninvariant).
+    const capScale = hand
+      ? Math.round((kal!.skala as number) * 1000) / 1000
+      : (() => {
+          const sil = Math.min(0.6, Math.max(0.18, (pb.neckW * faktor) / pb.maxW));
+          return Math.round(sil * (pb.maxW / pb.dsW) * (pc.dsW / pc.maxW) * 1000) / 1000;
+        })();
+    const diag: MontageDiag = {
+      hand,
+      capKomponenten: pc.nSignifikant,
+      capHFrac: capH / pb.h,
+      neckStabil: pb.neckStabil,
+      neckFrac: neckWn / pb.w,
+      bodyMaxFrac: Math.round(pb.maxW * pb.skala) / pb.w,
+    };
+    return { jpeg, capScale, diag };
   } catch (e) {
     console.error('Montage fehlgeschlagen:', e);
     return null;
   }
+}
+
+// v62: "24/410" -> 24 (mm). Erster plausibler Zahlenwert 10..100.
+function parseNeckMm(text: string): number | null {
+  const m = /(\d{2,3})\s*\/\s*4\d{2}/.exec(text) || /\b(\d{2})\b/.exec(text);
+  if (!m) return null;
+  const v = Number(m[1]);
+  return v >= 10 && v <= 100 ? v : null;
 }
 
 // v58: Attachment-Upload als Helfer (Komposit VOR der Antwort, Rest danach).
@@ -1769,6 +1872,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           bodyRenderingUrl: imgUrl(cf['Body_Bild']) || null, // v60
           capScale: (typeof cf['Cap_Scale'] === 'number' && isFinite(cf['Cap_Scale'])) ? cf['Cap_Scale'] : null,
           montiert: istMontiert,
+          konfidenz: selectName(cf['Montage_Konfidenz']) || null, // v62
           renderingPrompt: cf['Rendering_Prompt'] || '',
           briefUsed: effectiveBrief,
           cacheId: cached[0].id,
@@ -1890,6 +1994,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let kompositBuf: Buffer | null = null;
     let montiert = false;
     let bodyRenderingUrl: string | null = null; // v60: Body-Einzelrender (Montage-Fall)
+    let konfidenz: 'auto_ok' | 'pruefen' | null = null; // v62: Montage-Ampel
     const capUrlFuerPersist = capRenderingUrl; // Original-Cap wird immer gespeichert
     if (useSplitRender && capRenderingUrl) {
       try {
@@ -1900,8 +2005,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const closureText = capFields
           ? [selectName(capFields['Closure_Type']), ...multiSelectNames(capFields['Closure_Type']), String(capFields['Cap_Name'] || '')].join(' ')
           : '';
-        const mont = await montiereKomposit(bodyBuf, capBuf, closureText);
-        if (mont) { kompositBuf = mont.jpeg; capScale = mont.capScale; }
+        // v62: Hand-Kalibrierung des gewaehlten Caps gewinnt gegen Auto.
+        const kal: MontageKal = {
+          skala: (capFields && typeof capFields['Montage_Skala'] === 'number' && capFields['Montage_Skala'] > 0) ? capFields['Montage_Skala'] : null,
+          versatzY: (capFields && typeof capFields['Montage_Versatz_Y'] === 'number') ? capFields['Montage_Versatz_Y'] : null,
+          crop: (() => {
+            try {
+              const c = capFields?.['Montage_Crop'] ? JSON.parse(String(capFields['Montage_Crop'])) : null;
+              return (c && typeof c.w === 'number' && typeof c.h === 'number') ? { x: Number(c.x) || 0, y: Number(c.y) || 0, w: c.w, h: c.h } : null;
+            } catch { return null; }
+          })(),
+        };
+        const mont = await montiereKomposit(bodyBuf, capBuf, closureText, kal);
+        if (mont) {
+          kompositBuf = mont.jpeg;
+          capScale = mont.capScale;
+          // v62: Konfidenz-Ampel — Hand-Kalibrierung ist immer auto_ok;
+          // Auto wird geprueft (Mehrfach-Komponenten, knappe Guards,
+          // instabiler Hals, Faktor ausserhalb [0.2, 0.55], Neck_Norm-Anker).
+          if (mont.diag.hand) {
+            konfidenz = 'auto_ok';
+          } else {
+            let pruefen = false;
+            if (mont.diag.capKomponenten > 1) pruefen = true;
+            if (mont.diag.capHFrac < 0.06) pruefen = true;
+            if (!mont.diag.neckStabil) pruefen = true;
+            if (capScale < 0.2 || capScale > 0.55) pruefen = true;
+            const neckMm = parseNeckMm(multiSelectNames(sys.fields['Neck_Norm']).join(' '));
+            if (neckMm && mont.diag.neckFrac > 0) {
+              // implizierter Body-Durchmesser aus Hals-Norm + Pixel-Verhaeltnis:
+              // ausserhalb 20..150mm ist die Messung unplausibel.
+              const implBodyMm = neckMm * (mont.diag.bodyMaxFrac / mont.diag.neckFrac);
+              if (implBodyMm < 20 || implBodyMm > 150) pruefen = true;
+            }
+            konfidenz = pruefen ? 'pruefen' : 'auto_ok';
+          }
+        }
       } catch (e) {
         console.error('Montage/Messung uebersprungen:', e);
       }
@@ -1928,6 +2067,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         bodyRenderingUrl, // v60: Einzel-Body im Montage-Fall (sonst = renderingUrl)
         capScale,
         montiert, // v58: true = renderingUrl ist bereits das fertige Komposit
+        konfidenz, // v62: 'pruefen' -> UI zeigt "Proportionen pruefen"
         renderingPrompt,
         briefUsed: effectiveBrief,
         rejected: forbidden,
@@ -1979,6 +2119,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         await cachePatch(cacheId, {
           Status: 'Done',
           ...(capScale != null ? { Cap_Scale: capScale } : {}), // v56
+          ...(konfidenz ? { Montage_Konfidenz: konfidenz } : {}), // v62
           // v58: Galerie erkennt am Board-Flag, dass Bild = fertiges Komposit
           // ist (kein Stapel, kein capBildUrl noetig).
           ...(montiert ? { Board: (() => { try { return JSON.stringify({ ...JSON.parse(boardJson), montiert: true }); } catch { return boardJson; } })() } : {}),
