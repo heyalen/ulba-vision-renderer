@@ -254,7 +254,7 @@ type MontageDiag = {
   hand: boolean; capKomponenten: number; capHFrac: number;
   neckStabil: boolean; neckFrac: number; bodyMaxFrac: number;
 };
-async function montiereKomposit(
+export async function montiereKomposit(
   bodyBuf: Buffer, capBuf: Buffer, closureText: string, kal?: MontageKal | null
 ): Promise<{ jpeg: Buffer; capScale: number; diag: MontageDiag } | null> {
   try {
