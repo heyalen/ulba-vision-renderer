@@ -85,6 +85,8 @@ type RenderEintrag = {
   capScale: number | null;
   // v59: true = Bild ist das fertige Komposit -> Buehne zeigt es contain.
   montiert: boolean;
+  // v62: Konfidenz-Ampel der Auto-Montage ('pruefen' -> dezenter Punkt).
+  konfidenz: string | null;
   engine: string;
   erstellt: string;
 };
@@ -137,7 +139,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       'sort[0][field]': 'Created_At',
       'sort[0][direction]': 'desc',
     });
-    ['Bild', 'Cap_Bild', 'Body_Bild', 'Konzept_Name', 'Konzept_Story', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At', 'Board', 'Cap_Scale']
+    ['Bild', 'Cap_Bild', 'Body_Bild', 'Konzept_Name', 'Konzept_Story', 'Teil_Name', 'System', 'Design_Code', 'Engine', 'Created_At', 'Board', 'Cap_Scale', 'Montage_Konfidenz']
       .forEach(f => params.append('fields[]', f));
     const r = await fetchT(
       `https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}?${params}`,
@@ -182,6 +184,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           umsetzung,
           capScale: (typeof f['Cap_Scale'] === 'number' && isFinite(f['Cap_Scale'])) ? f['Cap_Scale'] : null, // v56
           montiert, // v59
+          konfidenz: typeof f['Montage_Konfidenz'] === 'string' ? f['Montage_Konfidenz'] : (f['Montage_Konfidenz']?.name || null), // v62
           engine: typeof f['Engine'] === 'string' ? f['Engine'] : (f['Engine']?.name || 'seedream'),
           erstellt: String(f['Created_At'] || rec.createdTime || ''),
         };
