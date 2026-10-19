@@ -140,7 +140,10 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // breite_prozent aus dem Bauplan, Fallback front_panel ~70% x 55%.
 // v70: Anti-Letterbox — Vollbild-Szenen fuellen Label bzw. Druckflaeche
 // randlos, keine schwarzen/weissen/farbigen Balken (JAPA-Befund).
-const RENDER_VERSION = 'v70';
+// v71: Label_Im_Render-Freigabeschalter (Label/Motiv nur noch kuratiert in
+// den Prompt, sonst Material-Look) + Kalibrier-Zentrier-Fix (neckCx als
+// Plateau-Mittel; Hand-Montage zentriert auf die Silhouetten-Mitte).
+const RENDER_VERSION = 'v71';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -278,9 +281,17 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
     const viertel = top + Math.max(1, Math.round((bottom - top + 1) * 0.25));
     let neckW = 0x7fffffff, neckCx = Math.round((minL + maxR) / 2);
     for (let y = top; y < viertel; y++) {
-      if (breiten[y] > 0 && breiten[y] < neckW) { neckW = breiten[y]; neckCx = links[y] + Math.round(breiten[y] / 2); }
+      if (breiten[y] > 0 && breiten[y] < neckW) neckW = breiten[y];
     }
     if (neckW === 0x7fffffff) neckW = maxW;
+    // v71: neckCx als MITTEL der Zentren aller Plateau-Zeilen (<=110% des
+    // Minimums) — das Zentrum einer einzelnen Ausreisser-Zeile hatte den
+    // Cap seitlich verschoben (Kalibrier-Befund Plastic Bottle).
+    let cxSum = 0, cxN = 0;
+    for (let y = top; y < viertel; y++) {
+      if (breiten[y] > 0 && breiten[y] <= neckW * 1.1) { cxSum += links[y] + breiten[y] / 2; cxN++; }
+    }
+    if (cxN > 0) neckCx = Math.round(cxSum / cxN);
     // v62: Hals stabil, wenn das Minimum ein Plateau bildet (>= 2 Zeilen
     // innerhalb 110%) — ein einzelner Ausreisser ist kein Gewinde.
     let plateau = 0;
@@ -394,7 +405,10 @@ export async function montiereKomposit(
       ? Math.max(8, Math.min(pb.h, Math.round(kal.versatzY / 100 * pb.h)))
       : bodyTopN + overlap;
     const erweiterung = Math.max(0, capH - capBottomN);
-    const capLeft = Math.min(pb.w - zielW, Math.max(0, neckCxN - Math.round(zielW / 2)));
+    // v71: Hand-Kalibrierung zentriert auf die KOERPER-Silhouetten-Mitte
+    // (das UI snappt auf Mitte); Auto bleibt am Hals-Zentrum.
+    const zentrumX = hand ? Math.round(((pb.minL + pb.maxR) / 2) * pb.skala) : neckCxN;
+    const capLeft = Math.min(pb.w - zielW, Math.max(0, zentrumX - Math.round(zielW / 2)));
     const capTop = Math.max(0, erweiterung + capBottomN - capH);
     const jpeg = await sharp({
       create: { width: pb.w, height: pb.h + erweiterung, channels: 3, background: { r: 255, g: 255, b: 255 } },
@@ -962,6 +976,8 @@ type DesignCodeRec = {
   komponenten: string | null;
   // v64: Deko-Dichte der Welt — Skalenhinweis fuer die Motiv-Groesse.
   dekoDichte: number | null;
+  // v71: NUR wenn true gehen Label-/Motiv-Bloecke in den Bild-Prompt.
+  labelImRender: boolean;
 };
 
 type Concept = {
@@ -1179,6 +1195,7 @@ async function assemblePrompt(
         doNot: teileListe(fieldAny(f, ['Do_Not', 'Do_not', 'DoNot'])),
         komponenten: (() => { const v = fieldAny(f, ['Design_Komponenten']); return v ? String(v).trim() : null; })(),
         dekoDichte: (() => { const v = fieldAny(f, ['Deko_Dichte']); return (v != null && v !== '' && !isNaN(Number(v))) ? Number(v) : null; })(),
+        labelImRender: fieldAny(f, ['Label_Im_Render']) === true,
       };
     });
 
@@ -1360,8 +1377,12 @@ async function assemblePrompt(
   if (komp) {
     const b = komp.behaelter || {};
     const verlauf = (b.verlauf && b.verlauf.von && b.verlauf.nach) ? b.verlauf : null;
+    // v71: Label/Motiv NUR per Freigabe-Schalter (Design_Code.Label_Im_
+    // Render) — sonst sauberer Material-Look (Citrus-Pop-Befund: woertlich
+    // collagierte Motive). Verlauf/Vollfarbe/Finish bleiben immer erlaubt.
+    const dekoFreigabe = code.labelImRender === true;
     const grafikTxt = String(komp.grafik?.beschreibung || '').trim();
-    const grafikSichtbar = !!komp.grafik && komp.grafik.vorhanden !== false
+    const grafikSichtbar = dekoFreigabe && !!komp.grafik && komp.grafik.vorhanden !== false
       && komp.grafik.abdeckung !== 'keine' && grafikTxt && grafikTxt.toLowerCase() !== 'none';
     const TRANS_EN: Record<string, string> = {
       opak: 'opaque', transparent: 'clear transparent',
@@ -1406,7 +1427,7 @@ async function assemblePrompt(
     // v67: vollflaechige Bild-Labels (Dr.-Althea-Muster: das Label IST eine
     // randlose Foto-Szene, kein weisses Label mit Freisteller darauf).
     const labelTyp = komp.label?.typ || 'uni';
-    const vollbildLabel = !!komp.label?.vorhanden && (labelTyp === 'vollbild_foto' || labelTyp === 'vollbild_illustration');
+    const vollbildLabel = dekoFreigabe && !!komp.label?.vorhanden && (labelTyp === 'vollbild_foto' || labelTyp === 'vollbild_illustration');
     const vollbildLabelEn = (ort: string): string => {
       const art = labelTyp === 'vollbild_foto' ? 'photographic image' : 'illustrated artwork';
       const szene = komp!.grafik?.komposition !== 'freisteller';
@@ -1453,10 +1474,10 @@ async function assemblePrompt(
 
     // ── 1) Behaelter-Strategie ───────────────────────────────────────
     let labelTraegtWelt = false;
-    if (farbeFix && (kannEtikett || kannDruck)) {
+    if (farbeFix && ((kannEtikett && dekoFreigabe) || kannDruck)) {
       // Behaelterfarbe unantastbar (z.B. Braunglas) -> Welt wandert auf
       // Etikett (bevorzugt) oder Direktdruck; das Material bleibt sichtbar.
-      if (kannEtikett) {
+      if (kannEtikett && dekoFreigabe) {
         if (vollbildLabel) {
           kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. ${vollbildLabelEn(labelOrtEn(komp.label?.abdeckung))}`);
           umsetzung.push(`Vollflächiges ${labelTyp === 'vollbild_foto' ? 'Foto' : 'Illustrations'}-Label ${labelOrtDe} — die Behälterfarbe bleibt sichtbar`);
@@ -1535,7 +1556,7 @@ async function assemblePrompt(
     if (zonen && !kompLines.includes(zonenLine)) kompLines.push(zonenLine);
 
     // ── 2) Welt-Label (eigener Baustein, falls nicht schon Welt-Traeger) ─
-    if (komp.label?.vorhanden && !labelTraegtWelt && kannEtikett) {
+    if (dekoFreigabe && komp.label?.vorhanden && !labelTraegtWelt && kannEtikett) {
       if (vollbildLabel) {
         kompLines.push(vollbildLabelEn(labelOrtEn(komp.label.abdeckung)));
         umsetzung.push(`Vollflächiges ${labelTyp === 'vollbild_foto' ? 'Foto' : 'Illustrations'}-Label ${labelOrtDe}`);
@@ -1545,7 +1566,12 @@ async function assemblePrompt(
       }
     }
 
-    kompLabelGeplant = labelTraegtWelt || !!(komp.label?.vorhanden && kannEtikett);
+    kompLabelGeplant = dekoFreigabe && (labelTraegtWelt || !!(komp.label?.vorhanden && kannEtikett));
+    // v71: ohne Freigabe explizit blanke Flaechen + ehrlicher Umsetzungs-Hinweis.
+    if (!dekoFreigabe && (komp.label?.vorhanden || (komp.grafik && komp.grafik.vorhanden !== false && String(komp.grafik.beschreibung || 'none').toLowerCase() !== 'none'))) {
+      kompLines.push('No label, no sticker, no printed motif anywhere — bare, uninterrupted surfaces.');
+      umsetzung.push('Label/Motiv der Welt: in der Detailansicht beschrieben, im Render bewusst weggelassen');
+    }
 
     // ── 3) Akzente (v68: auch strukturiert {element, position, farbe}) ──
     if (Array.isArray(komp.akzente) && komp.akzente.length) {
@@ -1596,8 +1622,9 @@ async function assemblePrompt(
 
     // ── 5) v68: DESIGN DNA — dichter Referenz-Absatz NACH den
     // mechanischen Zeilen; strukturierte Regeln oben gewinnen bei Konflikt.
+    // v71: DNA nur mit Deko-Freigabe (sie beschreibt Label/Motiv mit).
     const dna = String(komp.design_dna || '').trim();
-    if (dna) {
+    if (dna && dekoFreigabe) {
       kompLines.push(`DESIGN DNA (faithful reference description): ${dna.slice(0, 900)} — reproduce these design characteristics faithfully on THIS container; the structured rules above take precedence on any conflict; never copy brand names or lettering.`);
     }
   }
