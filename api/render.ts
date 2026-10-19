@@ -118,7 +118,10 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // Katalogbilder mit zwei Ansichten), Hand-Kalibrierung pro Cap (Montage_
 // Skala/Versatz_Y/Crop gewinnen gegen Auto, fuer Komposit UND Stapel) und
 // Konfidenz-Ampel (Montage_Konfidenz auto_ok/pruefen, Neck_Norm-Anker).
-const RENDER_VERSION = 'v62';
+// v63: adaptiver Hintergrund (Rand-Median statt fixem Weiss — grauer fal-
+// Studiogrund), Silhouetten-Maske beim Kompositieren (nie wieder ein
+// Hintergrund-Kasten), Cap_/Body_Bild weiss-normalisiert gespeichert.
+const RENDER_VERSION = 'v63';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -135,6 +138,10 @@ type Profil = {
   // v62: Diagnose fuer die Konfidenz-Ampel.
   nSignifikant: number;  // Komponenten >= 15% der groessten (1 = sauber)
   neckStabil: boolean;   // Hals-Minimum eindeutig (Plateau >= 2 Zeilen)
+  // v63: Objekt-Masken (DS, 1px dilatiert, 255 = Objekt) — maskiertes
+  // Kompositieren + Weiss-Normalisierung; Best = nur Gewinner-Komponente.
+  maske: Uint8Array;
+  maskeBest: Uint8Array;
 };
 async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
   try {
@@ -145,14 +152,29 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
       .removeAlpha().resize(256, 256, { fit: 'inside' }).raw()
       .toBuffer({ resolveWithObject: true });
     const B = info.width, H = info.height, C = info.channels;
-    const hell = (p: number) => { const i = p * C; return data[i] > 245 && data[i + 1] > 245 && data[i + 2] > 245; };
-    // BFS: Hintergrund = von aussen erreichbare Fast-Weiss-Region.
+    // v63: ADAPTIVER Hintergrund — fal liefert teils GRAUEN Studiogrund;
+    // die fixe >245-Schwelle fand dann keinen Hintergrund und das ganze
+    // Bild wurde Objekt (grauer Kasten im Komposit). Referenzfarbe =
+    // Median der Randpixel aller vier Kanten, Toleranz ±14 je Kanal.
+    const randIdx: number[] = [];
+    for (let x = 0; x < B; x++) { randIdx.push(x, (H - 1) * B + x); }
+    for (let y = 1; y < H - 1; y++) { randIdx.push(y * B, y * B + B - 1); }
+    const med = (k: number) => {
+      const v = randIdx.map(p => data[p * C + k]).sort((a, b) => a - b);
+      return v[v.length >> 1];
+    };
+    const ref0 = med(0), ref1 = med(1), ref2 = med(2);
+    const istBgFarbe = (p: number) => {
+      const i = p * C;
+      return Math.abs(data[i] - ref0) <= 14 && Math.abs(data[i + 1] - ref1) <= 14 && Math.abs(data[i + 2] - ref2) <= 14;
+    };
+    // BFS: Hintergrund = von aussen erreichbare Region in Referenzfarbe.
     const bg = new Uint8Array(B * H);
     const queue = new Int32Array(B * H);
     let qt = 0;
     const push = (x: number, y: number) => {
       const p = y * B + x;
-      if (!bg[p] && hell(p)) { bg[p] = 1; queue[qt++] = p; }
+      if (!bg[p] && istBgFarbe(p)) { bg[p] = 1; queue[qt++] = p; }
     };
     for (let x = 0; x < B; x++) { push(x, 0); push(x, H - 1); }
     for (let y = 0; y < H; y++) { push(0, y); push(B - 1, y); }
@@ -198,6 +220,21 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
       }
     }
     const nSignifikant = groesse.filter(g => g >= 0.15 * groesse[best]).length;
+    // v63: Masken (1px dilatiert gegen Kanten-Saeume) — 255 = Objekt.
+    const dilatiere = (drin: (p: number) => boolean): Uint8Array => {
+      const m = new Uint8Array(B * H);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < B; x++) {
+          const p = y * B + x;
+          if (drin(p)
+            || (x > 0 && drin(p - 1)) || (x < B - 1 && drin(p + 1))
+            || (y > 0 && drin(p - B)) || (y < H - 1 && drin(p + B))) m[p] = 255;
+        }
+      }
+      return m;
+    };
+    const maske = dilatiere(p => !bg[p]);
+    const maskeBest = dilatiere(p => comp[p] === best);
     // Zeilen-Profil NUR ueber die Gewinner-Komponente.
     const breiten = new Int32Array(H);
     const links = new Int32Array(H).fill(-1);
@@ -230,7 +267,7 @@ async function silhouettenProfil(buf: Buffer): Promise<Profil | null> {
     let plateau = 0;
     for (let y = top; y < viertel; y++) if (breiten[y] > 0 && breiten[y] <= neckW * 1.1) plateau++;
     const neckStabil = plateau >= 2;
-    return { w: nativW, h: nativH, skala: nativW / B, dsW: B, dsH: H, top, bottom, minL, maxR, maxW, neckW, neckCx, breiten, links, nSignifikant, neckStabil };
+    return { w: nativW, h: nativH, skala: nativW / B, dsW: B, dsH: H, top, bottom, minL, maxR, maxW, neckW, neckCx, breiten, links, nSignifikant, neckStabil, maske, maskeBest };
   } catch { return null; }
 }
 
@@ -300,11 +337,30 @@ export async function montiereKomposit(
     const zielW = hand
       ? Math.min(pb.w, Math.max(16, Math.round((kal!.skala as number) * pb.w * (cropW / pc.w))))
       : Math.min(pb.w, Math.max(16, Math.round(neckWn * faktor)));
-    const capKlein = await sharp(capQuelle)
+    const capH = Math.max(8, Math.round(cropH * zielW / cropW));
+    const capRgb = await sharp(capQuelle)
       .extract({ left: cropL, top: cropT, width: cropW, height: cropH })
-      .resize({ width: zielW })
+      .resize(zielW, capH, { fit: 'fill' })
+      .removeAlpha()
+      .raw()
       .toBuffer();
-    const capH = (await sharp(capKlein).metadata()).height || Math.round(cropH * zielW / cropW);
+    // v63: Silhouetten-Maske der Gewinner-Komponente als Alphakanal —
+    // es reist NIE wieder ein Hintergrund-Kasten mit, egal welche
+    // Grundfarbe das Modell geliefert hat.
+    const maskRegion = Buffer.alloc(cropWds * cropHds);
+    for (let y = 0; y < cropHds; y++) {
+      for (let x = 0; x < cropWds; x++) {
+        maskRegion[y * cropWds + x] = pc.maskeBest[(pc.top + y) * pc.dsW + (pc.minL + x)];
+      }
+    }
+    const maskeKlein = await sharp(maskRegion, { raw: { width: cropWds, height: cropHds, channels: 1 } })
+      .resize(zielW, capH, { fit: 'fill' })
+      .raw()
+      .toBuffer();
+    const capKlein = await sharp(capRgb, { raw: { width: zielW, height: capH, channels: 3 } })
+      .joinChannel(maskeKlein, { raw: { width: zielW, height: capH, channels: 1 } })
+      .png()
+      .toBuffer();
     const overlap = Math.max(3, Math.round(capH * 0.02));
     // Guards (v60) nur im Auto-Pfad — Hand-Werte sind Alens Entscheid.
     if (!hand && (capH < 0.04 * pb.h || capH - overlap < 0.03 * pb.h)) return null;
@@ -346,6 +402,29 @@ export async function montiereKomposit(
     console.error('Montage fehlgeschlagen:', e);
     return null;
   }
+}
+
+// v63: Einzelbild hintergrund-normalisiert auf reines Weiss (Maske aller
+// Objekt-Komponenten) — Cap_Bild/Body_Bild sehen damit auch im Stapel-
+// Fallback und im Anpassen-Overlay sauber aus, egal welchen Grund fal gab.
+async function aufWeiss(buf: Buffer): Promise<Buffer | null> {
+  try {
+    const p = await silhouettenProfil(buf);
+    if (!p) return null;
+    const maskNativ = await sharp(Buffer.from(p.maske), { raw: { width: p.dsW, height: p.dsH, channels: 1 } })
+      .resize(p.w, p.h, { fit: 'fill' })
+      .raw()
+      .toBuffer();
+    const rgb = await sharp(buf).removeAlpha().raw().toBuffer();
+    const mitAlpha = await sharp(rgb, { raw: { width: p.w, height: p.h, channels: 3 } })
+      .joinChannel(maskNativ, { raw: { width: p.w, height: p.h, channels: 1 } })
+      .png()
+      .toBuffer();
+    return await sharp({ create: { width: p.w, height: p.h, channels: 3, background: { r: 255, g: 255, b: 255 } } })
+      .composite([{ input: mitAlpha }])
+      .jpeg({ quality: 92 })
+      .toBuffer();
+  } catch { return null; }
 }
 
 // v62: "24/410" -> 24 (mm). Erster plausibler Zahlenwert 10..100.
@@ -1502,11 +1581,11 @@ async function assemblePrompt(
   // Cap-Render (Split): NUR noch Cleanup — Freisteller auf weissem Studio-
   // Hintergrund, OHNE jede Farbaenderung (v48, DESIGN-ENTSCHEID). Das ist
   // das bewaehrte Preserve-Muster.
-  const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
+  const capPreservePrompt = `Keep this closure EXACTLY as shown in the reference image — identical shape, identical parts, identical proportions, identical colour, identical material and finish. Do NOT recolor it, do NOT change anything about the closure itself. Only place it cleanly on a pure white #FFFFFF seamless background (no grey tint, no gradient) with soft neutral lighting, centered. The image contains ONLY this closure exactly as in the reference; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`;
   // v51: Split-Cap darf eingefaerbt werden, wenn der Plan es sagt — gleicher
   // Cleanup, nur Farbe/Finish aendern sich (Geometrie-Lock wie v47).
   const capRecolorPrompt = (capPlanEinfaerben && capPlanFarbe)
-    ? `Recolor this closure to ${capFarbPhrase}${capPlanMetall ? '' : ' — mass-coloured plastic, not paint'}. Keep its EXACT shape: identical parts, identical proportions, every collar ring, step, edge, thread and the actuator shape stay exactly as in the reference image; change nothing but colour${capPlanMetall ? ' tone' : ' and finish'}. Place it cleanly on a seamless white studio background with soft neutral lighting, centered. The image contains ONLY this closure; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`
+    ? `Recolor this closure to ${capFarbPhrase}${capPlanMetall ? '' : ' — mass-coloured plastic, not paint'}. Keep its EXACT shape: identical parts, identical proportions, every collar ring, step, edge, thread and the actuator shape stay exactly as in the reference image; change nothing but colour${capPlanMetall ? ' tone' : ' and finish'}. Place it cleanly on a pure white #FFFFFF seamless background (no grey tint, no gradient) with soft neutral lighting, centered. The image contains ONLY this closure; do NOT add, invent or draw any bottle, jar, vial, container, housing, sleeve, cylinder or chamber — the pump shaft or dip tube stays exactly as shown, nothing added around it. No text, no label, no logo, no lettering anywhere.`
     : null;
   const capPrompt = split ? (capRecolorPrompt || capPreservePrompt) : null;
 
@@ -2090,17 +2169,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const log: string[] = [];
         if (!montiert) {
           // v56: Mess-Buffer wird wiederverwendet (kein Doppel-Download);
-          // beim Komposit haengt das Bild bereits am Record.
-          const imgBuffer: Buffer = bodyBuf || Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 45000, label: 'fal img download' })).arrayBuffer());
+          // beim Komposit haengt das Bild bereits am Record. v63: Split-
+          // Bodys werden weiss-normalisiert gespeichert (Stapel bleibt sauber).
+          const roh: Buffer = bodyBuf || Buffer.from(await (await fetchT(renderingUrl, { timeoutMs: 45000, label: 'fal img download' })).arrayBuffer());
+          const imgBuffer: Buffer = bodyBuf ? ((await aufWeiss(roh)) || roh) : roh;
           if (!(await ladeAttachmentHoch(cacheId, CACHE_IMAGE_FIELD, imgBuffer, `render_${sys.fields['Page Titel'] || systemId}_${tier}_${Date.now()}.jpg`))) {
             await cachePatch(cacheId, { Status: 'Error', Render_Log: 'Bild-Upload fehlgeschlagen' }).catch(() => null);
             return;
           }
         }
-        // v60: im Montage-Fall den Body-Einzelrender zusaetzlich sichern.
+        // v60: im Montage-Fall den Body-Einzelrender zusaetzlich sichern
+        // (v63: weiss-normalisiert).
         if (montiert && bodyBuf) {
           try {
-            if (!(await ladeAttachmentHoch(cacheId, CACHE_BODY_IMAGE_FIELD, bodyBuf, `body_${sys.fields['Page Titel'] || systemId}_${Date.now()}.jpg`))) {
+            const bodyWeiss = (await aufWeiss(bodyBuf)) || bodyBuf;
+            if (!(await ladeAttachmentHoch(cacheId, CACHE_BODY_IMAGE_FIELD, bodyWeiss, `body_${sys.fields['Page Titel'] || systemId}_${Date.now()}.jpg`))) {
               log.push('Body-Upload fehlgeschlagen');
             }
           } catch (e) { log.push(`Body-Upload fehlgeschlagen: ${String(e).slice(0, 500)}`); }
@@ -2108,7 +2191,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // Cap-Bild IMMER zusaetzlich als echten Anhang (auch beim Komposit).
         if (capUrlFuerPersist) {
           try {
-            const capUpBuf = capBuf || Buffer.from(await (await fetchT(capUrlFuerPersist, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
+            const capRoh = capBuf || Buffer.from(await (await fetchT(capUrlFuerPersist, { timeoutMs: 30000, label: 'fal cap download' })).arrayBuffer());
+            const capUpBuf = (await aufWeiss(capRoh)) || capRoh; // v63
             if (!(await ladeAttachmentHoch(cacheId, CACHE_CAP_IMAGE_FIELD, capUpBuf, `cap_${resolvedCapId || 'cap'}_${Date.now()}.jpg`))) {
               log.push('Cap-Upload fehlgeschlagen');
             }
