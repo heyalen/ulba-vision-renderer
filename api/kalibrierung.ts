@@ -142,7 +142,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     try { board = cf['Board'] ? JSON.parse(cf['Board']) : {}; } catch { board = {}; }
     await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}/${cacheId}`, {
       method: 'PATCH', headers: HDR(), label: 'cache flags',
-      body: JSON.stringify({ fields: { Cap_Scale: mont.capScale, Montage_Konfidenz: 'auto_ok', Board: JSON.stringify({ ...board, montiert: true }) } }),
+      body: JSON.stringify({ fields: { Cap_Scale: mont.capScale, Montage_Konfidenz: mont.diag.versatzIgnoriert ? 'pruefen' : 'auto_ok', Board: JSON.stringify({ ...board, montiert: true }) } }), // v73
     }).catch(() => null);
     // Frische Attachment-URL fuer die sofortige Anzeige holen.
     const nach = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}/${cacheId}`, { headers: HDR(), label: 'cache re-read' });
