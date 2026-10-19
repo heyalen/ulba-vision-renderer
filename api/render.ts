@@ -121,7 +121,9 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v63: adaptiver Hintergrund (Rand-Median statt fixem Weiss — grauer fal-
 // Studiogrund), Silhouetten-Maske beim Kompositieren (nie wieder ein
 // Hintergrund-Kasten), Cap_/Body_Bild weiss-normalisiert gespeichert.
-const RENDER_VERSION = 'v63';
+// v64: Agentur-Regel fuer Grafik-Motive — stilisiert statt fotorealistisch,
+// max. 1/4 der Fronthoehe, Deko_Dichte skaliert die Zurueckhaltung.
+const RENDER_VERSION = 'v64';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -931,6 +933,8 @@ type DesignCodeRec = {
   // v51: Bauplan-JSON (Design_Komponenten) — besitzt bei Vorhandensein den
   // Bild-Prompt exklusiv (v54: einzige Welt-Quelle fuer den Prompt).
   komponenten: string | null;
+  // v64: Deko-Dichte der Welt — Skalenhinweis fuer die Motiv-Groesse.
+  dekoDichte: number | null;
 };
 
 type Concept = {
@@ -1147,6 +1151,7 @@ async function assemblePrompt(
         })(),
         doNot: teileListe(fieldAny(f, ['Do_Not', 'Do_not', 'DoNot'])),
         komponenten: (() => { const v = fieldAny(f, ['Design_Komponenten']); return v ? String(v).trim() : null; })(),
+        dekoDichte: (() => { const v = fieldAny(f, ['Deko_Dichte']); return (v != null && v !== '' && !isNaN(Number(v))) ? Number(v) : null; })(),
       };
     });
 
@@ -1397,6 +1402,13 @@ async function assemblePrompt(
     } else {
       kompLines.push(bodyLineEn);
       umsetzung.push('Körperbehandlung wie Standard — keine Deko-Fähigkeiten getaggt');
+    }
+    // v64: AGENTUR-REGEL fuer Grafik-Motive — der Render ist Design-Inspo,
+    // kein Sticker-Produkt: Motive stilisiert, klein, beherrscht. Die
+    // Deko_Dichte der Welt skaliert die Zurueckhaltung zusaetzlich.
+    if (grafikSichtbar) {
+      const zurueckhaltend = code.dekoDichte != null && code.dekoDichte <= 3;
+      kompLines.push(`Any graphic motif is rendered as a refined, STYLIZED design element — flat or subtly illustrated, premium art direction — NEVER a large photorealistic image pasted onto the packaging. Maximum motif size about one quarter of the front height${zurueckhaltend ? ' (in this restrained, low-decoration world even smaller)' : ''}, elegantly placed and balanced with generous negative space. The packaging stays the hero; the motif supports it.`);
     }
     // v52: optionaler Farb-Charakter aus dem Bauplan ("deep, dark, rich —
     // never lavender") — verankert den Ton explizit gegen Verwaessern.
