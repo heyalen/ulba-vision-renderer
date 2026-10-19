@@ -78,8 +78,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { capId, cacheId, skala: skalaRoh, versatzY: versatzRoh } = (req.body || {}) as {
     capId?: string; cacheId?: string; skala?: number; versatzY?: number;
   };
-  const skala = typeof skalaRoh === 'number' && isFinite(skalaRoh) ? Math.min(1.2, Math.max(0.05, skalaRoh)) : null;
-  const versatzY = typeof versatzRoh === 'number' && isFinite(versatzRoh) ? Math.min(60, Math.max(0, versatzRoh)) : null;
+  // v63: Hand-Werte gewinnen roh — weite Grenzen (5%..200% Breite, 0..90%
+  // Hoehe), nie auf die Auto-Grenzen geclampt.
+  const skala = typeof skalaRoh === 'number' && isFinite(skalaRoh) ? Math.min(2, Math.max(0.05, skalaRoh)) : null;
+  const versatzY = typeof versatzRoh === 'number' && isFinite(versatzRoh) ? Math.min(90, Math.max(0, versatzRoh)) : null;
   if (!capId || !REC.test(capId) || !cacheId || !REC.test(cacheId) || skala == null) {
     return res.status(400).json({ error: 'capId, cacheId und skala sind erforderlich' });
   }
