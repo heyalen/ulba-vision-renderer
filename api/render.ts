@@ -143,7 +143,10 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v71: Label_Im_Render-Freigabeschalter (Label/Motiv nur noch kuratiert in
 // den Prompt, sonst Material-Look) + Kalibrier-Zentrier-Fix (neckCx als
 // Plateau-Mittel; Hand-Montage zentriert auf die Silhouetten-Mitte).
-const RENDER_VERSION = 'v71';
+// v73: Kalibrier-Versatz im richtigen Bezugsrahmen (UI-Unterkante = volle
+// Cap-Bildbox inkl. Tauchrohr -> Rohr-Rest wird abgezogen) + Hals-Band-
+// Plausibilitaet (ausserhalb -> Auto-Anker + Konfidenz 'pruefen').
+const RENDER_VERSION = 'v73';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -320,6 +323,8 @@ export type MontageKal = {
 type MontageDiag = {
   hand: boolean; capKomponenten: number; capHFrac: number;
   neckStabil: boolean; neckFrac: number; bodyMaxFrac: number;
+  // v73: Hand-Versatz lag ausserhalb des Hals-Bands und wurde ignoriert.
+  versatzIgnoriert: boolean;
 };
 export async function montiereKomposit(
   bodyBuf: Buffer, capBuf: Buffer, closureText: string, kal?: MontageKal | null
@@ -401,9 +406,23 @@ export async function montiereKomposit(
     if (!hand && (capH < 0.04 * pb.h || capH - overlap < 0.03 * pb.h)) return null;
     // Cap-Unterkante: Hand-Versatz (absolut, % der Body-Bildhoehe) oder
     // Auto-Anker = Hals-Oberkante + Ueberlappung.
-    const capBottomN = (hand && typeof kal?.versatzY === 'number')
-      ? Math.max(8, Math.min(pb.h, Math.round(kal.versatzY / 100 * pb.h)))
-      : bodyTopN + overlap;
+    // v73: Das UI meint die Unterkante der VOLLEN Cap-Bildbox (inkl.
+    // Tauchrohr/Unterrand) — der montierte Cap ist aber rohr-gecroppt.
+    // Der Rest unterhalb des Crops wird abgezogen (JAPA-Befund: Versatz 73%
+    // = Rohr-Ende, Pumpkopf landete mitten in der Flasche). Danach harte
+    // Plausibilitaet: die Crop-Unterkante muss im Hals-Band liegen
+    // [Hals-Oberkante - 2% .. + 18% der Body-Hoehe], sonst Auto + pruefen.
+    let versatzIgnoriert = false;
+    let capBottomN = bodyTopN + overlap;
+    if (hand && typeof kal?.versatzY === 'number') {
+      const fSkal = zielW / cropW;
+      const rohrRest = Math.max(0, Math.round((pc.h - (cropT + cropH)) * fSkal));
+      const kandidat = Math.round(kal.versatzY / 100 * pb.h) - rohrRest;
+      const bandMin = bodyTopN - Math.round(0.02 * pb.h);
+      const bandMax = bodyTopN + Math.round(0.18 * pb.h);
+      if (kandidat >= bandMin && kandidat <= bandMax) capBottomN = Math.max(8, kandidat);
+      else versatzIgnoriert = true;
+    }
     const erweiterung = Math.max(0, capH - capBottomN);
     // v71: Hand-Kalibrierung zentriert auf die KOERPER-Silhouetten-Mitte
     // (das UI snappt auf Mitte); Auto bleibt am Hals-Zentrum.
@@ -429,6 +448,7 @@ export async function montiereKomposit(
         })();
     const diag: MontageDiag = {
       hand,
+      versatzIgnoriert,
       capKomponenten: pc.nSignifikant,
       capHFrac: capH / pb.h,
       neckStabil: pb.neckStabil,
@@ -2285,7 +2305,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // Auto wird geprueft (Mehrfach-Komponenten, knappe Guards,
           // instabiler Hals, Faktor ausserhalb [0.2, 0.55], Neck_Norm-Anker).
           if (mont.diag.hand) {
-            konfidenz = 'auto_ok';
+            konfidenz = mont.diag.versatzIgnoriert ? 'pruefen' : 'auto_ok'; // v73
           } else {
             let pruefen = false;
             if (mont.diag.capKomponenten > 1) pruefen = true;
