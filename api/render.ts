@@ -135,7 +135,10 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v68: Schema v2 (volles Designer-Spec: Material-Anmutungen, Label-Form/
 // Raender, Farbigkeit, strukturierte Akzente, Stimmung) + DESIGN-DNA-
 // Absatz als treuer Referenz-Block im Bild-Prompt.
-const RENDER_VERSION = 'v68';
+// v69: harte Label-Grenze fuer jeden Label-Typ (Breite/Hoehe in %, Behaelter
+// rundum sichtbar, Bild bleibt INNERHALB des Labels) — label.groesse_prozent/
+// breite_prozent aus dem Bauplan, Fallback front_panel ~70% x 55%.
+const RENDER_VERSION = 'v69';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -1320,7 +1323,7 @@ async function assemblePrompt(
     };
     // v67: typ unterscheidet Uni-Label von vollflaechigen Bild-Labels.
     // v68: form/raender/material_anmutung — volles Designer-Spec.
-    label?: { vorhanden?: boolean; farbe?: string | null; abdeckung?: string | null; stil?: string | null; typ?: string | null; form?: string | null; raender?: string | null; material_anmutung?: string | null };
+    label?: { vorhanden?: boolean; farbe?: string | null; abdeckung?: string | null; stil?: string | null; typ?: string | null; form?: string | null; raender?: string | null; material_anmutung?: string | null; groesse_prozent?: number | null; breite_prozent?: number | null };
     verschluss?: { farbe?: string; finish?: string; material_anmutung?: string | null };
     // v68: Akzente auch strukturiert {element, position, farbe}; dazu
     // stimmung + design_dna (dichter Designer-Prosa-Absatz fuer den Prompt).
@@ -1405,7 +1408,7 @@ async function assemblePrompt(
     const vollbildLabelEn = (ort: string): string => {
       const art = labelTyp === 'vollbild_foto' ? 'photographic image' : 'illustrated artwork';
       const szene = komp!.grafik?.komposition !== 'freisteller';
-      return `Add a label ${ort}. The label is a FULL-BLEED ${art} covering the entire label area edge to edge: ${szene ? `a macro close-up scene of ${grafikTxt || 'the motif'} with natural depth of field, rich and atmospheric — NOT an isolated object on a plain background` : `${grafikTxt || 'the motif'} as edge-to-edge artwork`}, no white label border visible, NO text, no letters, no logos.${labelCharEn()}${farbigkeitEn()}`;
+      return `Add a label ${ort}. The label is a FULL-BLEED ${art} covering the entire label area edge to edge: ${szene ? `a macro close-up scene of ${grafikTxt || 'the motif'} with natural depth of field, rich and atmospheric — NOT an isolated object on a plain background` : `${grafikTxt || 'the motif'} as edge-to-edge artwork`}, no white label border visible, NO text, no letters, no logos.${labelGrenzeEn()}${labelCharEn()}${farbigkeitEn()}`;
     };
     kompVollbildLabel = vollbildLabel;
     // v68: Designer-Spec-Helfer — Label-Charakter + Farbigkeit des Motivs.
@@ -1419,6 +1422,19 @@ async function assemblePrompt(
         l.material_anmutung ? `with a ${l.material_anmutung} look` : '',
       ].filter(Boolean).join(', ');
       return teile ? ` The label: ${teile}.` : '';
+    };
+    // v69: harte LABEL-GRENZE fuer jeden Label-Typ — sonst flutet ein Bild-
+    // Motiv die ganze Flasche (Brigitte-Erdbeere). Masse aus dem Bauplan,
+    // Fallback nach Abdeckung (front_panel ~70% x 55%).
+    const labelGrenzeEn = (): string => {
+      const l = komp!.label || {};
+      const ab = l.abdeckung || 'front_panel';
+      if (ab === 'wrap') return ' The label wraps around the container as one clean band; the container material stays clearly visible above and below it; the artwork stays strictly INSIDE the label band — it never floods the whole container.';
+      const num = (v: unknown) => (typeof v === 'number' && v > 0 && v <= 100) ? Math.round(v) : null;
+      const h = num(l.groesse_prozent) ?? (ab === 'seitlich' || ab === 'partiell' ? 50 : 55);
+      const w = num(l.breite_prozent) ?? (ab === 'seitlich' || ab === 'partiell' ? 33 : 70);
+      const flaeche = istTiegel ? 'the side wall' : 'the front';
+      return ` The label is crisp and sharp-edged, occupying about ${w}% of ${flaeche} width and ${h}% of its height; the container material stays clearly visible around ALL edges of the label; the image stays strictly INSIDE the label boundary — it never floods the whole container.`;
     };
     const farbigkeitEn = (): string => {
       const f = String(komp!.grafik?.farbigkeit || '').trim();
@@ -1443,7 +1459,7 @@ async function assemblePrompt(
           kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. ${vollbildLabelEn(labelOrtEn(komp.label?.abdeckung))}`);
           umsetzung.push(`Vollflächiges ${labelTyp === 'vollbild_foto' ? 'Foto' : 'Illustrations'}-Label ${labelOrtDe} — die Behälterfarbe bleibt sichtbar`);
         } else {
-          kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, printed edge to edge on the label, smooth flat edges, NO text, no letters, no logos.`);
+          kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, printed edge to edge on the label, smooth flat edges, NO text, no letters, no logos.${labelGrenzeEn()}`);
           umsetzung.push(`${verlauf ? 'Verlauf' : 'Farbwelt'} als Etikett ${labelOrtDe} — die Behälterfarbe ist fix und bleibt sichtbar`);
         }
         labelTraegtWelt = true;
@@ -1455,7 +1471,7 @@ async function assemblePrompt(
       kompLines.push(`Apply the design world as DIRECT PRINT onto the container surface: ${weltBildEn}. The print lies flat on the material and follows its curvature${b.transparenz !== 'opak' ? `; the container wall itself stays ${transparenzEn}` : ''}. ${b.finish ? `The surface has ${kFinishEn}.` : ''} NO text, no letters, no logos in the print.`);
       umsetzung.push(`${verlauf ? 'Verlauf' : 'Grafik'} als Direktdruck auf den Körper`);
     } else if ((verlauf || grafikSichtbar) && kannEtikett) {
-      kompLines.push(`Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, smooth flat edges, NO text, no logos. The container material outside the label stays untouched.`);
+      kompLines.push(`Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, smooth flat edges, NO text, no logos. The container material outside the label stays untouched.${labelGrenzeEn()}`);
       labelTraegtWelt = true;
       umsetzung.push(`${verlauf ? 'Verlauf' : 'Grafik'} als Etikett ${labelOrtDe} — Direktdruck ist auf diesem Teil nicht verfügbar`);
     } else if ((kannMasse || kannLack) && b.farbe) {
@@ -1522,7 +1538,7 @@ async function assemblePrompt(
         kompLines.push(vollbildLabelEn(labelOrtEn(komp.label.abdeckung)));
         umsetzung.push(`Vollflächiges ${labelTyp === 'vollbild_foto' ? 'Foto' : 'Illustrations'}-Label ${labelOrtDe}`);
       } else {
-        kompLines.push(`Add a clean ${komp.label.farbe || '#FFFFFF'} label ${labelOrtEn(komp.label.abdeckung)}${komp.label.stil ? ` — ${komp.label.stil}` : ''}; smooth flat edges, NO text, no letters, no logos on it.${labelCharEn()}`);
+        kompLines.push(`Add a clean ${komp.label.farbe || '#FFFFFF'} label ${labelOrtEn(komp.label.abdeckung)}${komp.label.stil ? ` — ${komp.label.stil}` : ''}; smooth flat edges, NO text, no letters, no logos on it.${labelGrenzeEn()}${labelCharEn()}`);
         umsetzung.push(`${komp.label.farbe === '#FFFFFF' || !komp.label.farbe ? 'Weisses' : 'Farbiges'} Label ${labelOrtDe}`);
       }
     }
