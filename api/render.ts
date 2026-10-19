@@ -138,7 +138,9 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v69: harte Label-Grenze fuer jeden Label-Typ (Breite/Hoehe in %, Behaelter
 // rundum sichtbar, Bild bleibt INNERHALB des Labels) — label.groesse_prozent/
 // breite_prozent aus dem Bauplan, Fallback front_panel ~70% x 55%.
-const RENDER_VERSION = 'v69';
+// v70: Anti-Letterbox — Vollbild-Szenen fuellen Label bzw. Druckflaeche
+// randlos, keine schwarzen/weissen/farbigen Balken (JAPA-Befund).
+const RENDER_VERSION = 'v70';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -1408,7 +1410,7 @@ async function assemblePrompt(
     const vollbildLabelEn = (ort: string): string => {
       const art = labelTyp === 'vollbild_foto' ? 'photographic image' : 'illustrated artwork';
       const szene = komp!.grafik?.komposition !== 'freisteller';
-      return `Add a label ${ort}. The label is a FULL-BLEED ${art} covering the entire label area edge to edge: ${szene ? `a macro close-up scene of ${grafikTxt || 'the motif'} with natural depth of field, rich and atmospheric — NOT an isolated object on a plain background` : `${grafikTxt || 'the motif'} as edge-to-edge artwork`}, no white label border visible, NO text, no letters, no logos.${labelGrenzeEn()}${labelCharEn()}${farbigkeitEn()}`;
+      return `Add a label ${ort}. The label is a FULL-BLEED ${art} covering the entire label area edge to edge: ${szene ? `a macro close-up scene of ${grafikTxt || 'the motif'} with natural depth of field, rich and atmospheric — NOT an isolated object on a plain background` : `${grafikTxt || 'the motif'} as edge-to-edge artwork`}, no white label border visible. The ${labelTyp === 'vollbild_foto' ? 'photograph' : 'artwork'} is cropped to the label's exact shape and fills the ENTIRE label edge to edge — no borders, frames, margins, letterbox or pillarbox bars of any colour (no black, white or coloured padding); the scene simply extends to all four label edges. NO text, no letters, no logos.${labelGrenzeEn()}${labelCharEn()}${farbigkeitEn()}`;
     };
     kompVollbildLabel = vollbildLabel;
     // v68: Designer-Spec-Helfer — Label-Charakter + Farbigkeit des Motivs.
@@ -1504,7 +1506,7 @@ async function assemblePrompt(
       const zurueckhaltend = code.dekoDichte != null && code.dekoDichte <= 3;
       if (g.traeger === 'koerper_direkt' && g.komposition === 'szene') {
         // v67: fotografische Szene DIREKT auf der Koerperflaeche, randlos.
-        kompLines.push(`Apply the motif as a FULL-BLEED photographic scene DIRECTLY on the container surface: a macro close-up of ${grafikTxt} with natural depth of field, rich and atmospheric, edge to edge across the printable area — NOT an isolated cutout object on a plain background, no label.`);
+        kompLines.push(`Apply the motif as a FULL-BLEED photographic scene DIRECTLY on the container surface: a macro close-up of ${grafikTxt} with natural depth of field, rich and atmospheric, edge to edge across the printable area — NOT an isolated cutout object on a plain background, no label. The scene is cropped to the printable area and fills it completely — no borders, frames, margins, letterbox or pillarbox bars of any colour (no black, white or coloured padding).`);
       } else if (g.stil) {
         const STIL_EN: Record<string, string> = {
           fotorealistisch: "photorealistic artwork, high quality, like the real product's key visual",
