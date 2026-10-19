@@ -126,7 +126,10 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v65: STILTREUE — grafik.{stil,stil_detail,groesse_prozent,position} aus
 // dem Bauplan wird exakt gerendert (fotorealistisch bleibt fotorealistisch);
 // die v64-Pauschale gilt nur noch fuer alte Bauplaene ohne stil-Feld.
-const RENDER_VERSION = 'v65';
+// v66: Streifen-Fix — Masken-Resize lieferte 3 Kanaele statt 1 (sharp
+// wandelt 1-Kanal-raw beim resize nach sRGB); toColourspace('b-w') +
+// harte Laengen-Checks. Bump invalidiert evtl. gestreifte v65-Hits.
+const RENDER_VERSION = 'v66';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -358,10 +361,15 @@ export async function montiereKomposit(
         maskRegion[y * cropWds + x] = pc.maskeBest[(pc.top + y) * pc.dsW + (pc.minL + x)];
       }
     }
+    // v65-Fix: resize() wandelt 1-Kanal-raw intern nach sRGB (3 Kanaele) —
+    // ohne toColourspace('b-w') war der Alphakanal zeilenversetzt (die
+    // horizontalen Weiss-Streifen). Hier wird 1 Kanal erzwungen + geprueft.
     const maskeKlein = await sharp(maskRegion, { raw: { width: cropWds, height: cropHds, channels: 1 } })
       .resize(zielW, capH, { fit: 'fill' })
+      .toColourspace('b-w')
       .raw()
       .toBuffer();
+    if (maskeKlein.length !== zielW * capH) return null; // nie wieder Stride-Salat
     const capKlein = await sharp(capRgb, { raw: { width: zielW, height: capH, channels: 3 } })
       .joinChannel(maskeKlein, { raw: { width: zielW, height: capH, channels: 1 } })
       .png()
@@ -416,11 +424,16 @@ async function aufWeiss(buf: Buffer): Promise<Buffer | null> {
   try {
     const p = await silhouettenProfil(buf);
     if (!p) return null;
+    // v65-Fix: toColourspace('b-w') erzwingt 1 Kanal nach dem Resize —
+    // sonst kam ein 3-Kanal-Buffer als "1-Kanal-Maske" an (Streifen).
     const maskNativ = await sharp(Buffer.from(p.maske), { raw: { width: p.dsW, height: p.dsH, channels: 1 } })
       .resize(p.w, p.h, { fit: 'fill' })
+      .toColourspace('b-w')
       .raw()
       .toBuffer();
+    if (maskNativ.length !== p.w * p.h) return null;
     const rgb = await sharp(buf).removeAlpha().raw().toBuffer();
+    if (rgb.length !== p.w * p.h * 3) return null; // z.B. Graustufen-Quelle
     const mitAlpha = await sharp(rgb, { raw: { width: p.w, height: p.h, channels: 3 } })
       .joinChannel(maskNativ, { raw: { width: p.w, height: p.h, channels: 1 } })
       .png()
