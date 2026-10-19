@@ -129,7 +129,13 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v66: Streifen-Fix — Masken-Resize lieferte 3 Kanaele statt 1 (sharp
 // wandelt 1-Kanal-raw beim resize nach sRGB); toColourspace('b-w') +
 // harte Laengen-Checks. Bump invalidiert evtl. gestreifte v65-Hits.
-const RENDER_VERSION = 'v66';
+// v67: vollflaechige Bild-Labels (label.typ vollbild_foto/illustration +
+// grafik.traeger/komposition) — randlose Foto-Szene statt weissem Label
+// mit Freisteller; koerper_direkt-Szenen direkt auf der Flaeche.
+// v68: Schema v2 (volles Designer-Spec: Material-Anmutungen, Label-Form/
+// Raender, Farbigkeit, strukturierte Akzente, Stimmung) + DESIGN-DNA-
+// Absatz als treuer Referenz-Block im Bild-Prompt.
+const RENDER_VERSION = 'v68';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -1302,16 +1308,25 @@ async function assemblePrompt(
   // Deterministisch, VOR dem Prompt-Bau. Erzeugt die EN-Prompt-Zeilen
   // (kompLines), den Cap-Plan und die deutschen umsetzung-Schritte.
   type Komponenten = {
-    behaelter?: { farbe?: string | null; verlauf?: { von?: string; nach?: string; richtung?: string } | null; transparenz?: string; produkt_sichtbar?: boolean; finish?: string; farb_hinweis?: string | null };
+    behaelter?: { farbe?: string | null; verlauf?: { von?: string; nach?: string; richtung?: string; gewichtung?: string | null } | null; transparenz?: string; produkt_sichtbar?: boolean; finish?: string; farb_hinweis?: string | null; material_anmutung?: string | null };
     grafik?: {
       beschreibung?: string; abdeckung?: string;
       // v65: strukturierter Motiv-Stil — stiltreu rendern statt Pauschalregel.
       vorhanden?: boolean; stil?: string; stil_detail?: string;
       groesse_prozent?: number; position?: string;
+      // v67: traeger (label|koerper_direkt) + komposition (szene|freisteller).
+      // v68: farbigkeit ("vollfarbig natuerlich"|"monochrom"|"duotone ...").
+      traeger?: string; komposition?: string; farbigkeit?: string | null;
     };
-    label?: { vorhanden?: boolean; farbe?: string | null; abdeckung?: string | null; stil?: string | null };
-    verschluss?: { farbe?: string; finish?: string };
-    akzente?: string[];
+    // v67: typ unterscheidet Uni-Label von vollflaechigen Bild-Labels.
+    // v68: form/raender/material_anmutung — volles Designer-Spec.
+    label?: { vorhanden?: boolean; farbe?: string | null; abdeckung?: string | null; stil?: string | null; typ?: string | null; form?: string | null; raender?: string | null; material_anmutung?: string | null };
+    verschluss?: { farbe?: string; finish?: string; material_anmutung?: string | null };
+    // v68: Akzente auch strukturiert {element, position, farbe}; dazu
+    // stimmung + design_dna (dichter Designer-Prosa-Absatz fuer den Prompt).
+    akzente?: Array<string | { element?: string; position?: string | null; farbe?: string | null }>;
+    stimmung?: string | null;
+    design_dna?: string | null;
   };
   let komp: Komponenten | null = null;
   try {
@@ -1333,6 +1348,9 @@ async function assemblePrompt(
   // true sobald der Plan ein Etikett vorsieht — dann faellt das pauschale
   // Label-Verbot aus den Preserve-Zeilen (No-Text bleibt global).
   let kompLabelGeplant = false;
+  // v67: true = das Label IST ein vollflaechiges Bild (dann darf die
+  // Studio-Zeile nicht "label stays blank" verlangen).
+  let kompVollbildLabel = false;
 
   if (komp) {
     const b = komp.behaelter || {};
@@ -1356,7 +1374,7 @@ async function assemblePrompt(
       horizontal: 'horizontally', diagonal: 'diagonally',
     };
     const verlaufEn = verlauf
-      ? `a smooth gradient from ${verlauf.von} to ${verlauf.nach}, running ${RICHTUNG_EN[verlauf.richtung || ''] || 'vertically'}`
+      ? `a smooth gradient from ${verlauf.von} to ${verlauf.nach}, running ${RICHTUNG_EN[verlauf.richtung || ''] || 'vertically'}${verlauf.gewichtung ? ` (${verlauf.gewichtung})` : ''}`
       : '';
     const weltBildEn = [verlauf ? verlaufEn : (b.farbe ? `the solid colour ${b.farbe}` : ''), grafikSichtbar ? grafikTxt : '']
       .filter(Boolean).join(', plus ') || 'the world colour';
@@ -1380,6 +1398,35 @@ async function assemblePrompt(
     };
     const labelOrtDe = istTiegel ? 'nur seitlich (Tiegel-Regel: nie über die Deckelkante)' : istTube ? 'auf der Front' : ({ front_panel: 'auf dem Front-Panel', wrap: 'als Rundum-Etikett', seitlich: 'seitlich versetzt als Teilfläche (ca. 1/3 der Front)', partiell: 'als Teilpanel (ca. 1/3 der Front)' } as Record<string, string>)[komp.label?.abdeckung || 'front_panel'] || 'auf dem Front-Panel';
 
+    // v67: vollflaechige Bild-Labels (Dr.-Althea-Muster: das Label IST eine
+    // randlose Foto-Szene, kein weisses Label mit Freisteller darauf).
+    const labelTyp = komp.label?.typ || 'uni';
+    const vollbildLabel = !!komp.label?.vorhanden && (labelTyp === 'vollbild_foto' || labelTyp === 'vollbild_illustration');
+    const vollbildLabelEn = (ort: string): string => {
+      const art = labelTyp === 'vollbild_foto' ? 'photographic image' : 'illustrated artwork';
+      const szene = komp!.grafik?.komposition !== 'freisteller';
+      return `Add a label ${ort}. The label is a FULL-BLEED ${art} covering the entire label area edge to edge: ${szene ? `a macro close-up scene of ${grafikTxt || 'the motif'} with natural depth of field, rich and atmospheric — NOT an isolated object on a plain background` : `${grafikTxt || 'the motif'} as edge-to-edge artwork`}, no white label border visible, NO text, no letters, no logos.${labelCharEn()}${farbigkeitEn()}`;
+    };
+    kompVollbildLabel = vollbildLabel;
+    // v68: Designer-Spec-Helfer — Label-Charakter + Farbigkeit des Motivs.
+    const labelCharEn = (): string => {
+      const l = komp!.label || {};
+      const FORM_L: Record<string, string> = { 'rechteckig scharfkantig': 'a sharp-cornered rectangular label', 'abgerundet': 'a rounded-corner label', 'rund': 'a round label' };
+      const RAND_L: Record<string, string> = { 'randlos': 'full-bleed with no border', 'schmaler weisser rand': 'with a thin white border' };
+      const teile = [
+        l.form ? (FORM_L[String(l.form).toLowerCase()] || `${l.form} shape`) : '',
+        l.raender ? (RAND_L[String(l.raender).toLowerCase()] || String(l.raender)) : '',
+        l.material_anmutung ? `with a ${l.material_anmutung} look` : '',
+      ].filter(Boolean).join(', ');
+      return teile ? ` The label: ${teile}.` : '';
+    };
+    const farbigkeitEn = (): string => {
+      const f = String(komp!.grafik?.farbigkeit || '').trim();
+      if (!f) return '';
+      const map: Record<string, string> = { 'vollfarbig natürlich': 'natural full colour', 'vollfarbig natuerlich': 'natural full colour', 'monochrom': 'monochrome' };
+      return ` Colour treatment of the artwork: ${map[f.toLowerCase()] || f}.`;
+    };
+
     const farbeFix = deko.has('farbe_fix');
     const kannMasse = deko.has('einfaerbung_masse');
     const kannDruck = deko.has('direktdruck');
@@ -1392,9 +1439,14 @@ async function assemblePrompt(
       // Behaelterfarbe unantastbar (z.B. Braunglas) -> Welt wandert auf
       // Etikett (bevorzugt) oder Direktdruck; das Material bleibt sichtbar.
       if (kannEtikett) {
-        kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, printed edge to edge on the label, smooth flat edges, NO text, no letters, no logos.`);
+        if (vollbildLabel) {
+          kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. ${vollbildLabelEn(labelOrtEn(komp.label?.abdeckung))}`);
+          umsetzung.push(`Vollflächiges ${labelTyp === 'vollbild_foto' ? 'Foto' : 'Illustrations'}-Label ${labelOrtDe} — die Behälterfarbe bleibt sichtbar`);
+        } else {
+          kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible — do not recolor, tint or coat it; e.g. amber glass stays amber glass. Apply the design world as a clean label ${labelOrtEn(komp.label?.abdeckung)}: the label carries ${weltBildEn}, printed edge to edge on the label, smooth flat edges, NO text, no letters, no logos.`);
+          umsetzung.push(`${verlauf ? 'Verlauf' : 'Farbwelt'} als Etikett ${labelOrtDe} — die Behälterfarbe ist fix und bleibt sichtbar`);
+        }
         labelTraegtWelt = true;
-        umsetzung.push(`${verlauf ? 'Verlauf' : 'Farbwelt'} als Etikett ${labelOrtDe} — die Behälterfarbe ist fix und bleibt sichtbar`);
       } else {
         kompLines.push(`The container material and its own colour stay COMPLETELY untouched and visible. Apply the design world as direct print on the surface: ${weltBildEn}, covering only part of the surface, NO text, no logos.`);
         umsetzung.push(`${verlauf ? 'Verlauf' : 'Farbwelt'} als Direktdruck — die Behälterfarbe ist fix`);
@@ -1429,10 +1481,15 @@ async function assemblePrompt(
     // Clinical IST das fotorealistische Frucht-Artwork die Signatur). Der
     // extrahierte Motiv-Stil wird exakt gerendert; der Agentur-Guard bleibt
     // nur als Drift-Schutz. Alte Bauplaene ohne stil-Feld -> v64-Verhalten.
-    if (grafikSichtbar) {
+    if (grafikSichtbar && !vollbildLabel) {
+      // (v67: traegt das LABEL das Bild vollflaechig, kommt die Zeile aus
+      // dem Label-Baustein — hier nur Motive auf Koerper/Uni-Label.)
       const g = komp.grafik!;
       const zurueckhaltend = code.dekoDichte != null && code.dekoDichte <= 3;
-      if (g.stil) {
+      if (g.traeger === 'koerper_direkt' && g.komposition === 'szene') {
+        // v67: fotografische Szene DIREKT auf der Koerperflaeche, randlos.
+        kompLines.push(`Apply the motif as a FULL-BLEED photographic scene DIRECTLY on the container surface: a macro close-up of ${grafikTxt} with natural depth of field, rich and atmospheric, edge to edge across the printable area — NOT an isolated cutout object on a plain background, no label.`);
+      } else if (g.stil) {
         const STIL_EN: Record<string, string> = {
           fotorealistisch: "photorealistic artwork, high quality, like the real product's key visual",
           line_art_outline: 'a fine 2D outline / line-art illustration',
@@ -1448,6 +1505,8 @@ async function assemblePrompt(
         // v64-Fallback fuer alte grafik-Objekte ohne Stil-Felder.
         kompLines.push(`Any graphic motif is rendered as a refined, STYLIZED design element — flat or subtly illustrated, premium art direction — NEVER a large photorealistic image pasted onto the packaging. Maximum motif size about one quarter of the front height${zurueckhaltend ? ' (in this restrained, low-decoration world even smaller)' : ''}, elegantly placed and balanced with generous negative space. The packaging stays the hero; the motif supports it.`);
       }
+      const fbTxt = farbigkeitEn(); // v68
+      if (fbTxt) kompLines.push(fbTxt.trim());
     }
     // v52: optionaler Farb-Charakter aus dem Bauplan ("deep, dark, rich —
     // never lavender") — verankert den Ton explizit gegen Verwaessern.
@@ -1459,16 +1518,31 @@ async function assemblePrompt(
 
     // ── 2) Welt-Label (eigener Baustein, falls nicht schon Welt-Traeger) ─
     if (komp.label?.vorhanden && !labelTraegtWelt && kannEtikett) {
-      kompLines.push(`Add a clean ${komp.label.farbe || '#FFFFFF'} label ${labelOrtEn(komp.label.abdeckung)}${komp.label.stil ? ` — ${komp.label.stil}` : ''}; smooth flat edges, NO text, no letters, no logos on it.`);
-      umsetzung.push(`${komp.label.farbe === '#FFFFFF' || !komp.label.farbe ? 'Weisses' : 'Farbiges'} Label ${labelOrtDe}`);
+      if (vollbildLabel) {
+        kompLines.push(vollbildLabelEn(labelOrtEn(komp.label.abdeckung)));
+        umsetzung.push(`Vollflächiges ${labelTyp === 'vollbild_foto' ? 'Foto' : 'Illustrations'}-Label ${labelOrtDe}`);
+      } else {
+        kompLines.push(`Add a clean ${komp.label.farbe || '#FFFFFF'} label ${labelOrtEn(komp.label.abdeckung)}${komp.label.stil ? ` — ${komp.label.stil}` : ''}; smooth flat edges, NO text, no letters, no logos on it.${labelCharEn()}`);
+        umsetzung.push(`${komp.label.farbe === '#FFFFFF' || !komp.label.farbe ? 'Weisses' : 'Farbiges'} Label ${labelOrtDe}`);
+      }
     }
 
     kompLabelGeplant = labelTraegtWelt || !!(komp.label?.vorhanden && kannEtikett);
 
-    // ── 3) Akzente ───────────────────────────────────────────────────
+    // ── 3) Akzente (v68: auch strukturiert {element, position, farbe}) ──
     if (Array.isArray(komp.akzente) && komp.akzente.length) {
-      kompLines.push(`Accents, exactly as listed and nothing more: ${komp.akzente.slice(0, 3).join('; ')}.`);
+      const AKZ_EN: Record<string, string> = { gold_ring: 'a thin gold ring', praegung: 'an embossed detail', band: 'a band' };
+      const akzTexte = komp.akzente.slice(0, 3).map(a => {
+        if (typeof a === 'string') return a;
+        if (!a || typeof a !== 'object') return '';
+        const el = a.element ? (AKZ_EN[a.element] || String(a.element).replace(/_/g, ' ')) : '';
+        return [el, a.farbe ? `in ${a.farbe}` : '', a.position ? `at ${a.position}` : ''].filter(Boolean).join(' ');
+      }).filter(Boolean);
+      if (akzTexte.length) kompLines.push(`Accents, exactly as listed and nothing more: ${akzTexte.join('; ')}.`);
     }
+    // v68: Material-Anmutung + Stimmung aus dem Designer-Spec.
+    if (b.material_anmutung) kompLines.push(`Material character: the container reads as ${b.material_anmutung}.`);
+    if (komp.stimmung) kompLines.push(`Overall mood: ${String(komp.stimmung).trim()} — carried by the product's colours, finishes and light balance (the studio background itself stays pure white).`);
 
     // ── 4) Verschluss-Plan ───────────────────────────────────────────
     // v55 (Alens Regel): Die Cap-WAHL bestimmt nur Mechanik/Geometrie — die
@@ -1480,6 +1554,7 @@ async function assemblePrompt(
     const vFarbe = komp.verschluss?.farbe || null;
     const CAP_FIN_K: Record<string, string> = { matt: 'a clean matt finish', glossy: 'a clean glossy finish', metallic: 'a polished metallic finish' };
     capPlanFinishEn = CAP_FIN_K[komp.verschluss?.finish || 'matt'] || CAP_FIN_K.matt;
+    if (komp.verschluss?.material_anmutung) capPlanFinishEn += `, reading as ${komp.verschluss.material_anmutung}`; // v68
     const zielMetallic = komp.verschluss?.finish === 'metallic' || istMetallTon(vFarbe);
     if (vFarbe) {
       // Fall A ohne Cap-Record: der Verschluss im Foto; Metall-Hinweis aus
@@ -1499,6 +1574,13 @@ async function assemblePrompt(
         // passender Varianten-Empfehlung) — hier nur der Umsetzungs-Schritt.
         umsetzung.push(`Verschluss bleibt wie fotografiert (Metall, Welt-Look nicht metallisch) — die Welt sieht ${vFarbe} vor`);
       }
+    }
+
+    // ── 5) v68: DESIGN DNA — dichter Referenz-Absatz NACH den
+    // mechanischen Zeilen; strukturierte Regeln oben gewinnen bei Konflikt.
+    const dna = String(komp.design_dna || '').trim();
+    if (dna) {
+      kompLines.push(`DESIGN DNA (faithful reference description): ${dna.slice(0, 900)} — reproduce these design characteristics faithfully on THIS container; the structured rules above take precedence on any conflict; never copy brand names or lettering.`);
     }
   }
 
@@ -1552,7 +1634,11 @@ async function assemblePrompt(
     // Transparenz-Verbote rausfiltern, wenn die Wand sichtbar klar bleibt.
     ? code.doNot.filter(d => !/transparen|durchsichtig|klarglas/i.test(d))
     : code.doNot);
-  const studioLine = kompLabelGeplant
+  const studioLine = kompVollbildLabel
+    // v67: das Label IST ein vollflaechiges Bild — nur No-Text, kein
+    // "blank label"-Zwang (der wuerde die Foto-Szene wegbuegeln).
+    ? `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no letters, no numbers, no logo anywhere on the product.`
+    : kompLabelGeplant
     // v51: Label ist geplant — das Verbot schrumpft auf No-Text (das Etikett
     // selbst bleibt komplett blanko).
     ? `Clean seamless white studio background, soft neutral lighting, centered product packshot. No text, no letters, no numbers, no logo anywhere on the product — any label stays completely blank.`
