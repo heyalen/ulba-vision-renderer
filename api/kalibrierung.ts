@@ -99,7 +99,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const cacheRes = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}/${cacheId}`, { headers: HDR(), label: 'cache read' });
     if (!cacheRes.ok) throw new Error(`Cache-Read: ${cacheRes.status}`);
     const cf = ((await cacheRes.json()) as any)?.fields || {};
-    const bodyUrl = anhang(cf['Body_Bild']) || anhang(cf['Bild']);
+    // v73: Bild als Body-Fallback NUR, wenn es kein Komposit ist — sonst
+    // wuerde der Cap auf ein fertiges Bild montiert (JAPA-Befund 1792x2496).
+    let bildIstKomposit = false;
+    try { bildIstKomposit = (cf['Board'] ? JSON.parse(cf['Board']) : {})?.montiert === true; } catch { bildIstKomposit = false; }
+    const bodyUrl = anhang(cf['Body_Bild']) || (!bildIstKomposit ? anhang(cf['Bild']) : null);
     const capUrl = anhang(cf['Cap_Bild']);
     if (!bodyUrl || !capUrl) {
       return res.status(422).json({ error: 'Diesem Render fehlen gespeicherte Einzelbilder (Body_Bild/Cap_Bild) — bitte frisch rendern, dann anpassen.' });
