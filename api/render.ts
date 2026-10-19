@@ -123,7 +123,10 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // Hintergrund-Kasten), Cap_/Body_Bild weiss-normalisiert gespeichert.
 // v64: Agentur-Regel fuer Grafik-Motive — stilisiert statt fotorealistisch,
 // max. 1/4 der Fronthoehe, Deko_Dichte skaliert die Zurueckhaltung.
-const RENDER_VERSION = 'v64';
+// v65: STILTREUE — grafik.{stil,stil_detail,groesse_prozent,position} aus
+// dem Bauplan wird exakt gerendert (fotorealistisch bleibt fotorealistisch);
+// die v64-Pauschale gilt nur noch fuer alte Bauplaene ohne stil-Feld.
+const RENDER_VERSION = 'v65';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -1287,7 +1290,12 @@ async function assemblePrompt(
   // (kompLines), den Cap-Plan und die deutschen umsetzung-Schritte.
   type Komponenten = {
     behaelter?: { farbe?: string | null; verlauf?: { von?: string; nach?: string; richtung?: string } | null; transparenz?: string; produkt_sichtbar?: boolean; finish?: string; farb_hinweis?: string | null };
-    grafik?: { beschreibung?: string; abdeckung?: string };
+    grafik?: {
+      beschreibung?: string; abdeckung?: string;
+      // v65: strukturierter Motiv-Stil — stiltreu rendern statt Pauschalregel.
+      vorhanden?: boolean; stil?: string; stil_detail?: string;
+      groesse_prozent?: number; position?: string;
+    };
     label?: { vorhanden?: boolean; farbe?: string | null; abdeckung?: string | null; stil?: string | null };
     verschluss?: { farbe?: string; finish?: string };
     akzente?: string[];
@@ -1317,7 +1325,8 @@ async function assemblePrompt(
     const b = komp.behaelter || {};
     const verlauf = (b.verlauf && b.verlauf.von && b.verlauf.nach) ? b.verlauf : null;
     const grafikTxt = String(komp.grafik?.beschreibung || '').trim();
-    const grafikSichtbar = !!komp.grafik && komp.grafik.abdeckung !== 'keine' && grafikTxt && grafikTxt.toLowerCase() !== 'none';
+    const grafikSichtbar = !!komp.grafik && komp.grafik.vorhanden !== false
+      && komp.grafik.abdeckung !== 'keine' && grafikTxt && grafikTxt.toLowerCase() !== 'none';
     const TRANS_EN: Record<string, string> = {
       opak: 'opaque', transparent: 'clear transparent',
       leicht_transparent: 'lightly translucent', getoent: 'tinted translucent',
@@ -1403,12 +1412,29 @@ async function assemblePrompt(
       kompLines.push(bodyLineEn);
       umsetzung.push('Körperbehandlung wie Standard — keine Deko-Fähigkeiten getaggt');
     }
-    // v64: AGENTUR-REGEL fuer Grafik-Motive — der Render ist Design-Inspo,
-    // kein Sticker-Produkt: Motive stilisiert, klein, beherrscht. Die
-    // Deko_Dichte der Welt skaliert die Zurueckhaltung zusaetzlich.
+    // v65: STILTREUE statt Pauschalregel (Alens Kurskorrektur — bei Amber
+    // Clinical IST das fotorealistische Frucht-Artwork die Signatur). Der
+    // extrahierte Motiv-Stil wird exakt gerendert; der Agentur-Guard bleibt
+    // nur als Drift-Schutz. Alte Bauplaene ohne stil-Feld -> v64-Verhalten.
     if (grafikSichtbar) {
+      const g = komp.grafik!;
       const zurueckhaltend = code.dekoDichte != null && code.dekoDichte <= 3;
-      kompLines.push(`Any graphic motif is rendered as a refined, STYLIZED design element — flat or subtly illustrated, premium art direction — NEVER a large photorealistic image pasted onto the packaging. Maximum motif size about one quarter of the front height${zurueckhaltend ? ' (in this restrained, low-decoration world even smaller)' : ''}, elegantly placed and balanced with generous negative space. The packaging stays the hero; the motif supports it.`);
+      if (g.stil) {
+        const STIL_EN: Record<string, string> = {
+          fotorealistisch: "photorealistic artwork, high quality, like the real product's key visual",
+          line_art_outline: 'a fine 2D outline / line-art illustration',
+          flat_illustration: 'a flat premium illustration',
+          aquarell: 'a soft watercolour illustration',
+          geometrisch: 'a clean geometric graphic',
+          typografisch: 'a typographic graphic treatment (still NO readable text — abstract letterform shapes only)',
+        };
+        const stilEn = STIL_EN[g.stil] || g.stil_detail || 'the exact execution style of the reference design world';
+        const gp = (typeof g.groesse_prozent === 'number' && g.groesse_prozent > 0) ? Math.min(100, Math.round(g.groesse_prozent)) : null;
+        kompLines.push(`Render the motif EXACTLY in this execution style: ${stilEn}${g.stil_detail && STIL_EN[g.stil] ? ` — ${g.stil_detail}` : ''}.${gp ? ` Motif size: about ${gp}% of the front height (stay within ±10%).` : ` Motif size: modest and balanced${zurueckhaltend ? ', rather small (low decoration density)' : ''}.`}${g.position ? ` Position: ${g.position}.` : ''} Never larger than specified, never a different style than specified — balanced, premium composition.`);
+      } else {
+        // v64-Fallback fuer alte grafik-Objekte ohne Stil-Felder.
+        kompLines.push(`Any graphic motif is rendered as a refined, STYLIZED design element — flat or subtly illustrated, premium art direction — NEVER a large photorealistic image pasted onto the packaging. Maximum motif size about one quarter of the front height${zurueckhaltend ? ' (in this restrained, low-decoration world even smaller)' : ''}, elegantly placed and balanced with generous negative space. The packaging stays the hero; the motif supports it.`);
+      }
     }
     // v52: optionaler Farb-Charakter aus dem Bauplan ("deep, dark, rich —
     // never lavender") — verankert den Ton explizit gegen Verwaessern.
