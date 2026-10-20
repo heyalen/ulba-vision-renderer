@@ -151,7 +151,9 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v76: WYSIWYG-Kalibrierung — gemeinsame Crop-Geometrie (capCropGeometrie)
 // fuer Montage UND GET /api/kalibrierung; crop-basierte Hand-Werte werden
 // 1:1 montiert (kein rohrRest), Altwerte behalten die v73-Korrektur.
-const RENDER_VERSION = 'v76';
+// v77: Hals-Band nur noch als UNTERGRENZE (Cap nie im Flaschenbauch);
+// nach oben frei — negative versatzY = schwebender Cap, Leinwand waechst.
+const RENDER_VERSION = 'v77';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -493,11 +495,11 @@ export async function montiereKomposit(
       // v76: crop-basierte Werte meinen bereits die Crop-Unterkante — 1:1.
       const rohrRest = cropBasiert ? 0 : Math.max(0, Math.round((pc.h - (cropT + cropH)) * fSkal));
       const kandidat = Math.round(kal.versatzY / 100 * pb.h) - rohrRest;
-      // v74: Band moderat geweitet (-4%..+22%) — eng gecroppte Cap-Fotos
-      // mit grossem Weissrand fielen sonst knapp heraus.
-      const bandMin = bodyTopN - Math.round(0.04 * pb.h);
+      // v77: nur die UNTERGRENZE wird verworfen (Hals + 22% Body-Hoehe);
+      // nach oben ist alles erlaubt — auch negativ (Cap-Unterkante ueber
+      // dem Body-Bild): die Leinwand bekommt dann Luft zwischen Cap und Hals.
       const bandMax = bodyTopN + Math.round(0.22 * pb.h);
-      if (kandidat >= bandMin && kandidat <= bandMax) capBottomN = Math.max(8, kandidat);
+      if (kandidat <= bandMax) capBottomN = kandidat;
       else versatzIgnoriert = true;
     }
     const erweiterung = Math.max(0, capH - capBottomN);
