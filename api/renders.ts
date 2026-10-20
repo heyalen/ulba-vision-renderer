@@ -64,6 +64,11 @@ function taktOk(req: VercelRequest, max: number, fensterMs: number): boolean {
 function hatAnhang(feld: unknown): boolean {
   return Array.isArray(feld) && feld.length > 0 && !!(feld[0] as any)?.url;
 }
+// v74: Attachment-ID als Cache-Buster — beim Ersetzen (Kalibrierung)
+// aendert sich die URL, Browser und /api/bild holen garantiert frisch.
+function anhangId(feld: unknown): string {
+  return (Array.isArray(feld) && (feld[0] as any)?.id) ? String((feld[0] as any).id) : '';
+}
 
 type RenderEintrag = {
   id: string;
@@ -169,11 +174,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return {
           id: rec.id,
           // Stabile Adresse: /api/bild (ulba-Frontend) loest den Anhang auf.
-          bildUrl: `/api/bild?r=${rec.id}`,
+          bildUrl: `/api/bild?r=${rec.id}&v=${anhangId(f['Bild'])}`,
           // v60: Einzelbilder reisen immer mit — die UI zeigt sie als
           // Koerper·Verschluss-Thumbnails; gestapelt wird nur ohne montiert.
-          capBildUrl: hatAnhang(f['Cap_Bild']) ? `/api/bild?r=${rec.id}&k=cap` : null,
-          bodyBildUrl: hatAnhang(f['Body_Bild']) ? `/api/bild?r=${rec.id}&k=body` : null,
+          capBildUrl: hatAnhang(f['Cap_Bild']) ? `/api/bild?r=${rec.id}&k=cap&v=${anhangId(f['Cap_Bild'])}` : null,
+          bodyBildUrl: hatAnhang(f['Body_Bild']) ? `/api/bild?r=${rec.id}&k=body&v=${anhangId(f['Body_Bild'])}` : null,
           weltName: String(f['Konzept_Name'] || ''),
           teilName: String(f['Teil_Name'] || ''),
           systemId: sysLink[0] || null,
