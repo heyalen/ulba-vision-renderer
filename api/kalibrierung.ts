@@ -1,6 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { waitUntil } from '@vercel/functions';
-import { montiereKomposit, MontageKal } from './render';
+import sharp from 'sharp';
+import { montiereKomposit, montageGeometrie, MontageKal } from './render';
 
 /* ── api/kalibrierung.ts — Hand-Kalibrierung der Montage (v62) ───────────
    POST { capId, cacheId, skala, versatzY } vom "Anpassen"-Regler:
@@ -14,11 +15,17 @@ import { montiereKomposit, MontageKal } from './render';
       seit jeher als "_<capId>_"-Segment) — max 15 pro Lauf, Rest im Log.
    v75: cacheId ist OPTIONAL — ohne cacheId (Vorschau vor dem ersten
    Render) werden nur die Cap-Felder geschrieben, kein Re-Komposit.
+   v76: GET ?capId=&systemId=[&cacheId=] liefert die Montage-GEOMETRIE aus
+   denselben Funktionen (Cap-cropBox in % des Cap-Bilds, Body-Hals/Box,
+   gespeicherte + Auto-Werte) — das Overlay zeigt den Cap gecroppt und
+   startet exakt beim gespeicherten Stand. POST mit cropBasiert:true wird
+   1:1 montiert (Montage_Basis='crop'); Altwerte behalten die v73-Korrektur.
    Origin-/Takt-Regeln identisch zu search/renders. */
 
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
 const CACHE_TABLE = 'tblsOp1WKPGIquBKQ';
 const CAP_TABLE = 'tblQvnXPhiKGMoqDp';
+const SYSTEM_TABLE = 'tblB1kWay9TvX3rGv';
 const CACHE_IMAGE_FIELD = 'fldFd5qi64yELhKna'; // Bild
 
 async function fetchT(
@@ -148,18 +155,108 @@ async function reMontiereGeschwister(capId: string, ausser: string, kal: Montage
   }
 }
 
+function liesCrop(capFields: any): MontageKal['crop'] {
+  try {
+    const c = capFields?.['Montage_Crop'] ? JSON.parse(String(capFields['Montage_Crop'])) : null;
+    return (c && typeof c.w === 'number' && typeof c.h === 'number') ? { x: Number(c.x) || 0, y: Number(c.y) || 0, w: c.w, h: c.h } : null;
+  } catch { return null; }
+}
+
+/* v76 — GET: Montage-Geometrie fuer das WYSIWYG-Overlay und den
+   Vorschau-Stapel. Render-Fall (cacheId): Body_Bild + Cap_Bild des Records;
+   Vorschau-Fall (systemId): Original-Fotos System + Cap. */
+async function geometrie(req: VercelRequest, res: VercelResponse) {
+  if (!taktOk(req, 60, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen — kurz warten.' });
+  const q = req.query || {};
+  const capId = String(q.capId || ''), systemId = String(q.systemId || ''), cacheId = String(q.cacheId || '');
+  if (!REC.test(capId) || (cacheId ? !REC.test(cacheId) : !REC.test(systemId))) {
+    return res.status(400).json({ error: 'capId und systemId (oder cacheId) erforderlich' });
+  }
+  try {
+    const capRes = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CAP_TABLE}/${capId}`, { headers: HDR(), label: 'cap read' });
+    if (!capRes.ok) return res.status(404).json({ error: `Cap nicht gefunden (${capRes.status})` });
+    const capFields = ((await capRes.json()) as any)?.fields || {};
+    let bodyUrl: string | null = null, capUrl: string | null = null;
+    if (cacheId) {
+      const r = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}/${cacheId}`, { headers: HDR(), label: 'cache read' });
+      if (!r.ok) return res.status(404).json({ error: `Render nicht gefunden (${r.status})` });
+      const cf = ((await r.json()) as any)?.fields || {};
+      let komposit = false;
+      try { komposit = (cf['Board'] ? JSON.parse(cf['Board']) : {})?.montiert === true; } catch { komposit = false; }
+      bodyUrl = anhang(cf['Body_Bild']) || (!komposit ? anhang(cf['Bild']) : null);
+      capUrl = anhang(cf['Cap_Bild']);
+    } else {
+      const r = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${SYSTEM_TABLE}/${systemId}`, { headers: HDR(), label: 'system read' });
+      if (!r.ok) return res.status(404).json({ error: `Teil nicht gefunden (${r.status})` });
+      const sf = ((await r.json()) as any)?.fields || {};
+      bodyUrl = anhang(sf['Bild_Harmonisiert']) || anhang(sf['Bild_System']);
+      capUrl = anhang(capFields['Cap_Bild_Harmonisiert']) || anhang(capFields['Cap_Bild']);
+    }
+    if (!bodyUrl || !capUrl) return res.status(422).json({ error: 'Body- oder Cap-Bild fehlt.' });
+    const [bodyBuf, capBufRoh] = await Promise.all([
+      fetchT(bodyUrl, { timeoutMs: 30000, label: 'body download' }).then(async r => Buffer.from(await r.arrayBuffer())),
+      fetchT(capUrl, { timeoutMs: 30000, label: 'cap download' }).then(async r => Buffer.from(await r.arrayBuffer())),
+    ]);
+    // Montage_Crop (Katalog-Ansicht) wie in der Montage ZUERST anwenden —
+    // die cropBox wird danach auf das volle Bild zurueckgerechnet.
+    const quellCrop = liesCrop(capFields);
+    let capBuf: Buffer = capBufRoh;
+    if (quellCrop) {
+      const m = await sharp(capBufRoh).metadata();
+      const W = m.width || 0, H = m.height || 0;
+      if (W && H) {
+        const L = Math.max(0, Math.min(W - 8, Math.round(quellCrop.x / 100 * W)));
+        const T = Math.max(0, Math.min(H - 8, Math.round(quellCrop.y / 100 * H)));
+        const CW = Math.max(8, Math.min(W - L, Math.round(quellCrop.w / 100 * W)));
+        const CH = Math.max(8, Math.min(H - T, Math.round(quellCrop.h / 100 * H)));
+        capBuf = Buffer.from(await sharp(capBufRoh).extract({ left: L, top: T, width: CW, height: CH }).toBuffer());
+      }
+    }
+    const closureText = [
+      typeof capFields['Closure_Type'] === 'string' ? capFields['Closure_Type'] : (capFields['Closure_Type']?.name || ''),
+      String(capFields['Cap_Name'] || ''),
+    ].join(' ');
+    const g = await montageGeometrie(bodyBuf, capBuf, closureText);
+    if (!g) return res.status(422).json({ error: 'Silhouette nicht messbar.' });
+    const cropBox = quellCrop
+      ? { x: quellCrop.x + g.cap.cropBox.x * quellCrop.w / 100, y: quellCrop.y + g.cap.cropBox.y * quellCrop.h / 100, w: g.cap.cropBox.w * quellCrop.w / 100, h: g.cap.cropBox.h * quellCrop.h / 100 }
+      : g.cap.cropBox;
+    // Gespeicherte Werte: crop-basiert 1:1, Altwerte in Crop-Semantik umgerechnet.
+    const skalaAlt = typeof capFields['Montage_Skala'] === 'number' && capFields['Montage_Skala'] > 0 ? capFields['Montage_Skala'] : null;
+    const versatzAlt = typeof capFields['Montage_Versatz_Y'] === 'number' ? capFields['Montage_Versatz_Y'] : null;
+    const basisCrop = String(capFields['Montage_Basis'] || '') === 'crop';
+    const gespeichert = skalaAlt == null ? null
+      : basisCrop ? { skala: skalaAlt, versatzY: versatzAlt, basis: 'crop' as const }
+      : { ...g.altNachCrop(skalaAlt, versatzAlt), basis: 'alt' as const };
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).json({
+      ok: true, bodyUrl, capUrl,
+      cap: { w: g.cap.w, h: g.cap.h, cropBox, cropRatio: g.cap.cropRatio },
+      body: g.body,
+      auto: g.auto,
+      gespeichert,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
+    console.error('kalibrierung geometrie error:', message);
+    return res.status(500).json({ error: message });
+  }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   const offen = riegel(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST' && req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   if (!offen) return res.status(403).json({ error: 'Zugriff nur von ulba' });
+  if (req.method === 'GET') return geometrie(req, res);
   if (!taktOk(req, 20, 300000)) return res.status(429).json({ error: 'Zu viele Anfragen — kurz warten.' });
 
-  const { capId, cacheId, skala: skalaRoh, versatzY: versatzRoh } = (req.body || {}) as {
-    capId?: string; cacheId?: string; skala?: number; versatzY?: number;
+  const { capId, cacheId, skala: skalaRoh, versatzY: versatzRoh, cropBasiert: cropRoh } = (req.body || {}) as {
+    capId?: string; cacheId?: string; skala?: number; versatzY?: number; cropBasiert?: boolean;
   };
+  const cropBasiert = cropRoh === true; // v76
   // v63: Hand-Werte gewinnen roh — weite Grenzen (5%..200% Breite, 0..90%
   // Hoehe), nie auf die Auto-Grenzen geclampt.
   const skala = typeof skalaRoh === 'number' && isFinite(skalaRoh) ? Math.min(2, Math.max(0.05, skalaRoh)) : null;
@@ -174,7 +271,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 1) Kalibrierung am Cap speichern (gilt fuer alle kuenftigen Renders).
     const capRes = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CAP_TABLE}/${capId}`, {
       method: 'PATCH', headers: HDR(), label: 'cap patch',
-      body: JSON.stringify({ fields: { Montage_Skala: skala, ...(versatzY != null ? { Montage_Versatz_Y: versatzY } : {}) } }),
+      body: JSON.stringify({ fields: { Montage_Skala: skala, ...(versatzY != null ? { Montage_Versatz_Y: versatzY } : {}), Montage_Basis: cropBasiert ? 'crop' : '' } }),
     });
     if (!capRes.ok) throw new Error(`Cap-Update: ${capRes.status} ${(await capRes.text()).slice(0, 300)}`);
     const capFields = ((await capRes.json()) as any)?.fields || {};
@@ -185,6 +282,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const kal: MontageKal = {
       skala,
       versatzY,
+      cropBasiert,
       crop: (() => {
         try {
           const c = capFields['Montage_Crop'] ? JSON.parse(String(capFields['Montage_Crop'])) : null;
