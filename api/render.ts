@@ -146,7 +146,9 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // v73: Kalibrier-Versatz im richtigen Bezugsrahmen (UI-Unterkante = volle
 // Cap-Bildbox inkl. Tauchrohr -> Rohr-Rest wird abgezogen) + Hals-Band-
 // Plausibilitaet (ausserhalb -> Auto-Anker + Konfidenz 'pruefen').
-const RENDER_VERSION = 'v73';
+// v74: Cache-Buster (&v=AttachmentId) fuer /api/bild-Adressen, Hals-Band
+// -4..+22%, Kalibrier-Antwort meldet versatzUebernommen (UI-Feedback).
+const RENDER_VERSION = 'v74';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -418,8 +420,10 @@ export async function montiereKomposit(
       const fSkal = zielW / cropW;
       const rohrRest = Math.max(0, Math.round((pc.h - (cropT + cropH)) * fSkal));
       const kandidat = Math.round(kal.versatzY / 100 * pb.h) - rohrRest;
-      const bandMin = bodyTopN - Math.round(0.02 * pb.h);
-      const bandMax = bodyTopN + Math.round(0.18 * pb.h);
+      // v74: Band moderat geweitet (-4%..+22%) — eng gecroppte Cap-Fotos
+      // mit grossem Weissrand fielen sonst knapp heraus.
+      const bandMin = bodyTopN - Math.round(0.04 * pb.h);
+      const bandMax = bodyTopN + Math.round(0.22 * pb.h);
       if (kandidat >= bandMin && kandidat <= bandMax) capBottomN = Math.max(8, kandidat);
       else versatzIgnoriert = true;
     }
