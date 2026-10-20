@@ -148,7 +148,10 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // Plausibilitaet (ausserhalb -> Auto-Anker + Konfidenz 'pruefen').
 // v74: Cache-Buster (&v=AttachmentId) fuer /api/bild-Adressen, Hals-Band
 // -4..+22%, Kalibrier-Antwort meldet versatzUebernommen (UI-Feedback).
-const RENDER_VERSION = 'v75';
+// v76: WYSIWYG-Kalibrierung — gemeinsame Crop-Geometrie (capCropGeometrie)
+// fuer Montage UND GET /api/kalibrierung; crop-basierte Hand-Werte werden
+// 1:1 montiert (kein rohrRest), Altwerte behalten die v73-Korrektur.
+const RENDER_VERSION = 'v76';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -321,7 +324,84 @@ export type MontageKal = {
   skala: number | null;
   versatzY: number | null;
   crop: { x: number; y: number; w: number; h: number } | null;
+  // v76: true = skala/versatzY beziehen sich auf die GECROPPTE Cap-
+  // Silhouette (Crop-Breite / Body-Bildbreite, Crop-Unterkante in % der
+  // Body-Hoehe) — exakt das, was das Overlay zeigt. Keine Rohr-Heuristik.
+  cropBasiert?: boolean;
 };
+
+// v76: Crop der Cap-Silhouette (inkl. Tauchrohr-Schnitt) — EINE Quelle fuer
+// Montage und Geometrie-Endpoint. Alle Masse nativ, DS-Masse fuer die Maske.
+type CapCrop = { capUnten: number; cropWds: number; cropHds: number; cropL: number; cropT: number; cropW: number; cropH: number };
+function capCropGeometrie(pc: Profil, closureText: string): CapCrop | null {
+  const mitRohr = /pump|spray|pipette|airless|dropper/i.test(closureText);
+  let capUnten = pc.bottom;
+  if (mitRohr) {
+    for (let y = pc.bottom; y >= pc.top; y--) {
+      if (pc.breiten[y] > 0.35 * pc.maxW) { capUnten = y; break; }
+    }
+  }
+  const cropWds = pc.maxR - pc.minL + 1;
+  const cropHds = capUnten - pc.top + 1;
+  if (cropWds < 4 || cropHds < 0.25 * cropWds) return null;
+  const sc = pc.skala;
+  const cropL = Math.max(0, Math.min(pc.w - 1, Math.round(pc.minL * sc)));
+  const cropT = Math.max(0, Math.min(pc.h - 1, Math.round(pc.top * sc)));
+  const cropW = Math.max(8, Math.min(pc.w - cropL, Math.round(cropWds * sc)));
+  const cropH = Math.max(8, Math.min(pc.h - cropT, Math.round(cropHds * sc)));
+  return { capUnten, cropWds, cropHds, cropL, cropT, cropW, cropH };
+}
+
+/* v76: Geometrie fuer das WYSIWYG-Overlay — aus DENSELBEN Funktionen wie
+   die Montage. Prozente beziehen sich auf das jeweils uebergebene Bild
+   (Cap-Bild bzw. Body-Bild). autoWerte in crop-basierter Semantik. */
+export type MontageGeometrie = {
+  cap: { w: number; h: number; cropBox: { x: number; y: number; w: number; h: number }; cropRatio: number };
+  body: { w: number; h: number; neckTopPct: number; silhouetteBox: { x: number; y: number; w: number; h: number } };
+  auto: { skala: number; versatzY: number };
+  // Umrechnung von Altwerten (volle Bildbox + Rohr-Korrektur) in Crop-Semantik.
+  altNachCrop: (skalaAlt: number, versatzAlt: number | null) => { skala: number; versatzY: number | null };
+};
+export async function montageGeometrie(bodyBuf: Buffer, capBuf: Buffer, closureText: string): Promise<MontageGeometrie | null> {
+  try {
+    const [pb, pc] = await Promise.all([silhouettenProfil(bodyBuf), silhouettenProfil(capBuf)]);
+    if (!pb || !pc) return null;
+    const c = capCropGeometrie(pc, closureText);
+    if (!c) return null;
+    const faktor = capTypFaktor(closureText);
+    const neckWn = Math.round(pb.neckW * pb.skala);
+    const bodyTopN = Math.round(pb.top * pb.skala);
+    const zielW = Math.min(pb.w, Math.max(16, Math.round(neckWn * faktor)));
+    const capH = Math.max(8, Math.round(c.cropH * zielW / c.cropW));
+    const overlap = Math.max(3, Math.round(capH * 0.02));
+    const pct = (v: number, ganz: number) => Math.round(v / ganz * 10000) / 100;
+    return {
+      cap: {
+        w: pc.w, h: pc.h,
+        cropBox: { x: pct(c.cropL, pc.w), y: pct(c.cropT, pc.h), w: pct(c.cropW, pc.w), h: pct(c.cropH, pc.h) },
+        cropRatio: Math.round(c.cropH / c.cropW * 10000) / 10000,
+      },
+      body: {
+        w: pb.w, h: pb.h,
+        neckTopPct: pct(bodyTopN, pb.h),
+        silhouetteBox: {
+          x: pct(pb.minL * pb.skala, pb.w), y: pct(pb.top * pb.skala, pb.h),
+          w: pct((pb.maxR - pb.minL + 1) * pb.skala, pb.w), h: pct((pb.bottom - pb.top + 1) * pb.skala, pb.h),
+        },
+      },
+      auto: { skala: Math.round(zielW / pb.w * 10000) / 10000, versatzY: pct(bodyTopN + overlap, pb.h) },
+      altNachCrop: (skalaAlt, versatzAlt) => {
+        // Alt: zielW = skalaAlt*pb.w*(cropW/pc.w); versatz = Box-Unterkante - rohrRest.
+        const zielWAlt = skalaAlt * pb.w * (c.cropW / pc.w);
+        const rohrRest = Math.max(0, (pc.h - (c.cropT + c.cropH)) * (zielWAlt / c.cropW));
+        return {
+          skala: Math.round(zielWAlt / pb.w * 10000) / 10000,
+          versatzY: versatzAlt == null ? null : Math.round((versatzAlt / 100 * pb.h - rohrRest) / pb.h * 10000) / 100,
+        };
+      },
+    };
+  } catch { return null; }
+}
 type MontageDiag = {
   hand: boolean; capKomponenten: number; capHFrac: number;
   neckStabil: boolean; neckFrac: number; bodyMaxFrac: number;
@@ -348,32 +428,24 @@ export async function montiereKomposit(
     const [pb, pc] = await Promise.all([silhouettenProfil(bodyBuf), silhouettenProfil(capQuelle)]);
     if (!pb || !pc) return null;
     const hand = typeof kal?.skala === 'number' && kal.skala > 0;
+    const cropBasiert = hand && kal?.cropBasiert === true;
     const faktor = capTypFaktor(closureText);
-    const mitRohr = /pump|spray|pipette|airless|dropper/i.test(closureText);
-    let capUnten = pc.bottom;
-    if (mitRohr) {
-      for (let y = pc.bottom; y >= pc.top; y--) {
-        if (pc.breiten[y] > 0.35 * pc.maxW) { capUnten = y; break; }
-      }
-    }
-    // DS-Masse des Crops + Guard 1: ein Cap ist nie ein flacher Strich.
-    const cropWds = pc.maxR - pc.minL + 1;
-    const cropHds = capUnten - pc.top + 1;
-    if (cropWds < 4 || cropHds < 0.25 * cropWds) return null;
-    // DS -> native Pixel (geclampt auf die Bildgrenzen).
-    const sc = pc.skala;
-    const cropL = Math.max(0, Math.min(pc.w - 1, Math.round(pc.minL * sc)));
-    const cropT = Math.max(0, Math.min(pc.h - 1, Math.round(pc.top * sc)));
-    const cropW = Math.max(8, Math.min(pc.w - cropL, Math.round(cropWds * sc)));
-    const cropH = Math.max(8, Math.min(pc.h - cropT, Math.round(cropHds * sc)));
+    // v76: Crop-Geometrie aus der gemeinsamen Funktion (Guard 1 inklusive:
+    // ein Cap ist nie ein flacher Strich).
+    const cg = capCropGeometrie(pc, closureText);
+    if (!cg) return null;
+    const { cropWds, cropHds, cropL, cropT, cropW, cropH } = cg;
     const neckWn = Math.round(pb.neckW * pb.skala);
     const bodyTopN = Math.round(pb.top * pb.skala);
     const neckCxN = Math.round(pb.neckCx * pb.skala);
     // Zielbreite: Hand-Skala (Anteil der Body-Bildbreite, auf die sichtbare
     // Cap-Silhouette bezogen) ODER Auto (Halsbreite x TypFaktor).
-    const zielW = hand
-      ? Math.min(pb.w, Math.max(16, Math.round((kal!.skala as number) * pb.w * (cropW / pc.w))))
-      : Math.min(pb.w, Math.max(16, Math.round(neckWn * faktor)));
+    // v76: crop-basiert = Crop-Breite direkt als Anteil der Body-Bildbreite.
+    const zielW = cropBasiert
+      ? Math.min(pb.w, Math.max(16, Math.round((kal!.skala as number) * pb.w)))
+      : hand
+        ? Math.min(pb.w, Math.max(16, Math.round((kal!.skala as number) * pb.w * (cropW / pc.w))))
+        : Math.min(pb.w, Math.max(16, Math.round(neckWn * faktor)));
     const capH = Math.max(8, Math.round(cropH * zielW / cropW));
     const capRgb = await sharp(capQuelle)
       .extract({ left: cropL, top: cropT, width: cropW, height: cropH })
@@ -418,7 +490,8 @@ export async function montiereKomposit(
     let capBottomN = bodyTopN + overlap;
     if (hand && typeof kal?.versatzY === 'number') {
       const fSkal = zielW / cropW;
-      const rohrRest = Math.max(0, Math.round((pc.h - (cropT + cropH)) * fSkal));
+      // v76: crop-basierte Werte meinen bereits die Crop-Unterkante — 1:1.
+      const rohrRest = cropBasiert ? 0 : Math.max(0, Math.round((pc.h - (cropT + cropH)) * fSkal));
       const kandidat = Math.round(kal.versatzY / 100 * pb.h) - rohrRest;
       // v74: Band moderat geweitet (-4%..+22%) — eng gecroppte Cap-Fotos
       // mit grossem Weissrand fielen sonst knapp heraus.
@@ -444,8 +517,10 @@ export async function montiereKomposit(
       .toBuffer();
     // capScale (Element-Verhaeltnis fuer den Stapel-Fallback): Hand-Skala
     // direkt, sonst Auto (DS-Ratios sind skaleninvariant).
+    // v76: crop-basierte Skala auf die volle Cap-Bildbreite zurueckrechnen —
+    // der Stapel-Fallback zeigt das ungecroppte Cap_Bild.
     const capScale = hand
-      ? Math.round((kal!.skala as number) * 1000) / 1000
+      ? Math.round((kal!.skala as number) * (cropBasiert ? pc.w / cropW : 1) * 1000) / 1000
       : (() => {
           const sil = Math.min(0.6, Math.max(0.18, (pb.neckW * faktor) / pb.maxW));
           return Math.round(sil * (pb.maxW / pb.dsW) * (pc.dsW / pc.maxW) * 1000) / 1000;
@@ -2300,6 +2375,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               return (c && typeof c.w === 'number' && typeof c.h === 'number') ? { x: Number(c.x) || 0, y: Number(c.y) || 0, w: c.w, h: c.h } : null;
             } catch { return null; }
           })(),
+          cropBasiert: String(capFields?.['Montage_Basis'] || '') === 'crop', // v76
         };
         const mont = await montiereKomposit(bodyBuf, capBuf, closureText, kal);
         if (mont) {
