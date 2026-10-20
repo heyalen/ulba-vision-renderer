@@ -152,7 +152,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const nach = await fetchT(`https://api.airtable.com/v0/${AIRTABLE_BASE}/${CACHE_TABLE}/${cacheId}`, { headers: HDR(), label: 'cache re-read' });
     const neueUrl = nach.ok ? anhang((((await nach.json()) as any)?.fields || {})['Bild']) : null;
 
-    return res.status(200).json({ ok: true, bildUrl: neueUrl || `/api/bild?r=${cacheId}`, capScale: mont.capScale });
+    return res.status(200).json({
+      ok: true,
+      bildUrl: neueUrl || `/api/bild?r=${cacheId}&v=${Date.now()}`,
+      capScale: mont.capScale,
+      // v74: ehrliches UI-Feedback — wurde Alens Position uebernommen?
+      versatzUebernommen: !mont.diag.versatzIgnoriert,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
     console.error('kalibrierung error:', message);
