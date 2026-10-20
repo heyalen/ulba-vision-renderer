@@ -260,7 +260,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // v63: Hand-Werte gewinnen roh — weite Grenzen (5%..200% Breite, 0..90%
   // Hoehe), nie auf die Auto-Grenzen geclampt.
   const skala = typeof skalaRoh === 'number' && isFinite(skalaRoh) ? Math.min(2, Math.max(0.05, skalaRoh)) : null;
-  const versatzY = typeof versatzRoh === 'number' && isFinite(versatzRoh) ? Math.min(90, Math.max(0, versatzRoh)) : null;
+  // v77: negativ erlaubt (schwebender Cap), Untergrenze prueft die Montage.
+  const versatzY = typeof versatzRoh === 'number' && isFinite(versatzRoh) ? Math.min(90, Math.max(-60, versatzRoh)) : null;
   // v75: cacheId optional — Vorschau-Kalibrierung vor dem ersten Render
   // schreibt nur die Cap-Felder (gelten dann fuer jeden kuenftigen Render).
   if (!capId || !REC.test(capId) || skala == null || (cacheId != null && !REC.test(cacheId))) {
@@ -293,7 +294,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // v75: Vorschau-Modus ohne cacheId — nur Felder, kein Re-Komposit.
     if (!cacheId) {
-      return res.status(200).json({ ok: true, bildUrl: null, capScale: null, versatzUebernommen: true });
+      // v77: Server-Echo der gespeicherten Werte — das UI setzt seinen Stand daraus.
+      return res.status(200).json({ ok: true, bildUrl: null, capScale: null, versatzUebernommen: true, gespeichert: { skala, versatzY, basis: cropBasiert ? 'crop' : 'alt' } });
     }
 
     // 2) Aktuellen Cache-Record re-montieren (ohne fal).
@@ -310,6 +312,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       capScale: erg.capScale,
       // v74: ehrliches UI-Feedback — wurde Alens Position uebernommen?
       versatzUebernommen: !erg.versatzIgnoriert,
+      gespeichert: { skala, versatzY, basis: cropBasiert ? 'crop' : 'alt' }, // v77 Echo
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
