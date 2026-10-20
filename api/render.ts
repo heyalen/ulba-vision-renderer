@@ -148,7 +148,7 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // Plausibilitaet (ausserhalb -> Auto-Anker + Konfidenz 'pruefen').
 // v74: Cache-Buster (&v=AttachmentId) fuer /api/bild-Adressen, Hals-Band
 // -4..+22%, Kalibrier-Antwort meldet versatzUebernommen (UI-Feedback).
-const RENDER_VERSION = 'v74';
+const RENDER_VERSION = 'v75';
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
