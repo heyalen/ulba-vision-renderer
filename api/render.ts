@@ -2,6 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 import sharp from 'sharp';
 import { waitUntil } from '@vercel/functions';
+import { KONTO_AKTIV, kontoAusRequest, liesFrei, schreibeFrei, renderKontingent, FREI_RENDERS, RENDERS_PRO_MONAT } from './_konto';
 
 /* ── render.ts v49 — der vereinfachte Renderer ────────────────────────────
    v49: (1) NIE BLOCKIEREN — unbestätigte Anforderungen rendern normal mit
@@ -2062,6 +2063,9 @@ function riegel(req: VercelRequest, res: VercelResponse, opts?: { originOptional
   const erlaubt = origin ? ULBA_ORIGINS.has(origin) : !!opts?.originOptional;
   if (origin && erlaubt) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    // v78: Konto-Token (Authorization) + Frei-Cookie reisen cross-origin —
+    // dafuer braucht der Browser dieses explizite Ja zu Credentials.
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Vary', 'Origin');
   }
   return erlaubt;
@@ -2088,7 +2092,7 @@ export const config = { api: { bodyParser: true }, maxDuration: 300 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Render-Secret, X-Ulba-Dev');
   const offen = riegel(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -2241,6 +2245,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           cached: true,
           concept: cachedConcept,
         });
+      }
+    }
+
+    // ── 1b. Konto-Riegel (v78) — erst NACH dem Cache-Check: nur ein
+    // frischer fal-Lauf kostet Geld, also zaehlt auch nur der. Anonym sind
+    // FREI_RENDERS Laeufe drin (signiertes Cookie), mit kostenlosem Konto
+    // RENDERS_PRO_MONAT pro Monat (Airtable `Nutzer`). Interne Aufrufe
+    // (x-render-secret) und Dev-Laeufe (nocache) zaehlen nicht. Ohne
+    // CLERK_PUBLISHABLE_KEY ist der ganze Block stumm.
+    let rendersRest: number | null = null;
+    const internAufruf = !!process.env.RENDER_SECRET && req.headers['x-render-secret'] === process.env.RENDER_SECRET;
+    if (KONTO_AKTIV && !internAufruf && !nocache) {
+      const konto = await kontoAusRequest(req);
+      if (konto) {
+        const kontingent = await renderKontingent(konto);
+        if (!kontingent.ok) {
+          return res.status(429).json({
+            error: `Dein Monats-Kontingent ist erreicht — ${kontingent.limit} Renders pro Monat sind im kostenlosen Konto drin. Nächsten Monat geht es weiter.`,
+            code: 'quota', limit: kontingent.limit, genutzt: kontingent.genutzt,
+          });
+        }
+        rendersRest = Math.max(0, kontingent.limit - kontingent.genutzt);
+      } else {
+        const frei = liesFrei(req);
+        if (frei.r >= FREI_RENDERS) {
+          return res.status(401).json({
+            error: `Deine ${FREI_RENDERS} kostenlosen Renders sind aufgebraucht — mit einem kostenlosen Konto hast du ${RENDERS_PRO_MONAT} Renders pro Monat.`,
+            code: 'login_required', scope: 'render',
+          });
+        }
+        schreibeFrei(res, { ...frei, r: frei.r + 1 });
+        rendersRest = Math.max(0, FREI_RENDERS - frei.r - 1);
       }
     }
 
@@ -2440,6 +2476,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         fall,
         tier,
         concept,
+        rendersRest, // v78: verbleibende Renders (anonym bzw. Monats-Kontingent), null = unbegrenzt/intern
       });
     }
 
