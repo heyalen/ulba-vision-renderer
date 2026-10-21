@@ -2,6 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 // fal nimmt image_url auch als data-URI entgegen — das Referenzbild reist
 // ohnehin als data-URL vom Frontend an, kein Zwischenspeichern noetig.
 import { Profil, falFreistellen, profilVonPng, aehnlichkeit, letzterFalFehler, FORM_VERSION } from './_form';
+import { KONTO_AKTIV, kontoAusRequest, liesFrei, schreibeFrei, FREI_SUCHEN } from './_konto';
 
 // ── Config ──────────────────────────────────────────────────────────
 const AIRTABLE_BASE = 'app0QFyInfhvk66MC';
@@ -1591,6 +1592,9 @@ function riegel(req: VercelRequest, res: VercelResponse, opts?: { originOptional
   const erlaubt = origin ? ULBA_ORIGINS.has(origin) : !!opts?.originOptional;
   if (origin && erlaubt) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    // v78: Konto-Token (Authorization) + Frei-Cookie reisen cross-origin —
+    // dafuer braucht der Browser dieses explizite Ja zu Credentials.
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Vary', 'Origin');
   }
   return erlaubt;
@@ -1614,7 +1618,7 @@ function taktOk(req: VercelRequest, max: number, fensterMs: number): boolean {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Render-Secret');
   // v68 — Server-zu-Server (Suchtest aus Airtable): gleicher Schluessel wie
   // /api/harmonize. Ohne gesetztes RENDER_SECRET bleibt dieser Weg zu.
   const secret = process.env.RENDER_SECRET || '';
@@ -1660,6 +1664,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (!query && !image && !lesartKorrigiert) {
     return res.status(400).json({ error: 'query oder image ist erforderlich' });
+  }
+
+  // ── Konto-Riegel (v78) — nur NEUE Suchen zaehlen: Chip-Korrekturen und
+  // Filter-Runden verfeinern eine bestehende Suche und sind frei. Anonym
+  // sind FREI_SUCHEN Suchen drin (signiertes Cookie), mit Konto unbegrenzt.
+  // Interne Aufrufe (x-render-secret, z.B. Suchtest) zaehlen nicht. Ohne
+  // CLERK_PUBLISHABLE_KEY ist der Block stumm — Verhalten wie vor v78.
+  const neueSuche = !lesartKorrigiert && !active_filters && !removed_filters;
+  const internAufruf = !!secret && req.headers['x-render-secret'] === secret;
+  if (KONTO_AKTIV && neueSuche && !internAufruf) {
+    const konto = await kontoAusRequest(req);
+    if (!konto) {
+      const frei = liesFrei(req);
+      if (frei.s >= FREI_SUCHEN) {
+        return res.status(401).json({
+          error: `Deine ${FREI_SUCHEN} kostenlosen Suchen sind aufgebraucht — mit einem kostenlosen Konto suchst du unbegrenzt.`,
+          code: 'login_required', scope: 'suche',
+        });
+      }
+      schreibeFrei(res, { ...frei, s: frei.s + 1 });
+    }
   }
   if (!process.env.AIRTABLE_PAT) return res.status(500).json({ error: 'AIRTABLE_PAT env var fehlt' });
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY env var fehlt' });
