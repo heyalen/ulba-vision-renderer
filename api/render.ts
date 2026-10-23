@@ -4,65 +4,28 @@ import sharp from 'sharp';
 import { waitUntil } from '@vercel/functions';
 import { KONTO_AKTIV, kontoAusRequest, liesFrei, schreibeFrei, renderKontingent, ipRenderKontingent, FREI_RENDERS, RENDERS_PRO_MONAT } from './_konto';
 
-/* ── render.ts v49 — der vereinfachte Renderer ────────────────────────────
-   v49: (1) NIE BLOCKIEREN — unbestätigte Anforderungen rendern normal mit
-   Warnung, belegte Ausschluesse werden automatisch Typ-B-umgeleitet; der
-   rote Produzierbarkeits-Fehler existiert nicht mehr. (2) Persistenz-
-   Garantie — der Cache-Record entsteht VOR dem fal-Call (Status Pending),
-   cacheId geht sofort mit der Antwort raus, Done/Error werden nachgetragen;
-   nur Done zaehlt als Cache-Hit. Felder: Status, Engine, Design_Code,
-   Teil_Name, Render_Log.
-   v50: RENDER_ZONEN — traegt das System ein Zonen-JSON (Render_Zonen, von
-   der Zonen-Automation aus dem Foto gelesen), steuern primary_canvas/
-   redirect_canvas die Farb-Anwendung zonengenau: der Prompt benennt die
-   Ziel-Zone explizit ("apply ONLY to the inner cartridge; the outer clear
-   glass wall stays untouched") und ersetzt die Behandlungs-Heuristik.
-   Ohne Zonen exakt das bisherige Verhalten.
-   v51: KOMPONENTEN-MODELL (DESIGN-ENTSCHEID) — die Welt ist ein BAUPLAN
-   aus Design-Komponenten (Design_Komponenten-JSON am Code), das Teil
-   traegt Deko-Faehigkeiten (System.Deko_Faehigkeiten, Cap.Einfaerbbar),
-   der Renderer UEBERSETZT deterministisch: farbe_fix -> Welt aufs Etikett;
-   einfaerbung_masse -> Masse-Einfaerbung (Transparenz der Welt respektiert);
-   Verlauf/Grafik -> Direktdruck, sonst Etikett. Das pauschale Etiketten-
-   Verbot faellt: Labels sind erste Klasse, praezise beschrieben, Tiegel-
-   Label NUR seitlich; die No-Text-Regel bleibt global. Verschluss (v55,
-   Alens Regel): die Cap-WAHL bestimmt nur Mechanik/Geometrie — die FARBE
-   kommt IMMER von der Welt, sofern Cap.Einfaerbbar; Metall/Chrom bleibt
-   wie fotografiert + Hinweis. concept.umsetzung erklaert die Schritte deutsch.
-   Ohne Design_Komponenten exakt das v50-Verhalten.
-   Produktstand heute: der Nutzer waehlt im Design-Raum EINEN Design_Code
-   (forceCodeId ist immer gesetzt) und wendet ihn auf ein Teil an. Alles,
-   was nur dem alten Mehr-Runden-Briefing diente, ist raus:
-   kein Haiku-Call (die Code-Wahl trifft der Nutzer, nicht das LLM),
-   kein dryRun, keine Nudges, kein Board, keine Referenzmarken-Suche,
-   keine Farbpaletten-/Produkt_Regeln-Ladung, keine Szenen.
-   Geblieben: das SF-Faehigkeitsmodell (Produzierbarkeit by construction),
-   die deterministische Prompt-Assembly, das Farb-Rollensystem, der Cache.
-   v46: Referenz_Bild wieder RAUS aus image_urls (Live-Test XTAG: Seedream
-   uebernimmt Formen aus der Stil-Referenz — Geometrie-Kontamination;
-   Detailtreue schlaegt alles). Stil kommt jetzt aus Design_Code.
-   Dazu haerterer Geometrie-Lock (strict recolor of the SAME object) und
-   das Seitenverhaeltnis des Produktfotos statt 'auto'.
-   v47 (Re-Test XTAG: Pumpkopf-Drift trotz Text-Lock): (1) Geometrie-Anker
-   aus den DATEN — die getaggten Attribute des Teils (Attribute/Cap_Attribute,
-   Form, Neck_Norm, Closure) werden zur teil-spezifischen Preserve-Aufzaehlung;
-   (2) Recolor-spezifischer Cap-Lock ("a chrome part painted white keeps
-   chrome's exact geometry"); (3) optionaler Body-Param engine ('seedream'
-   default | 'gemini') fuer den A/B-Vergleich der Formtreue — fliesst in den
-   Cache-Key; (4) volles fal-Preset-Set fuer aspect_ratio (9:21 etc. — 9:16
-   hatte schlanke Flaschen gestreckt).
-   v48 (Re-Test: Chrom-Pumpkopf weiss uebermalt, Streifen aus der Grafik-
-   Regel, DESIGN-ENTSCHEID): "Der Verschluss wird GEWAEHLT, nie umlackiert."
-   (1) Jede pauschale Cap-Umfaerbung ist raus — Cap_Hex geht nie mehr in
-   Bild-Prompts; (2) passt der gewaehlte Cap nicht zur Soll-Farbe der Welt,
-   kommt eine ehrliche Warnung in farbsystem.warnungen — mit der passenden
-   Cap-Variante des Systems, falls es eine gibt.
-   v54 (3-Felder-Modell, Alens Konsolidierung): Render_Rezept ist KOMPLETT
-   aus dem Render-Pfad entfernt. Der Komponenten-Bauplan (Design_Komponenten)
-   ist die einzige Welt-Quelle fuer den Bild-Prompt; die Closure-Praeferenz
-   fuer Variantenwahl/Warnung kommt aus Design_Komponenten.verschluss
-   (Hex -> white/black/silver/gold + Finish). Welten OHNE Komponenten fallen
-   auf das Achsen-Verhalten zurueck (Sicherheitsnetz, nicht Rezept-basiert). */
+/* ── render.ts — der Renderer (Stand v80, 23.10.2026) ──────────────────────
+   Ein Teil (System, optional mit gewaehltem Cap) + EINE Design-Welt (forceCodeId,
+   Pflicht) -> ein Bild. Grundsatz: «Die Welt sagt was, das Teil sagt was es kann
+   und wo — der Renderer uebersetzt.»
+   · Welt = Design_Komponenten-JSON (einzige Welt-Quelle fuer den Bild-Prompt;
+     Label/Motiv nur mit Label_Im_Render). Welten ohne Komponenten: Achsen-Fallback.
+   · Teil = Deko_Faehigkeiten + Render_Zonen (farbe_fix -> Etikett traegt die Welt,
+     Verlauf/Grafik -> Direktdruck sonst Etikett, Zonen steuern wohin Farbe darf).
+   · Cap = Einfaerbbar: Wahl bestimmt nur Mechanik, Farbe kommt von der Welt;
+     Metall bleibt wie fotografiert (+ Hinweis) oder wird eloxiert umgefaerbt.
+   · Nie blockieren: unbestaetigt -> rendern + Warnung; belegt ausgeschlossen ->
+     automatische Umleitung (Liquid/Innenbehaelter).
+   · Ein Bildmodell (Seedream v5 lite edit; engine 'gemini' fuer A/B). Kein
+     LLM-Call, kein Welt-Referenzbild im Bildmodell (Geometrie-Kontamination),
+     Geometrie-Anker aus den getaggten Attributen, aspect_ratio aus dem Foto.
+   · Fall A/B: ein Bild. Fall C/D: Body + Cap getrennt, deterministische
+     sharp-Montage (Kalibrierung ueber /api/kalibrierung), Stapel-Fallback.
+   · Persistenz: Rendering_Cache-Record VOR dem fal-Call (Pending -> Done/Error),
+     nur Done ist Cache-Treffer; Cache-Key aus System, Brief, Cap, Tier, Code, Engine.
+   · Zugang: Origin-Riegel, IP-Takt, nocache nur mit Dev-Secret; Konten/Kontingente
+     in _konto.ts (Clerk-Token, Frei-Cookie, Nutzer-Tabelle, IP-Riegel pro Tag).
+   Historie der Versionen v45–v79 steht im Projekt-Dokument (Master-Kontext). */
 
 // ── fetch mit hartem Timeout ──────────────────────────────────────────────
 // Ohne dies wartet ein haengender externer Call (fal.ai / Airtable) bis
