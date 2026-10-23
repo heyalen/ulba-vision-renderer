@@ -119,17 +119,16 @@ export function schreibeFrei(res: VercelResponse, frei: Frei): void {
 
 /* ── 3. Monats-Zaehler (angemeldet, Airtable `Nutzer`) ──────────────── */
 
-/* Prueft das Monats-Kontingent und zaehlt den Render gleich hoch.
+/* Zaehlt einen frischen Render gegen ein Kontingent in `Nutzer`
+   (eine Zeile pro Schluessel und Periode) und zaehlt gleich hoch.
    Fail-open: jeder Airtable-Fehler laesst den Render durch. */
-export async function renderKontingent(konto: Konto): Promise<{ ok: boolean; genutzt: number; limit: number }> {
-  const limit = RENDERS_PRO_MONAT;
+async function zaehle(id: string, periode: string, limit: number, email: string | null): Promise<{ ok: boolean; genutzt: number; limit: number }> {
   const pat = process.env.AIRTABLE_PAT || '';
   if (!pat) return { ok: true, genutzt: 0, limit };
   try {
-    const monat = new Date().toISOString().slice(0, 7);
-    const sauber = konto.userId.replace(/['\\]/g, '');
+    const sauber = id.replace(/['\\]/g, '');
     const url = `https://api.airtable.com/v0/${AIRTABLE_BASE}/${NUTZER_TABLE}`;
-    const formel = encodeURIComponent(`AND({Clerk_ID}='${sauber}',{Monat}='${monat}')`);
+    const formel = encodeURIComponent(`AND({Clerk_ID}='${sauber}',{Monat}='${periode}')`);
     const kopf = { Authorization: `Bearer ${pat}`, 'Content-Type': 'application/json' };
     const r = await fetch(`${url}?filterByFormula=${formel}&maxRecords=1`, { headers: kopf });
     if (!r.ok) return { ok: true, genutzt: 0, limit };
@@ -140,18 +139,35 @@ export async function renderKontingent(konto: Konto): Promise<{ ok: boolean; gen
     if (rec) {
       await fetch(`${url}/${rec.id}`, {
         method: 'PATCH', headers: kopf,
-        body: JSON.stringify({ fields: { Renders: genutzt + 1, ...(konto.email ? { Email: konto.email } : {}) } }),
+        body: JSON.stringify({ fields: { Renders: genutzt + 1, ...(email ? { Email: email } : {}) } }),
       });
     } else {
       await fetch(url, {
         method: 'POST', headers: kopf,
         body: JSON.stringify({ fields: {
-          Clerk_ID: konto.userId, Monat: monat, Renders: 1,
+          Clerk_ID: sauber, Monat: periode, Renders: 1,
           Erstellt: new Date().toISOString(),
-          ...(konto.email ? { Email: konto.email } : {}),
+          ...(email ? { Email: email } : {}),
         } }),
       });
     }
     return { ok: true, genutzt: genutzt + 1, limit };
   } catch { return { ok: true, genutzt: 0, limit }; }
+}
+
+/* Monats-Kontingent fuer angemeldete Nutzer. */
+export function renderKontingent(konto: Konto) {
+  return zaehle(konto.userId, new Date().toISOString().slice(0, 7), RENDERS_PRO_MONAT, konto.email);
+}
+
+/* v80: Server-Riegel fuer anonyme Renders, unabhaengig vom Cookie.
+   Safari/iOS blockt das Frei-Cookie (Drittanbieter) — ohne diesen Zaehler
+   reichte localStorage-Loeschen fuer unbegrenzte Gratis-Renders. Pro IP
+   und Tag; die IP wird gehasht gespeichert (kein Klartext in Airtable).
+   Grosszuegiger als FREI_RENDERS, weil Buero-/Mobilfunk-IPs geteilt sind. */
+export const IP_RENDERS_PRO_TAG = 6;
+export function ipRenderKontingent(req: VercelRequest) {
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || 'unbekannt';
+  const hash = crypto.createHash('sha256').update(ip + '|' + geheim()).digest('hex').slice(0, 24);
+  return zaehle('ip:' + hash, new Date().toISOString().slice(0, 10), IP_RENDERS_PRO_TAG, null);
 }

@@ -2,7 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'crypto';
 import sharp from 'sharp';
 import { waitUntil } from '@vercel/functions';
-import { KONTO_AKTIV, kontoAusRequest, liesFrei, schreibeFrei, renderKontingent, FREI_RENDERS, RENDERS_PRO_MONAT } from './_konto';
+import { KONTO_AKTIV, kontoAusRequest, liesFrei, schreibeFrei, renderKontingent, ipRenderKontingent, FREI_RENDERS, RENDERS_PRO_MONAT } from './_konto';
 
 /* ── render.ts v49 — der vereinfachte Renderer ────────────────────────────
    v49: (1) NIE BLOCKIEREN — unbestätigte Anforderungen rendern normal mit
@@ -2270,6 +2270,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       } else {
         const frei = liesFrei(req);
         if (frei.r >= FREI_RENDERS) {
+          return res.status(401).json({
+            error: `Deine ${FREI_RENDERS} kostenlosen Renders sind aufgebraucht — mit einem kostenlosen Konto hast du ${RENDERS_PRO_MONAT} Renders pro Monat.`,
+            code: 'login_required', scope: 'render',
+          });
+        }
+        // v80: zweiter Riegel pro IP/Tag — greift auch ohne Cookie (iOS).
+        const ipKont = await ipRenderKontingent(req);
+        if (!ipKont.ok) {
           return res.status(401).json({
             error: `Deine ${FREI_RENDERS} kostenlosen Renders sind aufgebraucht — mit einem kostenlosen Konto hast du ${RENDERS_PRO_MONAT} Renders pro Monat.`,
             code: 'login_required', scope: 'render',
