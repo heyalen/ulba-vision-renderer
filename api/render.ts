@@ -4,7 +4,7 @@ import sharp from 'sharp';
 import { waitUntil } from '@vercel/functions';
 import { KONTO_AKTIV, kontoAusRequest, liesFrei, schreibeFrei, renderKontingent, ipRenderKontingent, FREI_RENDERS, RENDERS_PRO_MONAT } from './_konto';
 
-/* ── render.ts — der Renderer (Stand v80, 23.10.2026) ──────────────────────
+/* ── render.ts — der Renderer (Stand v82, 28.10.2026: + Linien { variante } / { farbe }) ──
    Ein Teil (System, optional mit gewaehltem Cap) + EINE Design-Welt (forceCodeId,
    Pflicht) -> ein Bild. Grundsatz: «Die Welt sagt was, das Teil sagt was es kann
    und wo — der Renderer uebersetzt.»
@@ -117,7 +117,7 @@ const WIRKSTOFF_TABLE = 'tblAzvL0t6GpyD8Ut';
 // 1:1 montiert (kein rohrRest), Altwerte behalten die v73-Korrektur.
 // v77: Hals-Band nur noch als UNTERGRENZE (Cap nie im Flaschenbauch);
 // nach oben frei — negative versatzY = schwebender Cap, Leinwand waechst.
-const RENDER_VERSION = 'v77';
+const RENDER_VERSION = 'v77'; // v82 (Linien) aendert keinen Einzel-Render -> Cache bleibt
 
 // ── v60: Silhouetten-Profil per FLOOD-FILL ──────────────────────────────
 // Der globale Weiss-Schwellwert frass weisse/chrome Caps auf weissem Grund
@@ -2055,6 +2055,230 @@ function taktOk(req: VercelRequest, max: number, fensterMs: number): boolean {
 // ── Main Handler ────────────────────────────────────────────────────
 export const config = { api: { bodyParser: true }, maxDuration: 300 };
 
+
+// ── Konto-Riegel als Funktion (v82: Render UND Linien-Varianten) ─────
+// Zaehlt einen frischen fal-Lauf. Antwortet selbst mit 401/429, wenn das
+// Kontingent erschoepft ist (dann ok=false). ENV ULBA_UNBEGRENZT =
+// kommagetrennte E-Mails ohne Limit (Alen/Team zum Testen).
+async function kontingentBuchen(req: VercelRequest, res: VercelResponse, nocache: boolean): Promise<{ ok: boolean; rendersRest: number | null }> {
+  const internAufruf = !!process.env.RENDER_SECRET && req.headers['x-render-secret'] === process.env.RENDER_SECRET;
+  if (!KONTO_AKTIV || internAufruf || nocache) return { ok: true, rendersRest: null };
+  const konto = await kontoAusRequest(req);
+  if (konto) {
+    const frei = String(process.env.ULBA_UNBEGRENZT || '').toLowerCase().split(',').map(e => e.trim()).filter(Boolean);
+    if (konto.email && frei.includes(konto.email.toLowerCase())) return { ok: true, rendersRest: null };
+    const kontingent = await renderKontingent(konto);
+    if (!kontingent.ok) {
+      res.status(429).json({
+        error: `Dein Monats-Kontingent ist erreicht — ${kontingent.limit} Renders pro Monat sind im kostenlosen Konto drin. Nächsten Monat geht es weiter.`,
+        code: 'quota', limit: kontingent.limit, genutzt: kontingent.genutzt,
+      });
+      return { ok: false, rendersRest: null };
+    }
+    return { ok: true, rendersRest: Math.max(0, kontingent.limit - kontingent.genutzt) };
+  }
+  const frei = liesFrei(req);
+  const wand = () => res.status(401).json({
+    error: `Deine ${FREI_RENDERS} kostenlosen Renders sind aufgebraucht — mit einem kostenlosen Konto hast du ${RENDERS_PRO_MONAT} Renders pro Monat.`,
+    code: 'login_required', scope: 'render',
+  });
+  if (frei.r >= FREI_RENDERS) { wand(); return { ok: false, rendersRest: null }; }
+  // v80: zweiter Riegel pro IP/Tag — greift auch ohne Cookie (iOS).
+  const ipKont = await ipRenderKontingent(req);
+  if (!ipKont.ok) { wand(); return { ok: false, rendersRest: null }; }
+  schreibeFrei(res, { ...frei, r: frei.r + 1 });
+  return { ok: true, rendersRest: Math.max(0, FREI_RENDERS - frei.r - 1) };
+}
+
+// ── v82 Linien ───────────────────────────────────────────────────────
+// Eine Primitive fuer beide Linien-Arten: ein FERTIGER Render wird per
+// Seedream-Edit nur umgefaerbt (Test 28.10.: Geometrie 4/4 identisch).
+//  · horizontal (art 'variante'): gleiches Teil, neue Akzentfarbe
+//  · vertikal  (art 'angleichen'): anderes Teil derselben Welt wird auf
+//    die gemessene Akzentfarbe des Anker-Renders gezogen (Range-Lock).
+// Zweites Bild = flache Farbflaeche: ohne sie kippen Mischtoene (Koralle
+// wurde Orange). Liegt die Quelle schon nah am Ziel (dE<8), kein fal-Lauf.
+const REC_ID_RE = /^rec[A-Za-z0-9]{14}$/;
+const LINIE_HOST_RE = /(^|\.)(fal\.media|airtableusercontent\.com)$/;
+
+function normHex(h: unknown): string | null {
+  const m = String(h || '').trim().match(/^#?([0-9a-f]{6})$/i);
+  return m ? `#${m[1].toUpperCase()}` : null;
+}
+
+// Dominante Akzentfarbe: Farbton-Histogramm (24 Faecher) ueber gesaettigte
+// Pixel, gewichtet nach Saettigung; satteste Pixel im staerksten Fach +/-1.
+// Chrom, Weiss, Glas und Schatten fallen raus (niedrige Saettigung).
+async function akzentHex(buf: Buffer): Promise<string | null> {
+  const { data, info } = await sharp(buf).resize(128, 128, { fit: 'inside' }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const px: Array<[number, number, number, number, number]> = [];
+  const gewicht = new Array(24).fill(0);
+  for (let i = 0; i < data.length; i += info.channels) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    if (d < 45 || max < 50) continue;
+    let h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+    const fach = Math.floor(h / 15) % 24;
+    gewicht[fach] += d;
+    px.push([r, g, b, fach, d]);
+  }
+  if (px.length < 40) return null;
+  const top = gewicht.indexOf(Math.max(...gewicht));
+  const nah = (f: number) => Math.min((f - top + 24) % 24, (top - f + 24) % 24) <= 1;
+  // Nur das satteste Drittel des Fachs: der volle Akzentton, nicht der
+  // Mittelwert eines Verlaufs (sonst wuerde Angleichen alles aufhellen).
+  const kern = px.filter(p => nah(p[3])).sort((x, y) => y[4] - x[4]);
+  let sr = 0, sg = 0, sb = 0, sw = 0;
+  for (const [r, g, b, , d] of kern.slice(0, Math.max(20, Math.ceil(kern.length / 3)))) { sr += r * d; sg += g * d; sb += b * d; sw += d; }
+  const hx = (v: number) => Math.round(v / sw).toString(16).padStart(2, '0');
+  return `#${hx(sr)}${hx(sg)}${hx(sb)}`.toUpperCase();
+}
+
+// Englischer Farbname fuer den Prompt — gegen Farbton-Drift bei Mischtoenen.
+function farbName(hex: string): string {
+  const rgb = hexRgb(hex);
+  if (!rgb) return hex;
+  const [r, g, b] = rgb.map(v => v / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
+  if (d < 0.08) return l > 0.85 ? 'white' : l < 0.18 ? 'black' : `${l > 0.6 ? 'light ' : l < 0.35 ? 'dark ' : ''}neutral grey`;
+  let h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h = (h * 60 + 360) % 360;
+  const s = d / (1 - Math.abs(2 * l - 1));
+  const basis =
+    h < 12 || h >= 345 ? (l > 0.6 ? 'pinkish coral / salmon (a pink-leaning red, NOT orange)' : 'red') :
+    h < 22 ? (l > 0.6 ? 'peach coral (red-orange leaning pink)' : 'red-orange') :
+    h < 40 ? 'orange' : h < 52 ? 'amber / golden yellow' : h < 68 ? 'yellow' :
+    h < 90 ? 'yellow-green / lime' : h < 160 ? 'green' : h < 185 ? 'teal / turquoise' :
+    h < 205 ? 'cyan / aqua blue' : h < 240 ? 'blue' : h < 265 ? 'indigo / violet-blue' :
+    h < 290 ? 'violet / purple' : h < 320 ? 'magenta / orchid' : 'pink / rose';
+  const ton = s < 0.35 ? 'muted ' : '';
+  const hell = l > 0.75 ? 'pale ' : l > 0.6 ? 'light ' : l < 0.3 ? 'deep dark ' : '';
+  return `${hell}${ton}${basis}`;
+}
+
+async function farbFeldDataUri(hex: string): Promise<string> {
+  const png = await sharp({ create: { width: 256, height: 256, channels: 3, background: hex } }).png().toBuffer();
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
+
+function linienPrompt(quelleHex: string | null, zielHex: string): string {
+  const ziel = `${zielHex} (${farbName(zielHex)})`;
+  const was = quelleHex
+    ? `Every area of image 1 that currently shows the accent color ${quelleHex} (${farbName(quelleHex)}) — printed color, gradient, tint, coated or label color — must become the swatch color ${ziel}. Keep the same gradient direction and fade, the same opacity, transparency and surface finish.`
+    : `Apply the swatch color ${ziel} as the main decoration color of the packaging body (on its label instead, if the body is clear or amber glass), keeping the existing surface finish.`;
+  return [
+    `Image 1 is a finished packaging render. Image 2 is a flat color swatch: ${ziel}. Edit only the color.`,
+    was,
+    'Match the swatch hue exactly; do not drift toward a neighbouring hue.',
+    'Keep everything else identical: packaging shape and proportions, closure / pump shape and color, metal and chrome parts, glass, lighting, reflections, background, camera angle and framing.',
+    'Do not add text, stripes, logos or decorations. Output only the edited image 1.',
+  ].join(' ');
+}
+
+const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function linieHandler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  const b = req.body as any;
+  // ── Messen: Akzentfarbe eines fertigen Renders (kostenlos) ──
+  if (b.farbe) {
+    const id = String(b.farbe?.cacheId || '');
+    if (!REC_ID_RE.test(id)) { res.status(400).json({ error: 'cacheId fehlt' }); return; }
+    let url: string | null = null;
+    for (let i = 0; i < 5 && !url; i++) {
+      if (i) await pause(2500);
+      url = imgUrl((await airtableFetch(CACHE_TABLE, id)).fields?.['Bild']);
+    }
+    if (!url) { res.status(409).json({ error: 'Render wird noch gespeichert — gleich nochmal.' }); return; }
+    const buf = Buffer.from(await (await fetchT(url, { timeoutMs: 20000, label: 'linie mess' })).arrayBuffer());
+    res.status(200).json({ hex: await akzentHex(buf) });
+    return;
+  }
+
+  // ── Variante / Angleichen ──
+  const v = b.variante || {};
+  const quelleId = String(v.quelleCacheId || '');
+  const zielHex = normHex(v.zielHex);
+  const art: 'variante' | 'angleichen' = v.art === 'angleichen' ? 'angleichen' : 'variante';
+  if (!REC_ID_RE.test(quelleId) || !zielHex) { res.status(400).json({ error: 'quelleCacheId und zielHex (#RRGGBB) sind erforderlich' }); return; }
+
+  // Quelle: gespeichertes Bild; frisch gerenderte (Upload laeuft noch) ueber
+  // die fal-URL aus der Render-Antwort (nur fal/Airtable-Hosts) oder warten.
+  let q = await airtableFetch(CACHE_TABLE, quelleId);
+  let url: string | null = imgUrl(q.fields?.['Bild']);
+  if (!url && typeof v.quelleUrl === 'string') {
+    try { const u = new URL(v.quelleUrl); if (u.protocol === 'https:' && LINIE_HOST_RE.test(u.hostname)) url = v.quelleUrl; } catch { /* ungueltig */ }
+  }
+  for (let i = 0; i < 4 && !url; i++) {
+    await pause(2500);
+    q = await airtableFetch(CACHE_TABLE, quelleId);
+    url = imgUrl(q.fields?.['Bild']);
+  }
+  if (!url) { res.status(409).json({ error: 'Render wird noch gespeichert — gleich nochmal.' }); return; }
+  const qf = q.fields || {};
+  const buf = Buffer.from(await (await fetchT(url, { timeoutMs: 20000, label: 'linie quelle' })).arrayBuffer());
+  const meta = await sharp(buf).metadata();
+  const quelleHex = await akzentHex(buf).catch(() => null);
+
+  // Schon nah genug (v. a. beim Angleichen): Quelle unveraendert, kein Lauf.
+  const dE = quelleHex ? deltaE(quelleHex, zielHex) : null;
+  if (dE != null && dE < 8) {
+    res.status(200).json({ renderingUrl: url, cacheId: quelleId, quelleHex, zielHex, unveraendert: true, rendersRest: null });
+    return;
+  }
+
+  const key = `${RENDER_VERSION}_lin_${quelleId}_${zielHex.slice(1)}`;
+  try {
+    const hit = await airtableQuery(CACHE_TABLE, `AND({Cache_Key}='${key}',{Status}='Done')`, ['Bild'], 1);
+    const hitUrl = hit[0] ? imgUrl(hit[0].fields['Bild']) : null;
+    if (hitUrl) { res.status(200).json({ renderingUrl: hitUrl, cacheId: hit[0].id, quelleHex, zielHex, cached: true, rendersRest: null }); return; }
+  } catch { /* Cache-Miss */ }
+
+  const kont = await kontingentBuchen(req, res, false);
+  if (!kont.ok) return;
+
+  const prompt = linienPrompt(quelleHex, zielHex);
+  let board: any = {};
+  try { board = qf['Board'] ? JSON.parse(qf['Board']) : {}; } catch { board = {}; }
+  const quelleName = String(qf['Konzept_Name'] || '');
+  const cacheId = await cacheCreate({
+    Cache_Key: key,
+    System: Array.isArray(qf['System']) ? qf['System'] : undefined,
+    Teil_Name: String(qf['Teil_Name'] || ''),
+    Design_Code: Array.isArray(qf['Design_Code']) ? qf['Design_Code'] : undefined,
+    Status: 'Pending',
+    Engine: 'seedream',
+    Query_Input: `Linie (${art}) ${zielHex} aus ${quelleId}`,
+    Rendering_Prompt: prompt,
+    Konzept_Name: quelleName,
+    Konzept_Story: String(qf['Konzept_Story'] || ''),
+    Board: JSON.stringify({ ...board, montiert: true, linie: { art, quelle: quelleId, quelleHex, zielHex } }),
+    Tier: 'lite',
+    Created_At: new Date().toISOString(),
+  }).catch(() => null);
+
+  let neuUrl: string;
+  try {
+    const aspect = aspectFromAttachment([{ width: meta.width, height: meta.height }]);
+    neuUrl = await falEdit([url, await farbFeldDataUri(zielHex)], prompt, aspect);
+  } catch (e) {
+    if (cacheId) await cachePatch(cacheId, { Status: 'Error', Render_Log: String(e instanceof Error ? e.message : e).slice(0, 2000) }).catch(() => null);
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Variante fehlgeschlagen' });
+    return;
+  }
+  res.status(200).json({ renderingUrl: neuUrl, cacheId, quelleHex, zielHex, cached: false, rendersRest: kont.rendersRest });
+
+  if (cacheId) waitUntil((async () => {
+    try {
+      const nb = Buffer.from(await (await fetchT(neuUrl, { timeoutMs: 45000, label: 'linie download' })).arrayBuffer());
+      const ok = await ladeAttachmentHoch(cacheId, CACHE_IMAGE_FIELD, nb, `linie_${zielHex.slice(1)}_${Date.now()}.jpg`);
+      await cachePatch(cacheId, ok ? { Status: 'Done' } : { Status: 'Error', Render_Log: 'Bild-Upload fehlgeschlagen' });
+    } catch (e) {
+      await cachePatch(cacheId, { Status: 'Error', Render_Log: `Persist: ${String(e).slice(0, 1500)}` }).catch(() => null);
+    }
+  })());
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Render-Secret, X-Ulba-Dev');
@@ -2104,6 +2328,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     } catch {
       return res.status(200).json({ codes: [], facetten: { register: [], segment: [], form: [], material: [], wirkstoff: [] } });
     }
+  }
+
+  // v82 — Linien (Farbvariante / Angleichen / Akzent messen).
+  if ((req.body as any)?.variante || (req.body as any)?.farbe) {
+    try { await linieHandler(req, res); }
+    catch (e) { if (!res.headersSent) res.status(500).json({ error: e instanceof Error ? e.message : 'Linie fehlgeschlagen' }); }
+    return;
   }
 
   const {
@@ -2219,39 +2450,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // RENDERS_PRO_MONAT pro Monat (Airtable `Nutzer`). Interne Aufrufe
     // (x-render-secret) und Dev-Laeufe (nocache) zaehlen nicht. Ohne
     // CLERK_PUBLISHABLE_KEY ist der ganze Block stumm.
-    let rendersRest: number | null = null;
-    const internAufruf = !!process.env.RENDER_SECRET && req.headers['x-render-secret'] === process.env.RENDER_SECRET;
-    if (KONTO_AKTIV && !internAufruf && !nocache) {
-      const konto = await kontoAusRequest(req);
-      if (konto) {
-        const kontingent = await renderKontingent(konto);
-        if (!kontingent.ok) {
-          return res.status(429).json({
-            error: `Dein Monats-Kontingent ist erreicht — ${kontingent.limit} Renders pro Monat sind im kostenlosen Konto drin. Nächsten Monat geht es weiter.`,
-            code: 'quota', limit: kontingent.limit, genutzt: kontingent.genutzt,
-          });
-        }
-        rendersRest = Math.max(0, kontingent.limit - kontingent.genutzt);
-      } else {
-        const frei = liesFrei(req);
-        if (frei.r >= FREI_RENDERS) {
-          return res.status(401).json({
-            error: `Deine ${FREI_RENDERS} kostenlosen Renders sind aufgebraucht — mit einem kostenlosen Konto hast du ${RENDERS_PRO_MONAT} Renders pro Monat.`,
-            code: 'login_required', scope: 'render',
-          });
-        }
-        // v80: zweiter Riegel pro IP/Tag — greift auch ohne Cookie (iOS).
-        const ipKont = await ipRenderKontingent(req);
-        if (!ipKont.ok) {
-          return res.status(401).json({
-            error: `Deine ${FREI_RENDERS} kostenlosen Renders sind aufgebraucht — mit einem kostenlosen Konto hast du ${RENDERS_PRO_MONAT} Renders pro Monat.`,
-            code: 'login_required', scope: 'render',
-          });
-        }
-        schreibeFrei(res, { ...frei, r: frei.r + 1 });
-        rendersRest = Math.max(0, FREI_RENDERS - frei.r - 1);
-      }
-    }
+    const kont = await kontingentBuchen(req, res, nocache);
+    if (!kont.ok) return;
+    const rendersRest = kont.rendersRest;
 
     // ── 2. Fetch System Record ──────────────────────────────────────
     const sys = await airtableFetch(SYSTEM_TABLE, systemId);
