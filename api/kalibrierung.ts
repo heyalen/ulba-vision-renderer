@@ -48,6 +48,8 @@ async function fetchT(
 // ── Zugangs-Riegel (identisch zu render/search/renders) ───────────────
 const ULBA_ORIGINS = new Set<string>([
   'https://ulba.vercel.app',
+  'https://ulba.ai',
+  'https://www.ulba.ai',
   'http://localhost:3000',
   ...String(process.env.ULBA_ORIGINS || '').split(',').map(o => o.trim()).filter(o => /^https?:\/\//.test(o)),
 ]);

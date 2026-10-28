@@ -2017,6 +2017,8 @@ const cachePatch = (id: string, fields: Record<string, any>) =>
 // Nur die eigene Oberflaeche darf rufen, und auch die nicht endlos.
 const ULBA_ORIGINS = new Set<string>([
   'https://ulba.vercel.app',
+  'https://ulba.ai',
+  'https://www.ulba.ai',
   'http://localhost:3000',
   ...String(process.env.ULBA_ORIGINS || '').split(',').map(o => o.trim()).filter(o => /^https?:\/\//.test(o)),
 ]);

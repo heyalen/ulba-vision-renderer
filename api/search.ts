@@ -1581,6 +1581,8 @@ function hardfactScore(p: ProductData, l: Bildlesart): { score: number; abweichu
 // gilt: nur die eigene Oberflaeche darf rufen, und auch die nicht endlos.
 const ULBA_ORIGINS = new Set<string>([
   'https://ulba.vercel.app',
+  'https://ulba.ai',
+  'https://www.ulba.ai',
   'http://localhost:3000',
   // Zusatz-Origins (Preview-Deploys, spaeter die eigene Domain) ohne
   // Code-Deploy: ENV ULBA_ORIGINS = kommagetrennte Liste voller Origins.
