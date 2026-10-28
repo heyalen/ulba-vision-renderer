@@ -17,8 +17,11 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import crypto from 'crypto';
 
 export const FREI_SUCHEN = 3;        // anonyme Suchen, danach Anmelde-Wand
-export const FREI_RENDERS = 2;       // anonyme frische Renders (Cache zaehlt nie)
-export const RENDERS_PRO_MONAT = 5;  // kostenloses Konto
+// ⚠️ TESTPHASE (28.10.2026, Alen): alle Render-Limits auf 500.
+// VOR GO-LIVE ZURUECK auf: FREI_RENDERS 2 · RENDERS_PRO_MONAT 5 · IP_RENDERS_PRO_TAG 6
+// (und lib/konto.tsx im Frontend: FREI_RENDERS + RENDERS_PRO_MONAT).
+export const FREI_RENDERS = 500;     // anonyme frische Renders (Cache zaehlt nie) — live: 2
+export const RENDERS_PRO_MONAT = 500; // kostenloses Konto — live: 5
 
 export const KONTO_AKTIV = !!process.env.CLERK_PUBLISHABLE_KEY;
 
@@ -165,7 +168,7 @@ export function renderKontingent(konto: Konto) {
    reichte localStorage-Loeschen fuer unbegrenzte Gratis-Renders. Pro IP
    und Tag; die IP wird gehasht gespeichert (kein Klartext in Airtable).
    Grosszuegiger als FREI_RENDERS, weil Buero-/Mobilfunk-IPs geteilt sind. */
-export const IP_RENDERS_PRO_TAG = 6;
+export const IP_RENDERS_PRO_TAG = 500; // TESTPHASE — live: 6
 export function ipRenderKontingent(req: VercelRequest) {
   const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || 'unbekannt';
   const hash = crypto.createHash('sha256').update(ip + '|' + geheim()).digest('hex').slice(0, 24);
