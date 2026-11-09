@@ -13,7 +13,7 @@
                    (dann übernimmt die bestehende Bulk_Source-Automation v6).
    Fingerabdrücke {pfad: hash} landen in Quellen.URL_Fingerprints → Basis
    für den Delta-Crawl (#14).
-   POST, Header x-ulba-dev: <ULBA_DEV_SECRET>
+   POST, Header x-ulba-dev: <CRAWL_SECRET> (oder ULBA_DEV_SECRET)
    Body: { quelleId: "rec…", schritt?: "entdecken"|"extrahieren", max?: 400 }
    ══════════════════════════════════════════════════════════════════════ */
 import { VercelRequest, VercelResponse } from '@vercel/node';
@@ -197,14 +197,15 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
   const rest = (await alle(T.bulk, [B.url], formel)).length;
   await quelleSetzen(q.id, { [Q.fp]: JSON.stringify(fp), [Q.letzter]: new Date().toISOString(),
     [Q.status]: rest ? 'läuft' : 'aktiv', [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} Extrahiert: ${fertig} Seiten in diesem Lauf, noch offen: ${rest}.` });
-  if (rest) await fetch(selbst, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ulba-dev': String(process.env.ULBA_DEV_SECRET) },
+  if (rest) await fetch(selbst, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ulba-dev': String(process.env.CRAWL_SECRET || process.env.ULBA_DEV_SECRET) },
     body: JSON.stringify({ quelleId: q.id, schritt: 'extrahieren' }) }).catch(() => {});
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const start = Date.now();
   if (req.method !== 'POST') return res.status(405).json({ error: 'nur POST' });
-  if (!process.env.ULBA_DEV_SECRET || req.headers['x-ulba-dev'] !== process.env.ULBA_DEV_SECRET)
+  const erlaubt = [process.env.CRAWL_SECRET, process.env.ULBA_DEV_SECRET].filter(Boolean);
+  if (!erlaubt.length || !erlaubt.includes(String(req.headers['x-ulba-dev'] || '')))
     return res.status(401).json({ error: 'nicht autorisiert' });
   for (const k of ['AIRTABLE_PAT', 'FIRECRAWL_API_KEY', 'ANTHROPIC_API_KEY'])
     if (!process.env[k]) return res.status(500).json({ error: `${k} fehlt` });
