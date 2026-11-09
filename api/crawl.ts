@@ -211,19 +211,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { quelleId, schritt = 'entdecken', max = 400 } = (req.body || {}) as { quelleId?: string; schritt?: string; max?: number };
   if (!quelleId) return res.status(400).json({ error: 'quelleId nötig' });
   const selbst = `https://${req.headers.host}/api/crawl`;
-  let q: any;
-  try {
-    q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`);
-    let info: any = {};
-    let lname: string;
-    if (schritt === 'entdecken') { info = await entdecken(q, Math.min(Number(max) || 400, 2000)); lname = info.lieferant;
-      q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`); }
-    else lname = await lieferantName(q);
-    waitUntil(extrahierenSchleife(q, lname, selbst, start).catch(e =>
-      quelleSetzen(quelleId, { [Q.status]: 'Fehler', [Q.log]: `Extraktion abgebrochen: ${e.message}` }).catch(() => {})));
-    return res.status(200).json({ ok: true, schritt, ...info });
-  } catch (e: any) {
-    await quelleSetzen(quelleId, { [Q.status]: 'Fehler', [Q.log]: `${new Date().toISOString().slice(0, 16)} ${e.message}` }).catch(() => {});
-    return res.status(500).json({ error: e.message });
-  }
+  // Sofort antworten (Airtable-Automation wartet nicht lange), Arbeit im Hintergrund.
+  waitUntil((async () => {
+    try {
+      let q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`);
+      let lname: string;
+      if (schritt === 'entdecken') {
+        await quelleSetzen(quelleId, { [Q.status]: 'läuft', [Q.log]: `${new Date().toISOString().slice(0, 16)} Crawl gestartet …` });
+        lname = (await entdecken(q, Math.min(Number(max) || 400, 2000))).lieferant;
+        q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`);
+      } else lname = await lieferantName(q);
+      await extrahierenSchleife(q, lname, selbst, start);
+    } catch (e: any) {
+      await quelleSetzen(quelleId, { [Q.status]: 'Fehler', [Q.log]: `${new Date().toISOString().slice(0, 16)} ${e.message}` }).catch(() => {});
+    }
+  })());
+  return res.status(202).json({ ok: true, schritt, quelleId });
 }
