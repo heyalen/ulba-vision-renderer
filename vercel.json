@@ -6,6 +6,9 @@
     "api/harmonize/route.ts": {
       "memory": 1024,
       "maxDuration": 30
+    },
+    "api/crawl.ts": {
+      "maxDuration": 300
     }
   }
 }
