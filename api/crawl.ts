@@ -29,8 +29,9 @@ const B = { lieferant: 'fldFnMy19K5DbOGpT', name: 'fldAbxKw2I4bBjAe5', url: 'fld
   bild: 'fldGeadiTTVSYh1lq', status: 'fld9Ges6UCFGHSCH7', artnr: 'fldNS2qarbg4JLtD8' };
 const L = { name: 'fldq27U7UQU6NZU7P', website: 'fldDfEAJQjKB3ei0G' };
 const SYS_LINK = 'fldUQza6Xa9Eqksaw';
-const HAPPEN = 9;           // Seiten pro Häppchen (Firecrawl-Hobby: 5 parallel)
-const PARALLEL = 3;
+const HAPPEN = 9;           // Seiten pro Häppchen
+const RPM = Math.max(1, Number(process.env.FIRECRAWL_RPM) || 9); // Firecrawl Free: 10/min → 9; Hobby: Env höher setzen
+const ABSTAND_MS = Math.ceil(60_000 / RPM);
 const ZEIT_MS = 110_000;    // kein neues Häppchen mehr danach → Staffelübergabe (maxDuration 300)
 
 const pause = (ms: number) => new Promise(z => setTimeout(z, ms));
@@ -76,6 +77,15 @@ const normUrl = (u: string) => { try { const x = new URL(u); x.hash = ''; return
 const host = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 const pfad = (u: string) => { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } };
 const hash = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 10);
+class RateLimit extends Error {}
+/* Sprach-Dubletten: /en/x, /it/x, /fr/x → eine URL (Vorzug de > en > erste) */
+const SPRACHE = /^\/(de|en|it|fr|es|pt|nl|pl|cs|ru|zh|ja|ko|tr)(-[a-z]{2})?(?=\/)/i;
+function ohneSprachDubletten(urls: string[]): string[] {
+  const gruppen = new Map<string, string[]>();
+  for (const u of urls) { const k = pfad(u).replace(SPRACHE, ''); (gruppen.get(k) || gruppen.set(k, []).get(k)!).push(u); }
+  const rang = (u: string) => { const m = pfad(u).match(SPRACHE); const l = (m?.[1] || '').toLowerCase(); return l === 'de' ? 0 : l === 'en' ? 1 : l ? 3 : 2; };
+  return [...gruppen.values()].map(g => g.sort((a, b) => rang(a) - rang(b))[0]);
+}
 
 /* ── Firecrawl ─────────────────────────────────────────────────────── */
 async function fc(endpoint: 'map' | 'scrape', body: any) {
@@ -83,6 +93,7 @@ async function fc(endpoint: 'map' | 'scrape', body: any) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.FIRECRAWL_API_KEY}` },
     body: JSON.stringify(body) });
   const j: any = await r.json().catch(() => ({}));
+  if (r.status === 429) throw new RateLimit('Firecrawl Rate-Limit');
   if (!r.ok || j.success === false) throw new Error(`Firecrawl ${endpoint} ${r.status}: ${String(j.error || '').slice(0, 160)}`);
   return j;
 }
@@ -140,9 +151,15 @@ async function entdecken(q: any, max: number) {
   }
   let re: RegExp;
   try { re = new RegExp(muster, 'i'); } catch { throw new Error(`Ungültiges URL_Muster: ${muster}`); }
-  const produkte = muster ? kandidaten.filter(u => re.test(pfad(u))) : [];
+  const produkte = ohneSprachDubletten(muster ? kandidaten.filter(u => re.test(pfad(u))) : []);
   if (!produkte.length) throw new Error(`Kein Produkt-URL-Muster gefunden (${kandidaten.length} URLs). URL_Muster von Hand setzen.`);
 
+  // Wiederholbare Fehler (Rate-Limit) dieses Lieferanten löschen → werden neu angelegt
+  const alteFehler = await alle(T.bulk, [B.url], `AND({${B.status}} = "Error", {${B.lieferant}} = "${lname.replace(/"/g, '')}", OR(FIND("429", {${B.roh}}), FIND("Rate", {${B.roh}})))`);
+  for (let i = 0; i < alteFehler.length; i += 10) {
+    await at(`${T.bulk}?${alteFehler.slice(i, i + 10).map((r: any) => `records[]=${r.id}`).join('&')}`, { method: 'DELETE' });
+    await pause(220);
+  }
   // Dubletten-Check: schon in Bulk_Source oder System?
   const bekannt = new Set<string>();
   (await alle(T.bulk, [B.url], `{${B.url}} != ""`)).forEach(r => bekannt.add(normUrl(r.fields[B.url] || '')));
@@ -175,6 +192,7 @@ async function seiteExtrahieren(rec: any): Promise<{ id: string; fields: Record<
     if (/^https?:\/\//.test(bild)) fields[B.bild] = [{ url: bild }];
     return { id: rec.id, fields, fp: [pfad(url), hash([o.name, o.artikelnummer, o.volumen, o.material, bild].join('|'))] };
   } catch (e: any) {
+    if (e instanceof RateLimit) throw e;
     return { id: rec.id, fields: { [B.status]: 'Error', [B.roh]: `Crawler-Fehler: ${e.message}` } };
   }
 }
@@ -182,21 +200,29 @@ async function seiteExtrahieren(rec: any): Promise<{ id: string; fields: Record<
 async function extrahierenSchleife(q: any, lname: string, selbst: string, start: number) {
   const fp: Record<string, string> = (() => { try { return JSON.parse(q.fields[Q.fp] || '{}'); } catch { return {}; } })();
   const formel = `AND({${B.status}} = "zu crawlen", {${B.lieferant}} = "${lname.replace(/"/g, '')}")`;
-  let fertig = 0;
-  while (Date.now() - start < ZEIT_MS) {
+  let fertig = 0, gebremst = false;
+  while (Date.now() - start < ZEIT_MS && !gebremst) {
     const p = new URLSearchParams({ pageSize: String(HAPPEN), returnFieldsByFieldId: 'true', filterByFormula: formel });
     p.append('fields[]', B.url);
     const offen = (await atJson(`${T.bulk}?${p}`)).records || [];
     if (!offen.length) break;
     const ergebnisse: any[] = [];
-    for (let i = 0; i < offen.length; i += PARALLEL) ergebnisse.push(...await Promise.all(offen.slice(i, i + PARALLEL).map(seiteExtrahieren)));
+    for (const rec of offen) {
+      if (Date.now() - start > ZEIT_MS) break;
+      const t0 = Date.now();
+      try { ergebnisse.push(await seiteExtrahieren(rec)); }
+      catch (e) { if (e instanceof RateLimit) { gebremst = true; break; } throw e; }
+      const rest = ABSTAND_MS - (Date.now() - t0);
+      if (rest > 0) await pause(rest);
+    }
     ergebnisse.forEach(e => { if (e.fp) fp[e.fp[0]] = e.fp[1]; });
-    await schreiben(T.bulk, 'PATCH', ergebnisse.map(e => ({ id: e.id, fields: e.fields })));
+    if (ergebnisse.length) await schreiben(T.bulk, 'PATCH', ergebnisse.map(e => ({ id: e.id, fields: e.fields })));
     fertig += ergebnisse.length;
   }
+  if (gebremst) await pause(60_000); // Firecrawl-Minute abwarten, dann Staffelübergabe
   const rest = (await alle(T.bulk, [B.url], formel)).length;
   await quelleSetzen(q.id, { [Q.fp]: JSON.stringify(fp), [Q.letzter]: new Date().toISOString(),
-    [Q.status]: rest ? 'läuft' : 'aktiv', [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} Extrahiert: ${fertig} Seiten in diesem Lauf, noch offen: ${rest}.` });
+    [Q.status]: rest ? 'läuft' : 'aktiv', [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} Extrahiert: ${fertig} Seiten in diesem Lauf${gebremst ? ' (Rate-Limit, warte)' : ''}, noch offen: ${rest}.` });
   if (rest) await fetch(selbst, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ulba-dev': String(process.env.CRAWL_SECRET || process.env.ULBA_DEV_SECRET) },
     body: JSON.stringify({ quelleId: q.id, schritt: 'extrahieren' }) }).catch(() => {});
 }
@@ -209,7 +235,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(401).json({ error: 'nicht autorisiert' });
   for (const k of ['AIRTABLE_PAT', 'FIRECRAWL_API_KEY', 'ANTHROPIC_API_KEY'])
     if (!process.env[k]) return res.status(500).json({ error: `${k} fehlt` });
-  const { quelleId, schritt = 'entdecken', max = 400 } = (req.body || {}) as { quelleId?: string; schritt?: string; max?: number };
+  const { quelleId, schritt = 'entdecken', max = 600 } = (req.body || {}) as { quelleId?: string; schritt?: string; max?: number };
   if (!quelleId) return res.status(400).json({ error: 'quelleId nötig' });
   const selbst = `https://${req.headers.host}/api/crawl`;
   // Sofort antworten (Airtable-Automation wartet nicht lange), Arbeit im Hintergrund.
@@ -219,7 +245,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       let lname: string;
       if (schritt === 'entdecken') {
         await quelleSetzen(quelleId, { [Q.status]: 'läuft', [Q.log]: `${new Date().toISOString().slice(0, 16)} Crawl gestartet …` });
-        lname = (await entdecken(q, Math.min(Number(max) || 400, 2000))).lieferant;
+        lname = (await entdecken(q, Math.min(Number(max) || 600, 2000))).lieferant;
         q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`);
       } else lname = await lieferantName(q);
       await extrahierenSchleife(q, lname, selbst, start);
