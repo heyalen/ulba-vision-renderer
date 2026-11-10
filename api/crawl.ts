@@ -231,7 +231,7 @@ async function entdecken(q: any, max: number) {
 }
 
 /* ── 2. EXTRAHIEREN ────────────────────────────────────────────────── */
-async function seiteExtrahieren(rec: any, muster?: RegExp): Promise<{ id: string; fields: Record<string, any>; fp?: [string, string] }> {
+async function seiteExtrahieren(rec: any, muster?: RegExp, sortiment = ''): Promise<{ id: string; fields: Record<string, any>; fp?: [string, string] }> {
   const url = String(rec.fields[B.url]);
   try {
     const s = await jina(url);
@@ -249,7 +249,7 @@ async function seiteExtrahieren(rec: any, muster?: RegExp): Promise<{ id: string
       .filter(b => !/logo|icon|sprite|flag|banner|badge|payment/i.test(b)).slice(0, 15);
     const o = await haiku(
       'Du extrahierst Produktdaten von Seiten kosmetischer Primärpackmittel-Hersteller. Nur Fakten, die auf der Seite stehen. Antworte nur mit JSON.',
-      `URL: ${url}\nSeitentitel: ${s.title.slice(0, 160)}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
+      `${SORTIMENT_HINWEIS[sortiment] ? `Hinweis zum Lieferanten: ${SORTIMENT_HINWEIS[sortiment]}\n` : ''}URL: ${url}\nSeitentitel: ${s.title.slice(0, 160)}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
 "ist_produkt": true wenn die Seite EIN konkretes Packmittel beschreibt (sonst false, z.B. Kollektion/News/Übersicht),
 "rolle": "behaelter" (Flasche/Tiegel/Tube/Dose OHNE montierten Verschluss als Produkt) | "system" (Behälter INKLUSIVE Verschluss als eine verkaufte Einheit, z.B. Airless-System, Roll-on komplett) | "verschluss" (Pumpe, Sprüher, Dropper/Pipette, Kappe, Disc-Top, Actuator als eigenes Produkt) | "unklar",
 "name": "Produktname wie beim Hersteller INKLUSIVE Volumen, wie im Seitentitel (z.B. FUJI 30ml, ROUND 200ml)",
@@ -285,6 +285,15 @@ async function seiteExtrahieren(rec: any, muster?: RegExp): Promise<{ id: string
   }
 }
 
+// Sortiment der Quelle → Hinweis an die KI (Spezialisten: alles ist Verschluss, Hals besonders wichtig)
+const Q_SORTIMENT = 'fldVFhexIWki5G9qX';
+const SORTIMENT_HINWEIS: Record<string, string> = {
+  'Pumpen & Sprüher': 'Spezialist für Dosiersysteme. Produkte sind fast immer rolle "verschluss" (Pumpe, Sprüher, Lotionpumpe, Actuator). Hals-Norm (z.B. 20/410, 24/410, FEA15) unbedingt exakt erfassen.',
+  'Aerosol (Dose/Ventil)': 'Aerosol-Spezialist. Dose = "behaelter"; Ventil, Sprühkopf, Actuator, Kappe = "verschluss". Ventilteller-Norm (z.B. 1 Zoll / 25,4 mm) als hals erfassen.',
+  'Verschlüsse': 'Verschluss-Spezialist. Produkte sind fast immer rolle "verschluss". Hals-Norm exakt erfassen.',
+  'nur Behälter': 'Lieferant verkauft nur Behälter ohne Verschluss: rolle meist "behaelter". Hals-Norm exakt erfassen.',
+};
+
 // Stopp-Schalter: Quelle auf «pausiert» setzen → Kette bricht nach der aktuellen Gruppe ab.
 async function gestoppt(id: string): Promise<boolean> {
   try { const r = await atJson(`${T.quellen}/${id}?returnFieldsByFieldId=true&fields[]=${Q.status}`); return String(r.fields?.[Q.status] || '') === 'pausiert'; }
@@ -309,7 +318,7 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
       if (Date.now() - start > ZEIT_MS) break;
       const t0 = Date.now();
       const gruppe = offen.slice(i, i + PARALLEL);
-      const res = await Promise.allSettled(gruppe.map((rec: any) => seiteExtrahieren(rec, musterRe)));
+      const res = await Promise.allSettled(gruppe.map((rec: any) => seiteExtrahieren(rec, musterRe, String(q.fields[Q_SORTIMENT] || ''))));
       for (const r of res) {
         if (r.status === 'fulfilled') ergebnisse.push(r.value);
         else if (r.reason instanceof RateLimit) gebremst = true;
