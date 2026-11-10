@@ -258,8 +258,9 @@ async function entdecken(q: any, max: number) {
   if (!q.fields[Q_SORTIMENT]) {
     const o = await haiku(
       'Du ordnest Hersteller kosmetischer Primärpackmittel anhand ihrer Produkt-URLs einem Sortiment zu. Antworte nur mit JSON.',
-      `Lieferant: ${lname}\nProdukt-Pfade (Auszug):\n${produkte.slice(0, 200).map(pfad).join('\n')}\n\nJSON {"sortiment": eines von ${JSON.stringify(SORTIMENTE)}}. "Komplett-Systeme" = Behälter UND passende Verschlüsse; "gemischt" = breites Sortiment ohne klaren Schwerpunkt; Spezialisten nur wählen, wenn klar >80 % der Produkte in diese Gruppe fallen.`, 100).catch(() => ({}));
-    if (SORTIMENTE.includes(o.sortiment)) auto[Q_SORTIMENT] = o.sortiment;
+      `Lieferant: ${lname}\nProdukt-Pfade (Auszug):\n${produkte.slice(0, 200).map(pfad).join('\n')}\n\nJSON {"sortiment": eines von ${JSON.stringify(SORTIMENTE)}}. "Komplett-Systeme" = Behälter UND passende Verschlüsse; "gemischt" = breites Sortiment ohne klaren Schwerpunkt; Spezialisten nur wählen, wenn klar >80 % der Produkte in diese Gruppe fallen. Wenn die Pfade nichts über die Produktart verraten: {"sortiment":""}.`, 300).catch(() => ({}));
+    const treffer = sortimentFinden(String(o.sortiment || ''));
+    if (treffer) auto[Q_SORTIMENT] = treffer;
   }
 
   // Wiederholbare Fehler (Rate-Limit) dieses Lieferanten löschen → werden neu angelegt
@@ -359,6 +360,8 @@ const Q_QUELLTYP = 'flddggs2HXaT3tZp6';
 const B_QUAL = 'fldjb9aSABC2tCNHB', Q_QOK = 'fldpsHxxTHwmzZIcR';
 const PROBE = 6, PROBE_MIN = 45; // Probelauf: 6 Seiten, Schnitt < 45 → Quelle stoppt zur Prüfung
 const SORTIMENTE = ['Komplett-Systeme', 'nur Behälter', 'Pumpen & Sprüher', 'Aerosol (Dose/Ventil)', 'Verschlüsse', 'gemischt'];
+const sortimentFinden = (x: string) => { const n = x.normalize('NFC').toLowerCase().trim(); if (!n) return '';
+  return SORTIMENTE.find(o => o.toLowerCase() === n) || SORTIMENTE.find(o => n.includes(o.toLowerCase().split(' ')[0])) || ''; };
 const SORTIMENT_HINWEIS: Record<string, string> = {
   'Pumpen & Sprüher': 'Spezialist für Dosiersysteme. Produkte sind fast immer rolle "verschluss" (Pumpe, Sprüher, Lotionpumpe, Actuator). Hals-Norm (z.B. 20/410, 24/410, FEA15) unbedingt exakt erfassen.',
   'Aerosol (Dose/Ventil)': 'Aerosol-Spezialist. Dose = "behaelter"; Ventil, Sprühkopf, Actuator, Kappe = "verschluss". Ventilteller-Norm (z.B. 1 Zoll / 25,4 mm) als hals erfassen.',
@@ -428,7 +431,18 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
   if (gebremst && !stopp) await pause(45_000); // Rate-Limit: kurz abwarten, dann Staffelübergabe
   if (!stopp) stopp = await gestoppt(q.id);
   const rest = (await alle(T.bulk, [B.url], formel)).length;
-  await quelleSetzen(q.id, { [Q.fp]: JSON.stringify(fp), [Q.letzter]: new Date().toISOString(),
+  // Sortiment aus den echten Rollen ableiten, falls noch leer (kostenlos, verlässlicher als URL-Raten)
+  const nachSortiment: Record<string, string> = {};
+  if (!rest && !stopp) {
+    const aktuell = await atJson(`${T.quellen}/${q.id}?returnFieldsByFieldId=true&fields[]=${Q_SORTIMENT}`).catch(() => ({ fields: {} }));
+    if (!aktuell.fields?.[Q_SORTIMENT]) {
+      const rollen = (await alle(T.bulk, [B.rolle], `AND({${B.lieferant}} = "${lname.replace(/"/g, '')}", {${B.rolle}} != "")`)).map((r: any) => String(r.fields[B.rolle]?.name || r.fields[B.rolle] || ''));
+      const n = rollen.length, z = (k: string) => rollen.filter(r => r === k).length / (n || 1);
+      if (n >= 5) nachSortiment[Q_SORTIMENT] = z('Verschluss') >= 0.8 ? 'Verschlüsse' : z('Behälter') >= 0.8 ? 'nur Behälter'
+        : (z('Verschluss') >= 0.15 && (z('Behälter') + z('System komplett')) >= 0.15) ? 'Komplett-Systeme' : 'gemischt';
+    }
+  }
+  await quelleSetzen(q.id, { ...nachSortiment, [Q.fp]: JSON.stringify(fp), [Q.letzter]: new Date().toISOString(),
     ...(stopp ? {} : { [Q.status]: rest ? 'läuft' : 'aktiv' }), [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} Extrahiert: ${fertig} Seiten in diesem Lauf${gebremst ? ' (Rate-Limit, warte)' : ''}, noch offen: ${rest}.${stopp ? ' ⏸ gestoppt.' : ''}` });
   if (rest && !stopp) await fetch(selbst, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ulba-dev': String(process.env.CRAWL_SECRET || process.env.ULBA_DEV_SECRET) },
     body: JSON.stringify({ quelleId: q.id, schritt: 'extrahieren' }) }).catch(() => {});
