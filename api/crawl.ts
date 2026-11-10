@@ -285,13 +285,21 @@ async function seiteExtrahieren(rec: any, muster?: RegExp): Promise<{ id: string
   }
 }
 
+// Stopp-Schalter: Quelle auf «pausiert» setzen → Kette bricht nach der aktuellen Gruppe ab.
+async function gestoppt(id: string): Promise<boolean> {
+  try { const r = await atJson(`${T.quellen}/${id}?returnFieldsByFieldId=true&fields[]=${Q.status}`); return String(r.fields?.[Q.status] || '') === 'pausiert'; }
+  catch { return false; }
+}
+
 async function extrahierenSchleife(q: any, lname: string, selbst: string, start: number) {
   let musterRe: RegExp | undefined;
   try { const m = String(q.fields[Q.muster] || ''); if (m) musterRe = new RegExp(m, 'i'); } catch { /* ungültig → nur KI-Links */ }
   const fp: Record<string, string> = (() => { try { return JSON.parse(q.fields[Q.fp] || '{}'); } catch { return {}; } })();
   const formel = `AND({${B.status}} = "zu crawlen", {${B.lieferant}} = "${lname.replace(/"/g, '')}")`;
   let fertig = 0, gebremst = false;
+  let stopp = false;
   while (Date.now() - start < ZEIT_MS && !gebremst) {
+    if (await gestoppt(q.id)) { stopp = true; break; }
     const p = new URLSearchParams({ pageSize: String(HAPPEN), returnFieldsByFieldId: 'true', filterByFormula: formel });
     p.append('fields[]', B.url);
     const offen = (await atJson(`${T.bulk}?${p}`)).records || [];
@@ -315,11 +323,12 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
     if (ergebnisse.length) await schreiben(T.bulk, 'PATCH', ergebnisse.map(e => ({ id: e.id, fields: e.fields })));
     fertig += ergebnisse.length;
   }
-  if (gebremst) await pause(45_000); // Rate-Limit: kurz abwarten, dann Staffelübergabe
+  if (gebremst && !stopp) await pause(45_000); // Rate-Limit: kurz abwarten, dann Staffelübergabe
+  if (!stopp) stopp = await gestoppt(q.id);
   const rest = (await alle(T.bulk, [B.url], formel)).length;
   await quelleSetzen(q.id, { [Q.fp]: JSON.stringify(fp), [Q.letzter]: new Date().toISOString(),
-    [Q.status]: rest ? 'läuft' : 'aktiv', [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} Extrahiert: ${fertig} Seiten in diesem Lauf${gebremst ? ' (Rate-Limit, warte)' : ''}, noch offen: ${rest}.` });
-  if (rest) await fetch(selbst, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ulba-dev': String(process.env.CRAWL_SECRET || process.env.ULBA_DEV_SECRET) },
+    ...(stopp ? {} : { [Q.status]: rest ? 'läuft' : 'aktiv' }), [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} Extrahiert: ${fertig} Seiten in diesem Lauf${gebremst ? ' (Rate-Limit, warte)' : ''}, noch offen: ${rest}.${stopp ? ' ⏸ gestoppt.' : ''}` });
+  if (rest && !stopp) await fetch(selbst, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ulba-dev': String(process.env.CRAWL_SECRET || process.env.ULBA_DEV_SECRET) },
     body: JSON.stringify({ quelleId: q.id, schritt: 'extrahieren' }) }).catch(() => {});
 }
 
