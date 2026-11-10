@@ -83,6 +83,8 @@ const host = (u: string) => { try { return new URL(u).hostname.replace(/^www\./,
 const pfad = (u: string) => { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } };
 const hash = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 10);
 class RateLimit extends Error {}
+/** Vergleichsschlüssel einer Produkt-URL: Pfad ohne Sprachpräfix, klein, ohne Slash am Ende. */
+const seitenKey = (u: string) => { try { return new URL(u).pathname.replace(/^\/(de|en|it|fr|es|pt|nl|pl|cs|ru|zh|ja|ko|tr)(-[a-z]{2})?(?=\/)/i, '').replace(/\/$/, '').toLowerCase(); } catch { return ''; } };
 /* Sprach-Dubletten: /en/x, /it/x, /fr/x → eine URL (Vorzug de > en > erste) */
 const SPRACHE = /^\/(de|en|it|fr|es|pt|nl|pl|cs|ru|zh|ja|ko|tr)(-[a-z]{2})?(?=\/)/i;
 function ohneSprachDubletten(urls: string[]): string[] {
@@ -178,10 +180,18 @@ async function entdecken(q: any, max: number) {
 }
 
 /* ── 2. EXTRAHIEREN ────────────────────────────────────────────────── */
-async function seiteExtrahieren(rec: any): Promise<{ id: string; fields: Record<string, any>; fp?: [string, string] }> {
+async function seiteExtrahieren(rec: any, muster?: RegExp): Promise<{ id: string; fields: Record<string, any>; fp?: [string, string] }> {
   const url = String(rec.fields[B.url]);
   try {
-    const s = await fc('scrape', { url, formats: ['markdown'], onlyMainContent: true, timeout: 45000, waitFor: 1500 });
+    const s = await fc('scrape', { url, formats: ['markdown', 'links'], onlyMainContent: false, timeout: 45000, waitFor: 2500 });
+    // Hersteller-Kompatible: alle Seitenlinks auf Produkt-Detailseiten derselben Domain (Quellen.URL_Muster), ohne die Seite selbst
+    const eigen = seitenKey(url);
+    const linkKandidaten = new Map<string, string>();
+    for (const l of (s.data?.links || []) as string[]) {
+      if (host(l) !== host(url) || !muster || !muster.test(pfad(l))) continue;
+      const k = seitenKey(l);
+      if (k && k !== eigen && !linkKandidaten.has(k)) linkKandidaten.set(k, l.split('#')[0]);
+    }
     const md = String(s.data?.markdown || '');
     const og = s.data?.metadata?.ogImage || s.data?.metadata?.['og:image'] || '';
     const bilder = [...new Set([...(md.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g))].map(m => m[1]))]
@@ -204,13 +214,18 @@ async function seiteExtrahieren(rec: any): Promise<{ id: string; fields: Record<
     const bild = String(o.bild_url || og || '');
     const ROLLE: Record<string, string> = { behaelter: 'Behälter', system: 'System komplett', verschluss: 'Verschluss' };
     const rolle = ROLLE[String(o.rolle || '').trim()] || 'Unklar';
-    const passt = (Array.isArray(o.passt_zu) ? o.passt_zu : []).slice(0, 12)
-      .map((x: any) => `${String(x?.name || '?').slice(0, 60)} -> ${String(x?.url || '')}`).filter((z: string) => /https?:\/\//.test(z));
+    const passtMap = new Map<string, string>();
+    for (const x of (Array.isArray(o.passt_zu) ? o.passt_zu : [])) {
+      const u = String(x?.url || ''); const k = seitenKey(u);
+      if (/^https?:\/\//.test(u) && k && k !== eigen) passtMap.set(k, `${String(x?.name || '?').slice(0, 60)} -> ${u}`);
+    }
+    for (const [k, u] of linkKandidaten) if (!passtMap.has(k)) passtMap.set(k, `${k.split('/').filter(Boolean).slice(-2, -1)[0] || '?'} -> ${u}`);
+    const passt = [...passtMap.values()].slice(0, 40);
     const kopf = [`Rolle: ${rolle}`, `Typ: ${o.typ || '-'}`, `Volumen: ${o.volumen || '-'}`, `Material: ${o.material || '-'}`, `Hals: ${o.hals || '-'}`, `Quelle: ${url}`].join('\n');
     const fields: Record<string, any> = { [B.status]: 'zu prüfen', [B.name]: String(o.name || '').slice(0, 200),
       [B.artnr]: String(o.artikelnummer || '').slice(0, 80), [B.rolle]: rolle,
       [B.hals]: String(o.hals || '').slice(0, 100), [B.kollektion]: String(o.kollektion || '').slice(0, 120),
-      [B.passt]: passt.join('\n').slice(0, 3000), [B.roh]: `${kopf}\n\n${md.slice(0, 15000)}` };
+      [B.passt]: passt.join('\n').slice(0, 8000), [B.roh]: `${kopf}\n\n${md.slice(0, 15000)}` };
     if (/^https?:\/\//.test(bild)) fields[rolle === 'Verschluss' ? B.bildCap : B.bild] = [{ url: bild }];
     return { id: rec.id, fields, fp: [pfad(url), hash([o.name, o.artikelnummer, o.volumen, o.material, o.rolle, o.hals, bild].join('|'))] };
   } catch (e: any) {
@@ -220,6 +235,8 @@ async function seiteExtrahieren(rec: any): Promise<{ id: string; fields: Record<
 }
 
 async function extrahierenSchleife(q: any, lname: string, selbst: string, start: number) {
+  let musterRe: RegExp | undefined;
+  try { const m = String(q.fields[Q.muster] || ''); if (m) musterRe = new RegExp(m, 'i'); } catch { /* ungültig → nur KI-Links */ }
   const fp: Record<string, string> = (() => { try { return JSON.parse(q.fields[Q.fp] || '{}'); } catch { return {}; } })();
   const formel = `AND({${B.status}} = "zu crawlen", {${B.lieferant}} = "${lname.replace(/"/g, '')}")`;
   let fertig = 0, gebremst = false;
@@ -232,7 +249,7 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
     for (const rec of offen) {
       if (Date.now() - start > ZEIT_MS) break;
       const t0 = Date.now();
-      try { ergebnisse.push(await seiteExtrahieren(rec)); }
+      try { ergebnisse.push(await seiteExtrahieren(rec, musterRe)); }
       catch (e) { if (e instanceof RateLimit) { gebremst = true; break; } throw e; }
       const rest = ABSTAND_MS - (Date.now() - t0);
       if (rest > 0) await pause(rest);
@@ -250,8 +267,8 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
 }
 
 /* ── Cap-Ingest (Freigabe einer Verschluss-Zeile): Bulk_Source → Cap-Record ──
-   Verknüpft den Cap mit allen Systemen desselben Lieferanten, deren Neck_Norm
-   zum Feld Hals passt ODER deren Link in Passt_zu steht. Dublette (gleiche
+   Verknüpft den Cap NUR mit Systemen, die der Hersteller selbst zuordnet:
+   Verschluss-Seite verlinkt den Behälter oder Behälter-Seite verlinkt den Verschluss. Dublette (gleiche
    Artikelnummer bzw. gleicher Name) → nur System-Links ergänzen, Status Processed. */
 async function capIngest(bulkId: string, origin: string) {
   const r = await atJson(`${T.bulk}/${bulkId}?returnFieldsByFieldId=true`);
@@ -261,21 +278,23 @@ async function capIngest(bulkId: string, origin: string) {
   const lief = String(f[B.lieferant] || '').trim();
   const artnr = String(f[B.artnr] || '').trim();
   const clip = String(f[B.roh] || '');
-  const passt = String(f[B.passt] || '').toLowerCase();
-  const halsTeile = String(f[B.hals] || '').split(/[,;]+/).map(x => x.trim()).filter(Boolean);
+  const capUrl = String(f[B.url] || '');
+  const capKey = seitenKey(capUrl);
+  // Keys der Teile, die der Hersteller auf der Verschluss-Seite als passend verlinkt
+  const passtKeys = new Set(String(f[B.passt] || '').split('\n').map(z => seitenKey(z.split(' -> ').pop() || '')).filter(Boolean));
   const bild = (f[B.bildCap] || [])[0] || (f[B.bild] || [])[0];
   if (!bild?.url) throw new Error('Kein Cap-Bild am Record (Bild_Cap leer)');
 
-  // Passende Systeme des Lieferanten: Neck-Match oder Link in Passt_zu
+  // NUR Hersteller-Zuordnung (Entscheid Alen 10.11.; Hals-/Neck-Kombis kommen später):
+  //  A) Verschluss-Seite verlinkt den Behälter  ODER  B) Behälter-Seite verlinkt diesen Verschluss
+  if (capKey) {
+    const rueck = await alle(T.bulk, [B.url, B.passt], `AND({${B.lieferant}} = "${esc(lief)}", FIND("${esc(capKey)}", LOWER({${B.passt}})))`);
+    rueck.forEach((x: any) => { const k = seitenKey(String(x.fields[B.url] || '')); if (k) passtKeys.add(k); });
+  }
   const ids = new Set<string>();
-  if (lief) {
-    const sys = await alle(T.system, [SYS_LINK, SYSF.neck], `{${SYSF.unternehmen}} = "${esc(lief)}"`);
-    for (const x of sys) {
-      const link = normUrl(String(x.fields[SYS_LINK] || ''));
-      const necks: string[] = (x.fields[SYSF.neck] || []).map((n: any) => String(n?.name ?? n));
-      if (link && passt.includes(link)) ids.add(x.id);
-      if (halsTeile.some(h => necks.includes(h))) ids.add(x.id);
-    }
+  if (lief && passtKeys.size) {
+    const sys = await alle(T.system, [SYS_LINK], `{${SYSF.unternehmen}} = "${esc(lief)}"`);
+    for (const x of sys) if (passtKeys.has(seitenKey(String(x.fields[SYS_LINK] || '')))) ids.add(x.id);
   }
 
   // Dublette?
@@ -303,7 +322,7 @@ async function capIngest(bulkId: string, origin: string) {
       headers: { 'Content-Type': 'application/json', 'x-render-secret': String(process.env.RENDER_SECRET) },
       body: JSON.stringify({ recordId: erst, bildTyp: 'cap_only' }) }).catch(() => {});
   await atJson(`${T.bulk}/${bulkId}`, { method: 'PATCH', body: JSON.stringify({ fields: { [B.status]: { name: bulkStatus } } }) });
-  return { capId, systeme: ids.size, bulkStatus, hinweis: ids.size ? undefined : 'Kein System-Match (Hals/Passt_zu leer?) — Cap angelegt, Verknüpfung von Hand.' };
+  return { capId, systeme: ids.size, bulkStatus, hinweis: ids.size ? undefined : 'Kein vom Hersteller zugeordneter Behälter im System (noch nicht freigegeben?) — Cap angelegt; nach Freigabe der Behälter den Verschluss erneut auf Go setzen.' };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
