@@ -331,6 +331,14 @@ async function seiteExtrahieren(rec: any, muster?: RegExp, sortiment = ''): Prom
       [B.hals]: String(o.hals || '').slice(0, 100), [B.kollektion]: String(o.kollektion || '').slice(0, 120),
       [B.passt]: passt.join('\n').slice(0, 8000), [B.roh]: `${kopf}\n\n${md.slice(0, 15000)}` };
     if (/^https?:\/\//.test(bild)) fields[rolle === 'Verschluss' ? B.bildCap : B.bild] = [{ url: bild }];
+    // Datenqualität 0–100: reicht das für ulba? (<30 → automatisch verworfen)
+    const da = (x: any) => String(x || '').trim().length > 0 && !/^[-–]$/.test(String(x).trim());
+    const vol = da(o.volumen) || /\d\s?(ml|g|cl|l|oz)\b/i.test(String(o.name || ''));
+    const qual = (/^https?:\/\//.test(bild) ? 25 : 0) + (da(o.name) ? 10 : 0) + (rolle !== 'Unklar' ? 10 : 0) + (da(o.material) ? 15 : 0)
+      + (da(o.artikelnummer) ? 5 : 0) + (da(o.typ) ? 5 : 0)
+      + (rolle === 'Verschluss' ? (da(o.hals) ? 30 : 0) : (vol ? 20 : 0) + (da(o.hals) ? 10 : 0));
+    fields[B_QUAL] = qual;
+    if (qual < 30) { fields[B.status] = 'verworfen'; fields[B.roh] = `Datenqualität zu gering (${qual}/100) – zu wenig Angaben auf der Seite.\n\n${fields[B.roh]}`; }
     return { id: rec.id, fields, fp: [pfad(url), hash([o.name, o.artikelnummer, o.volumen, o.material, o.rolle, o.hals, bild].join('|'))] };
   } catch (e: any) {
     if (e instanceof RateLimit) throw e;
@@ -341,6 +349,8 @@ async function seiteExtrahieren(rec: any, muster?: RegExp, sortiment = ''): Prom
 // Sortiment der Quelle → Hinweis an die KI (Spezialisten: alles ist Verschluss, Hals besonders wichtig)
 const Q_SORTIMENT = 'fldVFhexIWki5G9qX';
 const Q_QUELLTYP = 'flddggs2HXaT3tZp6';
+const B_QUAL = 'fldjb9aSABC2tCNHB', Q_QOK = 'fldpsHxxTHwmzZIcR';
+const PROBE = 6, PROBE_MIN = 45; // Probelauf: 6 Seiten, Schnitt < 45 → Quelle stoppt zur Prüfung
 const SORTIMENTE = ['Komplett-Systeme', 'nur Behälter', 'Pumpen & Sprüher', 'Aerosol (Dose/Ventil)', 'Verschlüsse', 'gemischt'];
 const SORTIMENT_HINWEIS: Record<string, string> = {
   'Pumpen & Sprüher': 'Spezialist für Dosiersysteme. Produkte sind fast immer rolle "verschluss" (Pumpe, Sprüher, Lotionpumpe, Actuator). Hals-Norm (z.B. 20/410, 24/410, FEA15) unbedingt exakt erfassen.',
@@ -355,13 +365,34 @@ async function gestoppt(id: string): Promise<boolean> {
   catch { return false; }
 }
 
-async function extrahierenSchleife(q: any, lname: string, selbst: string, start: number) {
+async function extrahierenSchleife(q: any, lname: string, selbst: string, start: number, probe = false) {
   let musterRe: RegExp | undefined;
   try { const m = String(q.fields[Q.muster] || ''); if (m) musterRe = new RegExp(m, 'i'); } catch { /* ungültig → nur KI-Links */ }
   const fp: Record<string, string> = (() => { try { return JSON.parse(q.fields[Q.fp] || '{}'); } catch { return {}; } })();
   const formel = `AND({${B.status}} = "zu crawlen", {${B.lieferant}} = "${lname.replace(/"/g, '')}")`;
   let fertig = 0, gebremst = false;
   let stopp = false;
+  // Probelauf (nur direkt nach dem Entdecken, ohne manuelle Freigabe): erst wenige Seiten lesen, Qualität bewerten
+  if (probe && !q.fields[Q_QOK]) {
+    const p0 = new URLSearchParams({ pageSize: String(PROBE), returnFieldsByFieldId: 'true', filterByFormula: formel });
+    p0.append('fields[]', B.url);
+    const stich = (await atJson(`${T.bulk}?${p0}`)).records || [];
+    const erg: any[] = [];
+    for (let i = 0; i < stich.length; i += PARALLEL) {
+      const res = await Promise.allSettled(stich.slice(i, i + PARALLEL).map((rec: any) => seiteExtrahieren(rec, musterRe, String(q.fields[Q_SORTIMENT] || ''))));
+      res.forEach(r => { if (r.status === 'fulfilled') erg.push(r.value); });
+      await pause(ABSTAND_MS * PARALLEL);
+    }
+    erg.forEach(e => { if (e.fp) fp[e.fp[0]] = e.fp[1]; });
+    if (erg.length) await schreiben(T.bulk, 'PATCH', erg.map(e => ({ id: e.id, fields: e.fields })));
+    const werte = erg.map(e => Number(e.fields[B_QUAL] ?? 0)); // keine Produktseite = 0
+    const schnitt = werte.length ? Math.round(werte.reduce((a, b) => a + b, 0) / werte.length) : 0;
+    if (werte.length >= 3 && schnitt < PROBE_MIN) {
+      await quelleSetzen(q.id, { [Q.fp]: JSON.stringify(fp), [Q.status]: 'Qualität prüfen', [Q.letzter]: new Date().toISOString(),
+        [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} ⚠ Probelauf: Datenqualität ${schnitt}/100 bei ${werte.length} Seiten (Minimum ${PROBE_MIN}). Crawl gestoppt. Trotzdem crawlen: Qualitaet_ok anhaken + Status «crawlen».` });
+      return;
+    }
+  }
   while (Date.now() - start < ZEIT_MS && !gebremst) {
     if (await gestoppt(q.id)) { stopp = true; break; }
     const p = new URLSearchParams({ pageSize: String(HAPPEN), returnFieldsByFieldId: 'true', filterByFormula: formel });
@@ -526,7 +557,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         lname = (await entdecken(q, Math.min(Number(max) || 600, 2000))).lieferant;
         q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`);
       } else lname = await lieferantName(q);
-      await extrahierenSchleife(q, lname, selbst, start);
+      await extrahierenSchleife(q, lname, selbst, start, schritt === 'entdecken');
     } catch (e: any) {
       await quelleSetzen(quelleId, { [Q.status]: 'Fehler', [Q.log]: `${new Date().toISOString().slice(0, 16)} ${e.message}` }).catch(() => {});
     }
