@@ -102,7 +102,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const { recordId, bildTyp, urlSystem, urlBase } = req.body as {
     recordId: string;
-    bildTyp: 'system' | 'base+cap_separat' | 'base_only';
+    bildTyp: 'system' | 'base+cap_separat' | 'base_only' | 'cap_only';
     urlSystem?: string;
     urlBase?: string;
   };
@@ -112,6 +112,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const sharp = (await import('sharp')).default;
 
   try {
+    // cap_only (Cap-Ingest v2): nur die Caps des Systems trimmen, Base unangetastet (keine fal-Kosten).
+    if (bildTyp === 'cap_only') {
+      const caps = await processCaps(recordId, sharp);
+      return res.status(200).json({ ok: true, recordId, caps });
+    }
     // Base harmonisieren: birefnet (Hintergrund weg) -> eng trimmen (statt 72%-Canvas).
     const sourceUrl =
       bildTyp === 'system' ? urlSystem :

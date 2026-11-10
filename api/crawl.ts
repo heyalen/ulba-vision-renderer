@@ -21,12 +21,17 @@ import { waitUntil } from '@vercel/functions';
 import { createHash } from 'crypto';
 
 const BASE = 'app0QFyInfhvk66MC';
-const T = { quellen: 'tblT3NLNufj18imll', bulk: 'tblrKu0BHOH5V7YsX', system: 'tblB1kWay9TvX3rGv', lieferant: 'tblsy3CHZbAo6GraB' };
+const T = { quellen: 'tblT3NLNufj18imll', bulk: 'tblrKu0BHOH5V7YsX', system: 'tblB1kWay9TvX3rGv', lieferant: 'tblsy3CHZbAo6GraB', cap: 'tblQvnXPhiKGMoqDp' };
 const Q = { name: 'fldAT1OOMAeZzfTsM', lieferant: 'fldrxmJzWBvo8WG3E', url: 'fldyyvHOcYmzxGgeU', status: 'fldUDgKPvGgDYkzCX',
   typ: 'fldDtXdEor8CGZNM0', muster: 'fld5fYoRNqhSotV7i', letzter: 'flddg1aWUXyFp8ILf', fp: 'fldwXu6n56igNpOlf',
   gefunden: 'fldCQzwU4YnlYaFZN', neu: 'fldnTqWb65gzUjdrG', geaendert: 'fld6cAltBPQCo721r', log: 'fldb85ckiSIspmk1x' };
 const B = { lieferant: 'fldFnMy19K5DbOGpT', name: 'fldAbxKw2I4bBjAe5', url: 'fldV5FqTcWj8EVgwI', roh: 'fldekjxtBQuOwSdZz',
-  bild: 'fldGeadiTTVSYh1lq', status: 'fld9Ges6UCFGHSCH7', artnr: 'fldNS2qarbg4JLtD8' };
+  bild: 'fldGeadiTTVSYh1lq', status: 'fld9Ges6UCFGHSCH7', artnr: 'fldNS2qarbg4JLtD8',
+  bildCap: 'fldim1tbt4US5oRdB', rolle: 'fldWQA9lIjuV23SSe', hals: 'fldp5NCCuFytlwOjG',
+  passt: 'fldGVYHFlw3MwVkdD', kollektion: 'fld6F3y7xEABUHlJZ' };
+const SYSF = { unternehmen: 'fld79UdSUcLrXivkZ', neck: 'fldc0LLLi5v8VMPNU' };
+const CAPF = { name: 'fldDrmgRkLGvuG8qS', artnr: 'fldmfINUZkLF1XT83', bild: 'fldrdBvP5VIQ61ZVB',
+  status: 'fldw2YYSzaiCZL0g9', system: 'fldtnI9y9eReS2M8N', clip: 'fldNHSNelaBqE3WNC' };
 const L = { name: 'fldq27U7UQU6NZU7P', website: 'fldDfEAJQjKB3ei0G' };
 const SYS_LINK = 'fldUQza6Xa9Eqksaw';
 const HAPPEN = 9;           // Seiten pro Häppchen
@@ -176,21 +181,38 @@ async function entdecken(q: any, max: number) {
 async function seiteExtrahieren(rec: any): Promise<{ id: string; fields: Record<string, any>; fp?: [string, string] }> {
   const url = String(rec.fields[B.url]);
   try {
-    const s = await fc('scrape', { url, formats: ['markdown'], onlyMainContent: true, timeout: 45000 });
+    const s = await fc('scrape', { url, formats: ['markdown'], onlyMainContent: true, timeout: 45000, waitFor: 1500 });
     const md = String(s.data?.markdown || '');
     const og = s.data?.metadata?.ogImage || s.data?.metadata?.['og:image'] || '';
     const bilder = [...new Set([...(md.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g))].map(m => m[1]))]
       .filter(b => !/logo|icon|sprite|flag|banner|badge|payment/i.test(b)).slice(0, 15);
     const o = await haiku(
       'Du extrahierst Produktdaten von Seiten kosmetischer Primärpackmittel-Hersteller. Nur Fakten, die auf der Seite stehen. Antworte nur mit JSON.',
-      `URL: ${url}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON: {"ist_produkt": true wenn die Seite EIN konkretes Packmittel/Packmittelsystem beschreibt (sonst false), "name": "Produktname wie beim Hersteller", "artikelnummer": "Artikel-/Referenznummer oder leer", "volumen": "alle Größen mit Einheit, z.B. 30 ml, 50 ml", "material": "Materialien", "typ": "z.B. Flasche, Tiegel, Airless, Tube, Roll-on, Stick, Pumpe, Spray, Verschluss", "bild_url": "URL des Hauptproduktbilds aus der Bildliste (sonst og:image, sonst leer)"}`, 500);
+      `URL: ${url}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
+"ist_produkt": true wenn die Seite EIN konkretes Packmittel beschreibt (sonst false, z.B. Kollektion/News/Übersicht),
+"rolle": "behaelter" (Flasche/Tiegel/Tube/Dose OHNE montierten Verschluss als Produkt) | "system" (Behälter INKLUSIVE Verschluss als eine verkaufte Einheit, z.B. Airless-System, Roll-on komplett) | "verschluss" (Pumpe, Sprüher, Dropper/Pipette, Kappe, Disc-Top, Actuator als eigenes Produkt) | "unklar",
+"name": "Produktname wie beim Hersteller",
+"artikelnummer": "Artikel-/Referenznummer oder leer",
+"volumen": "alle Größen mit Einheit, z.B. 30 ml, 50 ml",
+"material": "Materialien",
+"typ": "z.B. Flasche, Tiegel, Airless, Tube, Roll-on, Stick, Pumpe, Spray, Dropper, Verschluss",
+"hals": "Neck-Norm(en) exakt wie angegeben, kommagetrennt (z.B. 20/400, 24/410), sonst leer",
+"kollektion": "Kollektions-/Serienname (z.B. FUJI COLLECTION), sonst leer",
+"passt_zu": [bis zu 12 auf der Seite verlinkte KOMPATIBLE Teile (Accessoires, 'complete your product', passende Pumpen/Dropper/Flaschen) als {"name":"...","url":"..."} — nur echte Produkt-Detail-Links, sonst leeres Array],
+"bild_url": "URL des Hauptproduktbilds aus der Bildliste (sonst og:image, sonst leer)"`, 900);
     if (!o.ist_produkt) return { id: rec.id, fields: { [B.status]: 'verworfen', [B.roh]: `Kein Einzelprodukt erkannt.\n\n${md.slice(0, 2000)}` } };
     const bild = String(o.bild_url || og || '');
-    const kopf = [`Typ: ${o.typ || '-'}`, `Volumen: ${o.volumen || '-'}`, `Material: ${o.material || '-'}`, `Quelle: ${url}`].join('\n');
+    const ROLLE: Record<string, string> = { behaelter: 'Behälter', system: 'System komplett', verschluss: 'Verschluss' };
+    const rolle = ROLLE[String(o.rolle || '').trim()] || 'Unklar';
+    const passt = (Array.isArray(o.passt_zu) ? o.passt_zu : []).slice(0, 12)
+      .map((x: any) => `${String(x?.name || '?').slice(0, 60)} -> ${String(x?.url || '')}`).filter((z: string) => /https?:\/\//.test(z));
+    const kopf = [`Rolle: ${rolle}`, `Typ: ${o.typ || '-'}`, `Volumen: ${o.volumen || '-'}`, `Material: ${o.material || '-'}`, `Hals: ${o.hals || '-'}`, `Quelle: ${url}`].join('\n');
     const fields: Record<string, any> = { [B.status]: 'zu prüfen', [B.name]: String(o.name || '').slice(0, 200),
-      [B.artnr]: String(o.artikelnummer || '').slice(0, 80), [B.roh]: `${kopf}\n\n${md.slice(0, 15000)}` };
-    if (/^https?:\/\//.test(bild)) fields[B.bild] = [{ url: bild }];
-    return { id: rec.id, fields, fp: [pfad(url), hash([o.name, o.artikelnummer, o.volumen, o.material, bild].join('|'))] };
+      [B.artnr]: String(o.artikelnummer || '').slice(0, 80), [B.rolle]: rolle,
+      [B.hals]: String(o.hals || '').slice(0, 100), [B.kollektion]: String(o.kollektion || '').slice(0, 120),
+      [B.passt]: passt.join('\n').slice(0, 3000), [B.roh]: `${kopf}\n\n${md.slice(0, 15000)}` };
+    if (/^https?:\/\//.test(bild)) fields[rolle === 'Verschluss' ? B.bildCap : B.bild] = [{ url: bild }];
+    return { id: rec.id, fields, fp: [pfad(url), hash([o.name, o.artikelnummer, o.volumen, o.material, o.rolle, o.hals, bild].join('|'))] };
   } catch (e: any) {
     if (e instanceof RateLimit) throw e;
     return { id: rec.id, fields: { [B.status]: 'Error', [B.roh]: `Crawler-Fehler: ${e.message}` } };
@@ -227,6 +249,63 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
     body: JSON.stringify({ quelleId: q.id, schritt: 'extrahieren' }) }).catch(() => {});
 }
 
+/* ── Cap-Ingest (Freigabe einer Verschluss-Zeile): Bulk_Source → Cap-Record ──
+   Verknüpft den Cap mit allen Systemen desselben Lieferanten, deren Neck_Norm
+   zum Feld Hals passt ODER deren Link in Passt_zu steht. Dublette (gleiche
+   Artikelnummer bzw. gleicher Name) → nur System-Links ergänzen, Status Processed. */
+async function capIngest(bulkId: string, origin: string) {
+  const r = await atJson(`${T.bulk}/${bulkId}?returnFieldsByFieldId=true`);
+  const f = r.fields || {};
+  const esc = (x: string) => x.replace(/"/g, '');
+  const name = String(f[B.name] || '').trim() || 'Cap';
+  const lief = String(f[B.lieferant] || '').trim();
+  const artnr = String(f[B.artnr] || '').trim();
+  const clip = String(f[B.roh] || '');
+  const passt = String(f[B.passt] || '').toLowerCase();
+  const halsTeile = String(f[B.hals] || '').split(/[,;]+/).map(x => x.trim()).filter(Boolean);
+  const bild = (f[B.bildCap] || [])[0] || (f[B.bild] || [])[0];
+  if (!bild?.url) throw new Error('Kein Cap-Bild am Record (Bild_Cap leer)');
+
+  // Passende Systeme des Lieferanten: Neck-Match oder Link in Passt_zu
+  const ids = new Set<string>();
+  if (lief) {
+    const sys = await alle(T.system, [SYS_LINK, SYSF.neck], `{${SYSF.unternehmen}} = "${esc(lief)}"`);
+    for (const x of sys) {
+      const link = normUrl(String(x.fields[SYS_LINK] || ''));
+      const necks: string[] = (x.fields[SYSF.neck] || []).map((n: any) => String(n?.name ?? n));
+      if (link && passt.includes(link)) ids.add(x.id);
+      if (halsTeile.some(h => necks.includes(h))) ids.add(x.id);
+    }
+  }
+
+  // Dublette?
+  const formel = artnr ? `AND({${CAPF.artnr}} = "${esc(artnr)}", {${CAPF.name}} = "${esc(name)}")` : `{${CAPF.name}} = "${esc(name)}"`;
+  const vorhanden = await alle(T.cap, [CAPF.system], formel);
+  let capId: string, bulkStatus = 'Done';
+  if (vorhanden.length) {
+    capId = vorhanden[0].id; bulkStatus = 'Processed';
+    const alt: string[] = (vorhanden[0].fields[CAPF.system] || []).map((x: any) => x?.id ?? x);
+    const merged = [...new Set([...alt, ...ids])];
+    if (merged.length > alt.length)
+      await atJson(`${T.cap}/${capId}`, { method: 'PATCH', body: JSON.stringify({ fields: { [CAPF.system]: merged.map(id => ({ id })) } }) });
+  } else {
+    const cf: Record<string, any> = { [CAPF.name]: name, [CAPF.bild]: [{ url: bild.url }], [CAPF.status]: { name: 'Pending' } };
+    if (artnr) cf[CAPF.artnr] = artnr;
+    if (clip) cf[CAPF.clip] = clip.slice(0, 15000);
+    if (ids.size) cf[CAPF.system] = [...ids].map(id => ({ id }));
+    const j = await atJson(T.cap, { method: 'POST', body: JSON.stringify({ records: [{ fields: cf }], typecast: true }) });
+    capId = j.records[0].id;
+  }
+  // Cap-Bild trimmen (sharp-only, idempotent) über das erste verlinkte System
+  const erst = [...ids][0];
+  if (erst && process.env.RENDER_SECRET)
+    await fetch(`${origin}/api/harmonize`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-render-secret': String(process.env.RENDER_SECRET) },
+      body: JSON.stringify({ recordId: erst, bildTyp: 'cap_only' }) }).catch(() => {});
+  await atJson(`${T.bulk}/${bulkId}`, { method: 'PATCH', body: JSON.stringify({ fields: { [B.status]: { name: bulkStatus } } }) });
+  return { capId, systeme: ids.size, bulkStatus, hinweis: ids.size ? undefined : 'Kein System-Match (Hals/Passt_zu leer?) — Cap angelegt, Verknüpfung von Hand.' };
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const start = Date.now();
   if (req.method !== 'POST') return res.status(405).json({ error: 'nur POST' });
@@ -235,7 +314,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(401).json({ error: 'nicht autorisiert' });
   for (const k of ['AIRTABLE_PAT', 'FIRECRAWL_API_KEY', 'ANTHROPIC_API_KEY'])
     if (!process.env[k]) return res.status(500).json({ error: `${k} fehlt` });
-  const { quelleId, schritt = 'entdecken', max = 600 } = (req.body || {}) as { quelleId?: string; schritt?: string; max?: number };
+  const { quelleId, schritt = 'entdecken', max = 600, bulkId } = (req.body || {}) as { quelleId?: string; schritt?: string; max?: number; bulkId?: string };
+  if (schritt === 'cap') {
+    if (!bulkId) return res.status(400).json({ error: 'bulkId nötig' });
+    try { return res.status(200).json({ ok: true, ...(await capIngest(String(bulkId), `https://${req.headers.host}`)) }); }
+    catch (e: any) {
+      await atJson(`${T.bulk}/${bulkId}`, { method: 'PATCH', body: JSON.stringify({ fields: { [B.status]: { name: 'Error' } } }) }).catch(() => {});
+      return res.status(500).json({ error: e.message });
+    }
+  }
   if (!quelleId) return res.status(400).json({ error: 'quelleId nötig' });
   const selbst = `https://${req.headers.host}/api/crawl`;
   // Sofort antworten (Airtable-Automation wartet nicht lange), Arbeit im Hintergrund.
