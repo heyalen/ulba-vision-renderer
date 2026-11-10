@@ -36,7 +36,9 @@ const SYS_CAPS = 'fldVXTFz3pgErhYWj';
 const L = { name: 'fldq27U7UQU6NZU7P', website: 'fldDfEAJQjKB3ei0G' };
 const SYS_LINK = 'fldUQza6Xa9Eqksaw';
 const HAPPEN = 9;           // Seiten pro Häppchen
-const RPM = Math.max(1, Number(process.env.FIRECRAWL_RPM) || 9); // Firecrawl Free: 10/min → 9; Hobby: Env höher setzen
+// Seiten lesen über Jina Reader: ohne Key 20/min, mit Key 500/min (wir nutzen konservativ 60).
+const RPM = Math.max(1, Number(process.env.SCRAPE_RPM) || (process.env.JINA_API_KEY ? 60 : 18));
+const PARALLEL = process.env.JINA_API_KEY ? 5 : 2;
 const ABSTAND_MS = Math.ceil(60_000 / RPM);
 const ZEIT_MS = 110_000;    // kein neues Häppchen mehr danach → Staffelübergabe (maxDuration 300)
 
@@ -106,6 +108,37 @@ async function fc(endpoint: 'map' | 'scrape', body: any) {
   return j;
 }
 
+/* ── Jina Reader: Seite → Markdown + Links + Titel ─────────────────── */
+async function jina(url: string): Promise<{ markdown: string; links: string[]; title: string; images: string[] }> {
+  const h: Record<string, string> = { Accept: 'application/json', 'X-With-Links-Summary': 'true', 'X-With-Images-Summary': 'true', 'X-Timeout': '40' };
+  if (process.env.JINA_API_KEY) h.Authorization = `Bearer ${process.env.JINA_API_KEY}`;
+  const r = await fetch(`https://r.jina.ai/${url}`, { headers: h });
+  if (r.status === 429) throw new RateLimit('Jina Rate-Limit');
+  const j: any = await r.json().catch(() => ({}));
+  if (!r.ok || !j?.data) throw new Error(`Jina ${r.status}: ${String(j?.message || j?.readableMessage || '').slice(0, 160)}`);
+  const d = j.data;
+  const alsListe = (x: any): string[] => Array.isArray(x) ? x.map((e: any) => typeof e === 'string' ? e : e?.url || e?.href || e?.[1]).filter(Boolean)
+    : x && typeof x === 'object' ? Object.values(x).map(String) : [];
+  return { markdown: String(d.content || ''), links: alsListe(d.links), title: String(d.title || ''), images: alsListe(d.images) };
+}
+
+/* ── Sitemap: kostenloser Katalog-Fund (sitemap.xml + robots.txt, inkl. Index-Dateien) ── */
+async function sitemapUrls(origin: string): Promise<string[]> {
+  const H = { 'User-Agent': 'Mozilla/5.0 (compatible; ulba-crawler/1.0)' };
+  const holen = async (u: string) => { try { const r = await fetch(u, { headers: H }); return r.ok ? await r.text() : ''; } catch { return ''; } };
+  const start = new Set<string>([`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`]);
+  const robots = await holen(`${origin}/robots.txt`);
+  for (const m of robots.matchAll(/^\s*sitemap:\s*(\S+)/gim)) start.add(m[1]);
+  const offen = [...start], gesehen = new Set<string>(), urls = new Set<string>();
+  while (offen.length && gesehen.size < 40 && urls.size < 20000) {
+    const sm = offen.shift()!; if (gesehen.has(sm)) continue; gesehen.add(sm);
+    const xml = await holen(sm); if (!xml.includes('<loc')) continue;
+    const locs = [...xml.matchAll(/<loc>\s*(?:<!\[CDATA\[)?([^<\]]+?)(?:\]\]>)?\s*<\/loc>/gi)].map(m => m[1].trim());
+    if (/<sitemapindex/i.test(xml)) offen.push(...locs); else locs.forEach(u => urls.add(u));
+  }
+  return [...urls];
+}
+
 /* ── Haiku ─────────────────────────────────────────────────────────── */
 async function haiku(system: string, user: string, max = 600): Promise<any> {
   const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
@@ -141,8 +174,19 @@ async function entdecken(q: any, max: number) {
   if (!katalog) throw new Error('Katalog_URL fehlt');
   const lname = await lieferantName(q);
   const dom = host(katalog);
-  const map = await fc('map', { url: new URL(katalog).origin, limit: 5000, includeSubdomains: false });
-  const links: string[] = (map.links || []).map((l: any) => typeof l === 'string' ? l : l?.url).filter(Boolean);
+  const origin = new URL(katalog).origin;
+  let links: string[] = await sitemapUrls(origin), quelleFund = 'sitemap';
+  if (links.filter(u => host(u) === dom).length < 20 && process.env.FIRECRAWL_API_KEY) {
+    try { const map = await fc('map', { url: origin, limit: 5000, includeSubdomains: false });
+      links = (map.links || []).map((l: any) => typeof l === 'string' ? l : l?.url).filter(Boolean); quelleFund = 'firecrawl'; } catch { /* weiter mit Jina */ }
+  }
+  if (links.filter(u => host(u) === dom).length < 20) {
+    // Jina: Katalogseite + verlinkte Kategorieseiten (1 Ebene) lesen und Links sammeln
+    const erst = await jina(katalog); const alle2 = new Set<string>(erst.links);
+    const kat = erst.links.filter(u => host(u) === dom && pfad(u).length > 1).slice(0, 25);
+    for (const k of kat) { try { (await jina(k)).links.forEach(l => alle2.add(l)); } catch (e) { if (e instanceof RateLimit) await pause(30_000); } await pause(ABSTAND_MS); }
+    links = [...alle2]; quelleFund = 'jina';
+  }
   const kandidaten = [...new Set(links.filter(u => host(u) === dom)
     .filter(u => !/\.(pdf|jpe?g|png|webp|gif|svg|zip|docx?|xlsx?|mp4)(\?|$)/i.test(u))
     .filter(u => !/\/(blog|news|actualit|press|career|karriere|job|contact|kontakt|privacy|datenschutz|cookie|impressum|legal|imprint|login|cart|warenkorb|account|tag|author|feed|wp-json|wp-content|search)(\/|$|\?)/i.test(u))
@@ -176,7 +220,7 @@ async function entdecken(q: any, max: number) {
   await schreiben(T.bulk, 'POST', neu.map(u => ({ fields: { [B.url]: u, [B.lieferant]: lname, [B.status]: 'zu crawlen' } })));
 
   await quelleSetzen(q.id, { [Q.muster]: muster, [Q.typ]: 'html-liste', [Q.gefunden]: produkte.length, [Q.neu]: neu.length,
-    [Q.status]: 'läuft', [Q.log]: `${new Date().toISOString().slice(0, 16)} Entdeckt: ${kandidaten.length} URLs, ${produkte.length} Produktseiten, ${neu.length} neu → «zu crawlen»${produkte.length - neu.length > max ? ` (Limit ${max})` : ''}.` });
+    [Q.status]: 'läuft', [Q.log]: `${new Date().toISOString().slice(0, 16)} Entdeckt (${quelleFund}): ${kandidaten.length} URLs, ${produkte.length} Produktseiten, ${neu.length} neu → «zu crawlen»${produkte.length - neu.length > max ? ` (Limit ${max})` : ''}.` });
   return { lieferant: lname, urls: kandidaten.length, produkte: produkte.length, neu: neu.length };
 }
 
@@ -184,22 +228,22 @@ async function entdecken(q: any, max: number) {
 async function seiteExtrahieren(rec: any, muster?: RegExp): Promise<{ id: string; fields: Record<string, any>; fp?: [string, string] }> {
   const url = String(rec.fields[B.url]);
   try {
-    const s = await fc('scrape', { url, formats: ['markdown', 'links'], onlyMainContent: false, timeout: 45000, waitFor: 2500 });
+    const s = await jina(url);
     // Hersteller-Kompatible: alle Seitenlinks auf Produkt-Detailseiten derselben Domain (Quellen.URL_Muster), ohne die Seite selbst
     const eigen = seitenKey(url);
     const linkKandidaten = new Map<string, string>();
-    for (const l of (s.data?.links || []) as string[]) {
+    for (const l of s.links) {
       if (host(l) !== host(url) || !muster || !muster.test(pfad(l))) continue;
       const k = seitenKey(l);
       if (k && k !== eigen && !linkKandidaten.has(k)) linkKandidaten.set(k, l.split('#')[0]);
     }
-    const md = String(s.data?.markdown || '');
-    const og = s.data?.metadata?.ogImage || s.data?.metadata?.['og:image'] || '';
+    const md = s.markdown;
+    const og = s.images[0] || '';
     const bilder = [...new Set([...(md.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g))].map(m => m[1]))]
       .filter(b => !/logo|icon|sprite|flag|banner|badge|payment/i.test(b)).slice(0, 15);
     const o = await haiku(
       'Du extrahierst Produktdaten von Seiten kosmetischer Primärpackmittel-Hersteller. Nur Fakten, die auf der Seite stehen. Antworte nur mit JSON.',
-      `URL: ${url}\nSeitentitel: ${String(s.data?.metadata?.title || '').slice(0, 160)}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
+      `URL: ${url}\nSeitentitel: ${s.title.slice(0, 160)}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
 "ist_produkt": true wenn die Seite EIN konkretes Packmittel beschreibt (sonst false, z.B. Kollektion/News/Übersicht),
 "rolle": "behaelter" (Flasche/Tiegel/Tube/Dose OHNE montierten Verschluss als Produkt) | "system" (Behälter INKLUSIVE Verschluss als eine verkaufte Einheit, z.B. Airless-System, Roll-on komplett) | "verschluss" (Pumpe, Sprüher, Dropper/Pipette, Kappe, Disc-Top, Actuator als eigenes Produkt) | "unklar",
 "name": "Produktname wie beim Hersteller INKLUSIVE Volumen, wie im Seitentitel (z.B. FUJI 30ml, ROUND 200ml)",
@@ -247,19 +291,25 @@ async function extrahierenSchleife(q: any, lname: string, selbst: string, start:
     const offen = (await atJson(`${T.bulk}?${p}`)).records || [];
     if (!offen.length) break;
     const ergebnisse: any[] = [];
-    for (const rec of offen) {
+    for (let i = 0; i < offen.length; i += PARALLEL) {
       if (Date.now() - start > ZEIT_MS) break;
       const t0 = Date.now();
-      try { ergebnisse.push(await seiteExtrahieren(rec, musterRe)); }
-      catch (e) { if (e instanceof RateLimit) { gebremst = true; break; } throw e; }
-      const rest = ABSTAND_MS - (Date.now() - t0);
+      const gruppe = offen.slice(i, i + PARALLEL);
+      const res = await Promise.allSettled(gruppe.map((rec: any) => seiteExtrahieren(rec, musterRe)));
+      for (const r of res) {
+        if (r.status === 'fulfilled') ergebnisse.push(r.value);
+        else if (r.reason instanceof RateLimit) gebremst = true;
+        else throw r.reason;
+      }
+      if (gebremst) break;
+      const rest = ABSTAND_MS * gruppe.length - (Date.now() - t0);
       if (rest > 0) await pause(rest);
     }
     ergebnisse.forEach(e => { if (e.fp) fp[e.fp[0]] = e.fp[1]; });
     if (ergebnisse.length) await schreiben(T.bulk, 'PATCH', ergebnisse.map(e => ({ id: e.id, fields: e.fields })));
     fertig += ergebnisse.length;
   }
-  if (gebremst) await pause(60_000); // Firecrawl-Minute abwarten, dann Staffelübergabe
+  if (gebremst) await pause(45_000); // Rate-Limit: kurz abwarten, dann Staffelübergabe
   const rest = (await alle(T.bulk, [B.url], formel)).length;
   await quelleSetzen(q.id, { [Q.fp]: JSON.stringify(fp), [Q.letzter]: new Date().toISOString(),
     [Q.status]: rest ? 'läuft' : 'aktiv', [Q.log]: `${String(q.fields[Q.log] || '').split('\n')[0]}\n${new Date().toISOString().slice(0, 16)} Extrahiert: ${fertig} Seiten in diesem Lauf${gebremst ? ' (Rate-Limit, warte)' : ''}, noch offen: ${rest}.` });
@@ -368,7 +418,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const erlaubt = [process.env.CRAWL_SECRET, process.env.ULBA_DEV_SECRET].filter(Boolean);
   if (!erlaubt.length || !erlaubt.includes(String(req.headers['x-ulba-dev'] || '')))
     return res.status(401).json({ error: 'nicht autorisiert' });
-  for (const k of ['AIRTABLE_PAT', 'FIRECRAWL_API_KEY', 'ANTHROPIC_API_KEY'])
+  for (const k of ['AIRTABLE_PAT', 'ANTHROPIC_API_KEY'])
     if (!process.env[k]) return res.status(500).json({ error: `${k} fehlt` });
   const { quelleId, schritt = 'entdecken', max = 600, bulkId } = (req.body || {}) as { quelleId?: string; schritt?: string; max?: number; bulkId?: string };
   if (schritt === 'verknuepfen') {
