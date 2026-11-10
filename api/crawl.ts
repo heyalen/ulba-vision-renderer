@@ -31,7 +31,8 @@ const B = { lieferant: 'fldFnMy19K5DbOGpT', name: 'fldAbxKw2I4bBjAe5', url: 'fld
   passt: 'fldGVYHFlw3MwVkdD', kollektion: 'fld6F3y7xEABUHlJZ' };
 const SYSF = { unternehmen: 'fld79UdSUcLrXivkZ', neck: 'fldc0LLLi5v8VMPNU' };
 const CAPF = { name: 'fldDrmgRkLGvuG8qS', artnr: 'fldmfINUZkLF1XT83', bild: 'fldrdBvP5VIQ61ZVB',
-  status: 'fldw2YYSzaiCZL0g9', system: 'fldtnI9y9eReS2M8N', clip: 'fldNHSNelaBqE3WNC' };
+  status: 'fldw2YYSzaiCZL0g9', system: 'fldtnI9y9eReS2M8N', clip: 'fldNHSNelaBqE3WNC', quelle: 'fldaaJpFn0QTpcJuQ' };
+const SYS_CAPS = 'fldVXTFz3pgErhYWj';
 const L = { name: 'fldq27U7UQU6NZU7P', website: 'fldDfEAJQjKB3ei0G' };
 const SYS_LINK = 'fldUQza6Xa9Eqksaw';
 const HAPPEN = 9;           // Seiten pro Häppchen
@@ -305,11 +306,14 @@ async function capIngest(bulkId: string, origin: string) {
     capId = vorhanden[0].id; bulkStatus = 'Processed';
     const alt: string[] = (vorhanden[0].fields[CAPF.system] || []).map((x: any) => x?.id ?? x);
     const merged = [...new Set([...alt, ...ids])];
-    if (merged.length > alt.length)
-      await atJson(`${T.cap}/${capId}`, { method: 'PATCH', body: JSON.stringify({ fields: { [CAPF.system]: merged.map(id => ({ id })) } }) });
+    const patch: Record<string, any> = {};
+    if (merged.length > alt.length) patch[CAPF.system] = merged.map(id => ({ id }));
+    if (capUrl) patch[CAPF.quelle] = capUrl;
+    await atJson(`${T.cap}/${capId}`, { method: 'PATCH', body: JSON.stringify({ fields: patch }) });
   } else {
     const cf: Record<string, any> = { [CAPF.name]: name, [CAPF.bild]: [{ url: bild.url }], [CAPF.status]: { name: 'Pending' } };
     if (artnr) cf[CAPF.artnr] = artnr;
+    if (capUrl) cf[CAPF.quelle] = capUrl;
     if (clip) cf[CAPF.clip] = clip.slice(0, 15000);
     if (ids.size) cf[CAPF.system] = [...ids].map(id => ({ id }));
     const j = await atJson(T.cap, { method: 'POST', body: JSON.stringify({ records: [{ fields: cf }], typecast: true }) });
@@ -322,7 +326,40 @@ async function capIngest(bulkId: string, origin: string) {
       headers: { 'Content-Type': 'application/json', 'x-render-secret': String(process.env.RENDER_SECRET) },
       body: JSON.stringify({ recordId: erst, bildTyp: 'cap_only' }) }).catch(() => {});
   await atJson(`${T.bulk}/${bulkId}`, { method: 'PATCH', body: JSON.stringify({ fields: { [B.status]: { name: bulkStatus } } }) });
-  return { capId, systeme: ids.size, bulkStatus, hinweis: ids.size ? undefined : 'Kein vom Hersteller zugeordneter Behälter im System (noch nicht freigegeben?) — Cap angelegt; nach Freigabe der Behälter den Verschluss erneut auf Go setzen.' };
+  return { capId, systeme: ids.size, bulkStatus, hinweis: ids.size ? undefined : 'Noch kein zugeordneter Behälter im System — Cap angelegt; Verknüpfung erfolgt automatisch, sobald der Behälter freigegeben wird.' };
+}
+
+/* ── Nachverknüpfen (neues System aus Crawl): hängt bereits angelegte Caps an,
+   die der Hersteller diesem Behälter zuordnet. Macht die Freigabe-Reihenfolge egal. */
+async function systemVerknuepfen(systemId: string, origin: string) {
+  const sys = await atJson(`${T.system}/${systemId}?returnFieldsByFieldId=true`);
+  const link = String(sys.fields?.[SYS_LINK] || '');
+  const lief = String(sys.fields?.[SYSF.unternehmen] || '').trim();
+  const sysKey = seitenKey(link);
+  if (!sysKey || !lief) return { verknuepft: 0, grund: 'kein Link/Lieferant' };
+  const esc = (x: string) => x.replace(/"/g, '');
+  const keys = new Set<string>();
+  // A) Behälter-Seite listet Verschlüsse (Passt_zu der eigenen Bulk-Zeile)
+  const eigen = await alle(T.bulk, [B.url, B.passt], `AND({${B.lieferant}} = "${esc(lief)}", FIND("${esc(sysKey)}", LOWER({${B.url}})))`);
+  for (const r of eigen) if (seitenKey(String(r.fields[B.url] || '')) === sysKey)
+    String(r.fields[B.passt] || '').split('\n').forEach(z => { const k = seitenKey(z.split(' -> ').pop() || ''); if (k) keys.add(k); });
+  // B) Verschluss-Seiten, die diesen Behälter verlinken
+  const rueck = await alle(T.bulk, [B.url], `AND({${B.lieferant}} = "${esc(lief)}", {${B.rolle}} = "Verschluss", FIND("${esc(sysKey)}", LOWER({${B.passt}})))`);
+  rueck.forEach((r: any) => { const k = seitenKey(String(r.fields[B.url] || '')); if (k) keys.add(k); });
+  if (!keys.size) return { verknuepft: 0 };
+  const caps = await alle(T.cap, [CAPF.quelle], `{${CAPF.quelle}} != ""`);
+  const treffer = caps.filter((c: any) => keys.has(seitenKey(String(c.fields[CAPF.quelle] || '')))).map((c: any) => c.id);
+  if (!treffer.length) return { verknuepft: 0 };
+  const alt: string[] = (sys.fields?.[SYS_CAPS] || []).map((x: any) => x?.id ?? x);
+  const merged = [...new Set([...alt, ...treffer])];
+  if (merged.length > alt.length) {
+    await atJson(`${T.system}/${systemId}`, { method: 'PATCH', body: JSON.stringify({ fields: { [SYS_CAPS]: merged.map(id => ({ id })) } }) });
+    if (process.env.RENDER_SECRET)
+      await fetch(`${origin}/api/harmonize`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-render-secret': String(process.env.RENDER_SECRET) },
+        body: JSON.stringify({ recordId: systemId, bildTyp: 'cap_only' }) }).catch(() => {});
+  }
+  return { verknuepft: merged.length - alt.length };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -334,6 +371,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   for (const k of ['AIRTABLE_PAT', 'FIRECRAWL_API_KEY', 'ANTHROPIC_API_KEY'])
     if (!process.env[k]) return res.status(500).json({ error: `${k} fehlt` });
   const { quelleId, schritt = 'entdecken', max = 600, bulkId } = (req.body || {}) as { quelleId?: string; schritt?: string; max?: number; bulkId?: string };
+  if (schritt === 'verknuepfen') {
+    const { systemId } = (req.body || {}) as { systemId?: string };
+    if (!systemId) return res.status(400).json({ error: 'systemId nötig' });
+    try { return res.status(200).json({ ok: true, ...(await systemVerknuepfen(String(systemId), `https://${req.headers.host}`)) }); }
+    catch (e: any) { return res.status(500).json({ error: e.message }); }
+  }
   if (schritt === 'cap') {
     if (!bulkId) return res.status(400).json({ error: 'bulkId nötig' });
     try { return res.status(200).json({ ok: true, ...(await capIngest(String(bulkId), `https://${req.headers.host}`)) }); }
