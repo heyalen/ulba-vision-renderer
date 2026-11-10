@@ -110,7 +110,9 @@ async function fc(endpoint: 'map' | 'scrape', body: any) {
 
 /* ── Jina Reader: Seite → Markdown + Links + Titel ─────────────────── */
 async function jina(url: string): Promise<{ markdown: string; links: string[]; title: string; images: string[] }> {
-  const h: Record<string, string> = { Accept: 'application/json', 'X-With-Links-Summary': 'true', 'X-With-Images-Summary': 'true', 'X-Timeout': '40' };
+  const h: Record<string, string> = { Accept: 'application/json', 'X-With-Links-Summary': 'true', 'X-With-Images-Summary': 'true', 'X-Timeout': '40',
+    // Cookie-/Consent-Banner und Navigation entfernen, sonst verdrängen sie den Produktinhalt
+    'X-Remove-Selector': '#CybotCookiebotDialog, #CybotCookiebotDialogBodyUnderlay, #onetrust-consent-sdk, #usercentrics-root, .cc-window, .cookie, .cookies, [id*="cookie" i], [class*="cookie" i], [id*="consent" i], [class*="consent" i], [aria-label*="cookie" i], header nav, footer' };
   if (process.env.JINA_API_KEY) h.Authorization = `Bearer ${process.env.JINA_API_KEY}`;
   const r = await fetch(`https://r.jina.ai/${url}`, { headers: h });
   if (r.status === 429) throw new RateLimit('Jina Rate-Limit');
