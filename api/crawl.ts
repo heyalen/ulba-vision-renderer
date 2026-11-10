@@ -198,10 +198,10 @@ async function seiteExtrahieren(rec: any, muster?: RegExp): Promise<{ id: string
       .filter(b => !/logo|icon|sprite|flag|banner|badge|payment/i.test(b)).slice(0, 15);
     const o = await haiku(
       'Du extrahierst Produktdaten von Seiten kosmetischer Primärpackmittel-Hersteller. Nur Fakten, die auf der Seite stehen. Antworte nur mit JSON.',
-      `URL: ${url}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
+      `URL: ${url}\nSeitentitel: ${String(s.data?.metadata?.title || '').slice(0, 160)}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
 "ist_produkt": true wenn die Seite EIN konkretes Packmittel beschreibt (sonst false, z.B. Kollektion/News/Übersicht),
 "rolle": "behaelter" (Flasche/Tiegel/Tube/Dose OHNE montierten Verschluss als Produkt) | "system" (Behälter INKLUSIVE Verschluss als eine verkaufte Einheit, z.B. Airless-System, Roll-on komplett) | "verschluss" (Pumpe, Sprüher, Dropper/Pipette, Kappe, Disc-Top, Actuator als eigenes Produkt) | "unklar",
-"name": "Produktname wie beim Hersteller",
+"name": "Produktname wie beim Hersteller INKLUSIVE Volumen, wie im Seitentitel (z.B. FUJI 30ml, ROUND 200ml)",
 "artikelnummer": "Artikel-/Referenznummer oder leer",
 "volumen": "alle Größen mit Einheit, z.B. 30 ml, 50 ml",
 "material": "Materialien",
