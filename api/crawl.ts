@@ -110,12 +110,38 @@ async function fc(endpoint: 'map' | 'scrape', body: any) {
 }
 
 /* ── Jina Reader: Seite → Markdown + Links + Titel ─────────────────── */
-async function jina(url: string): Promise<{ markdown: string; links: string[]; title: string; images: string[] }> {
+type Gelesen = { markdown: string; links: string[]; title: string; images: string[] };
+
+// Fallback für alte Websites, die Jina ablehnt (z.B. falscher Content-Type): HTML direkt holen und grob aufbereiten
+async function direktLesen(url: string): Promise<Gelesen> {
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ulba-crawler/1.0)', Accept: 'text/html,*/*' } });
+  if (!r.ok) throw new Error(`Direkt ${r.status}`);
+  const buf = new Uint8Array(await r.arrayBuffer());
+  let html = new TextDecoder('utf-8').decode(buf);
+  const cs = /charset=["']?([\w-]+)/i.exec(String(r.headers.get('content-type')) + html.slice(0, 2000))?.[1]?.toLowerCase();
+  if (cs && cs !== 'utf-8') { try { html = new TextDecoder(cs).decode(buf); } catch { /* utf-8 behalten */ } }
+  const abs = (h: string) => { try { return new URL(h.replace(/&amp;/g, '&'), r.url || url).href; } catch { return ''; } };
+  const links = [...html.matchAll(/<a\s[^>]*href=["']([^"'#]+)["']/gi)].map(m => abs(m[1])).filter(u => /^https?:/.test(u));
+  const images = [...html.matchAll(/<img\s[^>]*src=["']([^"']+)["']/gi)].map(m => abs(m[1])).filter(u => /^https?:/.test(u));
+  const title = (/<title[^>]*>([^<]*)<\/title>/i.exec(html)?.[1] || '').trim();
+  const text = html.replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<img\s[^>]*src=["']([^"']+)["'][^>]*>/gi, (_m, s1) => ` ![](${abs(s1)}) `)
+    .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+  return { markdown: text, links: [...new Set(links)], title, images: [...new Set(images)] };
+}
+
+async function jina(url: string): Promise<Gelesen> {
+  try { return await jinaRoh(url); }
+  catch (e: any) { if (e instanceof RateLimit) throw e; try { return await direktLesen(url); } catch { throw e; } }
+}
+
+async function jinaRoh(url: string): Promise<Gelesen> {
   const h: Record<string, string> = { Accept: 'application/json', 'X-With-Links-Summary': 'true', 'X-With-Images-Summary': 'true', 'X-Timeout': '40',
     // Cookie-/Consent-Banner und Navigation entfernen, sonst verdrängen sie den Produktinhalt
     'X-Remove-Selector': '#CybotCookiebotDialog, #CybotCookiebotDialogBodyUnderlay, #onetrust-consent-sdk, #usercentrics-root, .cc-window, .cookie, .cookies, [id*="cookie" i], [class*="cookie" i], [id*="consent" i], [class*="consent" i], [aria-label*="cookie" i], header nav, footer' };
   if (process.env.JINA_API_KEY) h.Authorization = `Bearer ${process.env.JINA_API_KEY}`;
-  const r = await fetch(`https://r.jina.ai/${url}`, { headers: h });
+  // POST mit JSON: URLs mit ?-Parametern (z.B. Product.asp?…) bleiben vollständig
+  const r = await fetch('https://r.jina.ai/', { method: 'POST', headers: { ...h, 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
   if (r.status === 429) throw new RateLimit('Jina Rate-Limit');
   const j: any = await r.json().catch(() => ({}));
   if (!r.ok || !j?.data) throw new Error(`Jina ${r.status}: ${String(j?.message || j?.readableMessage || '').slice(0, 160)}`);
