@@ -211,10 +211,27 @@ async function entdecken(q: any, max: number) {
   }
   if (links.filter(u => host(u) === dom).length < 20) {
     // Jina: Katalogseite + verlinkte Kategorieseiten (1 Ebene) lesen und Links sammeln
-    const erst = await jina(katalog); const alle2 = new Set<string>(erst.links);
-    const kat = erst.links.filter(u => host(u) === dom && pfad(u).length > 1).slice(0, 25);
-    for (const k of kat) { try { (await jina(k)).links.forEach(l => alle2.add(l)); } catch (e) { if (e instanceof RateLimit) await pause(30_000); } await pause(ABSTAND_MS); }
-    links = [...alle2]; quelleFund = 'jina';
+    // Breitensuche (max. 2 Ebenen, 35 Seiten): Kategorien UND Blätterseiten (page=2, ?p=, /seite/2 …) folgen
+    const alle2 = new Set<string>(), besucht = new Set<string>();
+    const istAsset = (u: string) => /\.(pdf|jpe?g|png|webp|gif|svg|zip|docx?|xlsx?|mp4|css|js)(\?|$)/i.test(u) || /javascript:|mailto:|tel:/i.test(u);
+    const blaettern = (u: string) => /[?&](page|p|pg|seite|pagenum|PageNo|start|offset)=\d+|\/(page|seite)\/\d+/i.test(u);
+    let ebene = [katalog];
+    for (let tiefe = 0; tiefe < 3 && ebene.length && besucht.size < 35; tiefe++) {
+      const naechste: string[] = [];
+      for (const u of ebene) {
+        if (besucht.size >= 35) break;
+        const k = normUrl(u); if (besucht.has(k)) continue; besucht.add(k);
+        try {
+          const l = (await jina(u)).links.filter(x => host(x) === dom && !istAsset(x));
+          l.forEach(x => alle2.add(x));
+          // Blätterseiten immer, Kategorie-/Listenseiten nur bis Ebene 2
+          naechste.push(...l.filter(x => blaettern(x) || (tiefe < 1 && pfad(x).length > 1)));
+        } catch (e) { if (e instanceof RateLimit) await pause(30_000); }
+        await pause(ABSTAND_MS);
+      }
+      ebene = [...new Set(naechste)].filter(x => !besucht.has(normUrl(x))).sort((a, b) => Number(blaettern(b)) - Number(blaettern(a)));
+    }
+    links = [...alle2]; quelleFund = `jina (${besucht.size} Seiten gelesen)`;
   }
   const kandidaten = [...new Set(links.filter(u => host(u) === dom)
     .filter(u => !/\.(pdf|jpe?g|png|webp|gif|svg|zip|docx?|xlsx?|mp4)(\?|$)/i.test(u))
