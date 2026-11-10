@@ -28,7 +28,8 @@ const Q = { name: 'fldAT1OOMAeZzfTsM', lieferant: 'fldrxmJzWBvo8WG3E', url: 'fld
 const B = { lieferant: 'fldFnMy19K5DbOGpT', name: 'fldAbxKw2I4bBjAe5', url: 'fldV5FqTcWj8EVgwI', roh: 'fldekjxtBQuOwSdZz',
   bild: 'fldGeadiTTVSYh1lq', status: 'fld9Ges6UCFGHSCH7', artnr: 'fldNS2qarbg4JLtD8',
   bildCap: 'fldim1tbt4US5oRdB', rolle: 'fldWQA9lIjuV23SSe', hals: 'fldp5NCCuFytlwOjG',
-  passt: 'fldGVYHFlw3MwVkdD', kollektion: 'fld6F3y7xEABUHlJZ' };
+  passt: 'fldGVYHFlw3MwVkdD', kollektion: 'fld6F3y7xEABUHlJZ', quelle: 'fld5DzraxsCpLmV0N' };
+const Q_SEITEN = 'fldmSqxOtiWoXpLDn';
 const SYSF = { unternehmen: 'fld79UdSUcLrXivkZ', neck: 'fldc0LLLi5v8VMPNU' };
 const CAPF = { name: 'fldDrmgRkLGvuG8qS', artnr: 'fldmfINUZkLF1XT83', bild: 'fldrdBvP5VIQ61ZVB',
   status: 'fldw2YYSzaiCZL0g9', system: 'fldtnI9y9eReS2M8N', clip: 'fldNHSNelaBqE3WNC', quelle: 'fldaaJpFn0QTpcJuQ' };
@@ -219,9 +220,12 @@ async function entdecken(q: any, max: number) {
   (await alle(T.bulk, [B.url], `{${B.url}} != ""`)).forEach(r => bekannt.add(normUrl(r.fields[B.url] || '')));
   (await alle(T.system, [SYS_LINK], `FIND("${dom}", {${SYS_LINK}})`)).forEach(r => bekannt.add(normUrl(r.fields[SYS_LINK] || '')));
   const neu = produkte.filter(u => !bekannt.has(u)).slice(0, max);
-  await schreiben(T.bulk, 'POST', neu.map(u => ({ fields: { [B.url]: u, [B.lieferant]: lname, [B.status]: 'zu crawlen' } })));
+  await schreiben(T.bulk, 'POST', neu.map(u => ({ fields: { [B.url]: u, [B.lieferant]: lname, [B.status]: 'zu crawlen', [B.quelle]: [q.id] } })));
+  // Altbestand dieses Lieferanten ohne Quellen-Verknüpfung nachziehen (fürs Dashboard)
+  const ohne = await alle(T.bulk, [B.url], `AND({${B.lieferant}} = "${lname.replace(/"/g, '')}", {${B.quelle}} = "")`);
+  if (ohne.length) await schreiben(T.bulk, 'PATCH', ohne.map((r: any) => ({ id: r.id, fields: { [B.quelle]: [q.id] } })));
 
-  await quelleSetzen(q.id, { [Q.muster]: muster, [Q.typ]: 'html-liste', [Q.gefunden]: produkte.length, [Q.neu]: neu.length,
+  await quelleSetzen(q.id, { [Q.muster]: muster, [Q.typ]: 'html-liste', [Q_SEITEN]: kandidaten.length, [Q.gefunden]: produkte.length, [Q.neu]: neu.length,
     [Q.status]: 'läuft', [Q.log]: `${new Date().toISOString().slice(0, 16)} Entdeckt (${quelleFund}): ${kandidaten.length} URLs, ${produkte.length} Produktseiten, ${neu.length} neu → «zu crawlen»${produkte.length - neu.length > max ? ` (Limit ${max})` : ''}.` });
   return { lieferant: lname, urls: kandidaten.length, produkte: produkte.length, neu: neu.length };
 }
