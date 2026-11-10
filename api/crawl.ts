@@ -298,8 +298,8 @@ async function seiteExtrahieren(rec: any, muster?: RegExp, sortiment = ''): Prom
     }
     const md = s.markdown;
     const og = s.images[0] || '';
-    const bilder = [...new Set([...(md.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g))].map(m => m[1]))]
-      .filter(b => !/logo|icon|sprite|flag|banner|badge|payment/i.test(b)).slice(0, 15);
+    const bilder = [...new Set([...[...(md.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g))].map(m => m[1]), ...s.images])]
+      .filter(b => /^https?:/.test(b) && !/logo|icon|sprite|flag|banner|badge|payment|1x1|pixel|placeholder|\.svg(\?|$)|\.gif(\?|$)/i.test(b)).slice(0, 30);
     const o = await haiku(
       'Du extrahierst Produktdaten von Seiten kosmetischer Primärpackmittel-Hersteller. Nur Fakten, die auf der Seite stehen. Antworte nur mit JSON.',
       `${SORTIMENT_HINWEIS[sortiment] ? `Hinweis zum Lieferanten: ${SORTIMENT_HINWEIS[sortiment]}\n` : ''}URL: ${url}\nSeitentitel: ${s.title.slice(0, 160)}\nBilder:\n${bilder.join('\n') || '(keine)'}\nog:image: ${og || '-'}\n\nSeite:\n${md.slice(0, 12000)}\n\nJSON mit genau diesen Schlüsseln:
@@ -313,7 +313,8 @@ async function seiteExtrahieren(rec: any, muster?: RegExp, sortiment = ''): Prom
 "hals": "Neck-Norm(en) exakt wie angegeben, kommagetrennt (z.B. 20/400, 24/410), sonst leer",
 "kollektion": "Kollektions-/Serienname (z.B. FUJI COLLECTION), sonst leer",
 "passt_zu": [bis zu 12 auf der Seite verlinkte KOMPATIBLE Teile (Accessoires, 'complete your product', passende Pumpen/Dropper/Flaschen) als {"name":"...","url":"..."} — nur echte Produkt-Detail-Links, sonst leeres Array],
-"bild_url": "URL des Hauptproduktbilds aus der Bildliste (sonst og:image, sonst leer)"`, 900);
+"bild_url": "URL des Hauptproduktbilds aus der Bildliste (sonst og:image, sonst leer)",
+"weitere_bilder": [bis zu 5 weitere URLs aus der Bildliste, die DIESES Produkt zeigen (andere Ansichten, Farben, Details, Varianten) — keine Bilder anderer/verlinkter Produkte, keine Logos/Deko, keine Duplikate in anderer Größe]`, 1100);
     if (!o.ist_produkt) return { id: rec.id, fields: { [B.status]: 'verworfen', [B.roh]: `Kein Einzelprodukt erkannt.\n\n${md.slice(0, 2000)}` } };
     const bild = String(o.bild_url || og || '');
     const ROLLE: Record<string, string> = { behaelter: 'Behälter', system: 'System komplett', verschluss: 'Verschluss' };
@@ -330,7 +331,13 @@ async function seiteExtrahieren(rec: any, muster?: RegExp, sortiment = ''): Prom
       [B.artnr]: String(o.artikelnummer || '').slice(0, 80), [B.rolle]: rolle,
       [B.hals]: String(o.hals || '').slice(0, 100), [B.kollektion]: String(o.kollektion || '').slice(0, 120),
       [B.passt]: passt.join('\n').slice(0, 8000), [B.roh]: `${kopf}\n\n${md.slice(0, 15000)}` };
-    if (/^https?:\/\//.test(bild)) fields[rolle === 'Verschluss' ? B.bildCap : B.bild] = [{ url: bild }];
+    // Alle Produktbilder (Hauptbild zuerst, max. 6); Größen-Duplikate über Dateinamen ohne Maße aussortieren
+    const ohneMass = (u: string) => u.split('?')[0].replace(/[-_]\d{2,4}x\d{2,4}(?=\.\w+$)/, '').toLowerCase();
+    const gesehen = new Set<string>();
+    const alleBilder = [bild, ...(Array.isArray(o.weitere_bilder) ? o.weitere_bilder.map(String) : [])]
+      .filter(u => /^https?:\/\//.test(u) && (u === bild || bilder.includes(u)))
+      .filter(u => { const k = ohneMass(u); if (gesehen.has(k)) return false; gesehen.add(k); return true; }).slice(0, 6);
+    if (alleBilder.length) fields[rolle === 'Verschluss' ? B.bildCap : B.bild] = alleBilder.map(url => ({ url }));
     // Datenqualität 0–100: reicht das für ulba? (<30 → automatisch verworfen)
     const da = (x: any) => String(x || '').trim().length > 0 && !/^[-–]$/.test(String(x).trim());
     const vol = da(o.volumen) || /\d\s?(ml|g|cl|l|oz)\b/i.test(String(o.name || ''));
