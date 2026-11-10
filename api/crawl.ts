@@ -209,6 +209,16 @@ async function entdecken(q: any, max: number) {
   const produkte = ohneSprachDubletten(muster ? kandidaten.filter(u => re.test(pfad(u))) : []);
   if (!produkte.length) throw new Error(`Kein Produkt-URL-Muster gefunden (${kandidaten.length} URLs). URL_Muster von Hand setzen.`);
 
+  // Sortiment/Quelltyp automatisch (nur wenn leer → manuelle Korrektur bleibt erhalten)
+  const auto: Record<string, string> = {};
+  if (!q.fields[Q_QUELLTYP]) auto[Q_QUELLTYP] = 'Web';
+  if (!q.fields[Q_SORTIMENT]) {
+    const o = await haiku(
+      'Du ordnest Hersteller kosmetischer Primärpackmittel anhand ihrer Produkt-URLs einem Sortiment zu. Antworte nur mit JSON.',
+      `Lieferant: ${lname}\nProdukt-Pfade (Auszug):\n${produkte.slice(0, 200).map(pfad).join('\n')}\n\nJSON {"sortiment": eines von ${JSON.stringify(SORTIMENTE)}}. "Komplett-Systeme" = Behälter UND passende Verschlüsse; "gemischt" = breites Sortiment ohne klaren Schwerpunkt; Spezialisten nur wählen, wenn klar >80 % der Produkte in diese Gruppe fallen.`, 100).catch(() => ({}));
+    if (SORTIMENTE.includes(o.sortiment)) auto[Q_SORTIMENT] = o.sortiment;
+  }
+
   // Wiederholbare Fehler (Rate-Limit) dieses Lieferanten löschen → werden neu angelegt
   const alteFehler = await alle(T.bulk, [B.url], `AND({${B.status}} = "Error", {${B.lieferant}} = "${lname.replace(/"/g, '')}", OR(FIND("429", {${B.roh}}), FIND("Rate", {${B.roh}})))`);
   for (let i = 0; i < alteFehler.length; i += 10) {
@@ -225,7 +235,7 @@ async function entdecken(q: any, max: number) {
   const ohne = await alle(T.bulk, [B.url], `AND({${B.lieferant}} = "${lname.replace(/"/g, '')}", {${B.quelle}} = "")`);
   if (ohne.length) await schreiben(T.bulk, 'PATCH', ohne.map((r: any) => ({ id: r.id, fields: { [B.quelle]: [q.id] } })));
 
-  await quelleSetzen(q.id, { [Q.muster]: muster, [Q.typ]: 'html-liste', [Q_SEITEN]: kandidaten.length, [Q.gefunden]: produkte.length, [Q.neu]: neu.length,
+  await quelleSetzen(q.id, { ...auto, [Q.muster]: muster, [Q.typ]: 'html-liste', [Q_SEITEN]: kandidaten.length, [Q.gefunden]: produkte.length, [Q.neu]: neu.length,
     [Q.status]: 'läuft', [Q.log]: `${new Date().toISOString().slice(0, 16)} Entdeckt (${quelleFund}): ${kandidaten.length} URLs, ${produkte.length} Produktseiten, ${neu.length} neu → «zu crawlen»${produkte.length - neu.length > max ? ` (Limit ${max})` : ''}.` });
   return { lieferant: lname, urls: kandidaten.length, produkte: produkte.length, neu: neu.length };
 }
@@ -287,6 +297,8 @@ async function seiteExtrahieren(rec: any, muster?: RegExp, sortiment = ''): Prom
 
 // Sortiment der Quelle → Hinweis an die KI (Spezialisten: alles ist Verschluss, Hals besonders wichtig)
 const Q_SORTIMENT = 'fldVFhexIWki5G9qX';
+const Q_QUELLTYP = 'flddggs2HXaT3tZp6';
+const SORTIMENTE = ['Komplett-Systeme', 'nur Behälter', 'Pumpen & Sprüher', 'Aerosol (Dose/Ventil)', 'Verschlüsse', 'gemischt'];
 const SORTIMENT_HINWEIS: Record<string, string> = {
   'Pumpen & Sprüher': 'Spezialist für Dosiersysteme. Produkte sind fast immer rolle "verschluss" (Pumpe, Sprüher, Lotionpumpe, Actuator). Hals-Norm (z.B. 20/410, 24/410, FEA15) unbedingt exakt erfassen.',
   'Aerosol (Dose/Ventil)': 'Aerosol-Spezialist. Dose = "behaelter"; Ventil, Sprühkopf, Actuator, Kappe = "verschluss". Ventilteller-Norm (z.B. 1 Zoll / 25,4 mm) als hals erfassen.',
