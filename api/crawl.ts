@@ -350,7 +350,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       let q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`);
       let lname: string;
       if (schritt === 'entdecken') {
-        await quelleSetzen(quelleId, { [Q.status]: 'läuft', [Q.log]: `${new Date().toISOString().slice(0, 16)} Crawl gestartet …` });
+        await quelleSetzen(quelleId, { [Q.status]: 'läuft', [Q.letzter]: new Date().toISOString(), [Q.log]: `${new Date().toISOString().slice(0, 16)} Crawl gestartet …` });
         lname = (await entdecken(q, Math.min(Number(max) || 600, 2000))).lieferant;
         q = await atJson(`${T.quellen}/${quelleId}?returnFieldsByFieldId=true`);
       } else lname = await lieferantName(q);
