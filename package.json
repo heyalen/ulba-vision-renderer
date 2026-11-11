@@ -3,12 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
     "@vercel/functions": "^1.4.0",
     "sharp": "^0.33.0"
   },
   "devDependencies": {
-    "@vercel/node": "^3.2.0",
     "@types/node": "^20.0.0",
+    "@vercel/node": "^3.2.0",
     "typescript": "^5.4.0"
   }
 }
