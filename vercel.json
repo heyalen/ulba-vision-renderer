@@ -13,6 +13,10 @@
     "api/katalog.ts": {
       "maxDuration": 300,
       "memory": 1024
+    },
+    "api/vorschlag.ts": {
+      "maxDuration": 300,
+      "memory": 1024
     }
   }
 }
