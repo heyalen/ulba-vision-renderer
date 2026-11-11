@@ -209,7 +209,10 @@ function volumenMl(s: string): number | null {
 
 async function seiteLesen(sb: SupabaseClient, q: any, seite: any, muster?: RegExp) {
   const url = String(seite.url);
-  const s = await lesen(url);
+  // Jina liefert den Text; die Links holen wir ZUSÄTZLICH aus dem Original-HTML,
+  // weil Jina nachgeladene Bereiche wie «Complete your product» teils verschluckt.
+  const [s, roh] = await Promise.all([lesen(url), direktLesen(url).catch(() => null)]);
+  if (roh) s.links = [...new Set([...s.links, ...roh.links])];
   const eigen = seitenKey(url);
   const verlinkt = new Map<string, string>();   // seitenKey → volle URL der verlinkten Produktseiten
   for (const l of s.links) if (host(l) === host(url) && muster?.test(pfad(l)) && seitenKey(l) !== eigen) verlinkt.set(seitenKey(l), normUrl(l));
@@ -342,7 +345,7 @@ JSON mit genau diesen Schlüsseln:
 "hals": Neck-Norm oder null,
 "deko_faehigkeiten": Auswahl aus ${JSON.stringify(DEKO)} — welche Dekorationsverfahren für DIESES Teil realistisch bestellbar sind. Regeln: Klarglas → direktdruck, etikett, spruehlackierung (sleeve nur bei zylindrischer Flasche). Eingefärbtes Glas (Braun/Grün/Blau/Violett) → farbe_fix + etikett + direktdruck (Glasfarbe bleibt!). Kunststoff (PET, PP, HDPE, PETG) → einfaerbung_masse + direktdruck + etikett (+ sleeve bei Flaschen/Tuben). Aluminium/Metall → spruehlackierung + direktdruck. Verschlüsse aus Kunststoff → einfaerbung_masse. Belegt die Seite weitere/andere Verfahren, folge der Seite.
 "render_zonen": {"zones":[{"id": eines von ["outer_wall","inner_cartridge","liquid","cap","base","sleeve"], "material": kurz, "transparent": true|false, "colorable": "full"|"tint"|"none", "notes": kurz}], "primary_canvas": id der Zone, die den Look trägt, "redirect_canvas": id der Ausweichzone oder null}. Zonen aus dem FOTO lesen: z.B. Airless mit Klarglas-Hülle und Innenkartusche → outer_wall transparent tint, inner_cartridge full. Braunglas → outer_wall colorable "none", primary_canvas = Etikett-Fläche über "sleeve". Ein sichtbarer Verschluss ist Zone "cap".
-"einfaerbbar": nur bei Verschlüssen/Systemen: true wenn der Verschluss Kunststoff ist und in Masse eingefärbt werden kann, false bei Metall/Chrom/Alu, sonst null,
+"einfaerbbar": nur bei Verschlüssen/Systemen: true NUR wenn alle sichtbaren Teile des Verschlusses Kunststoff sind und in Masse eingefärbt werden können. false sobald ein sichtbares Teil Metall, Aluminium, Chrom oder metallisiert ist (z.B. Alu-Ring, Alu-Overcap, verchromter Kragen) — das bleibt wie fotografiert. Sonst null,
 "verschluss_art": bei Verschlüssen oder Systemen eines von ${JSON.stringify(VERSCHLUSS)}, sonst null,
 "kurzbeschreibung": 1 sachlicher Satz auf Deutsch, was das Teil ist (Form, Material, Besonderheit).`;
 }
@@ -360,7 +363,9 @@ async function taggen(sb: SupabaseClient, teil: any, jpg: Buffer<ArrayBufferLike
     hals: teil.hals || (o.hals ? String(o.hals).slice(0, 100) : null),
     deko_faehigkeiten: (Array.isArray(o.deko_faehigkeiten) ? o.deko_faehigkeiten : []).filter((d: string) => DEKO.includes(d)),
     render_zonen: zonen,
-    einfaerbbar: typeof o.einfaerbbar === 'boolean' ? o.einfaerbbar : null,
+    // Metall bleibt Metall: Alu/Chrom im Material oder Namen → nicht einfärbbar (Produkt-Entscheid 16.10.)
+    einfaerbbar: /\b(alu|aluminium|aluminum|metall?|chrom|chrome|metallized|metallisiert)\b/i.test(`${o.material || ''} ${teil.material || ''} ${teil.name || ''}`)
+      ? false : (typeof o.einfaerbbar === 'boolean' ? o.einfaerbbar : null),
     verschluss_art: VERSCHLUSS.includes(o.verschluss_art) ? o.verschluss_art : null,
     kurzbeschreibung: o.kurzbeschreibung ? String(o.kurzbeschreibung).slice(0, 400) : null,
     pipeline: 'fertig', pipeline_log: null,
