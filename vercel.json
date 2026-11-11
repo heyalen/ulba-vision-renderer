@@ -9,6 +9,10 @@
     },
     "api/crawl.ts": {
       "maxDuration": 300
+    },
+    "api/katalog.ts": {
+      "maxDuration": 300,
+      "memory": 1024
     }
   }
 }
