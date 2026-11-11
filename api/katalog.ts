@@ -420,6 +420,30 @@ async function verknuepfen(sb: SupabaseClient, q: any): Promise<number> {
   return liste.length;
 }
 
+/* ══ Design-Welten aus Airtable nach Supabase spiegeln (Übergang, bis die Welten in Supabase gepflegt werden) ══ */
+async function weltenSync(): Promise<number> {
+  const sb = db();
+  const FELDER = ['Name', 'Status', 'Body_Behandlung', 'Farbort', 'Body_Hex', 'Cap_Hex', 'Cap_Finish', 'Finish_Body', 'Akzent_Cue', 'Akzent_Hex',
+    'Typo_Haltung', 'Anforderungen', 'Wirkung_Beschreibung', 'Design_Komponenten', 'Deko_Dichte', 'Label_Im_Render', 'Wirkung_Keywords', 'Register'];
+  const rows: any[] = []; let offset = '';
+  do {
+    const p = new URLSearchParams({ pageSize: '100' });
+    FELDER.forEach(f => p.append('fields[]', f));
+    if (offset) p.set('offset', offset);
+    const r = await fetch(`https://api.airtable.com/v0/app0QFyInfhvk66MC/tbl24ezzCjRQDYRnJ?${p}`, { headers: { Authorization: `Bearer ${process.env.AIRTABLE_PAT}` } });
+    const j: any = await r.json();
+    if (!r.ok) throw new Error(`Airtable ${r.status}`);
+    for (const rec of j.records || []) {
+      const f = rec.fields || {};
+      if (!f.Name || !f.Design_Komponenten) continue;
+      rows.push({ id: rec.id, name: String(f.Name), felder: f, aktiv: f.Status === 'Aktiv' });
+    }
+    offset = j.offset || '';
+  } while (offset);
+  for (let i = 0; i < rows.length; i += 50) await sb.from('design_welten').upsert(rows.slice(i, i + 50), { onConflict: 'id' });
+  return rows.length;
+}
+
 /* ══ Ablauf ═══════════════════════════════════════════════════════════ */
 async function ablauf(quelleId: string, schritt: string, laufId: string | undefined, selbst: string, start: number) {
   const sb = db();
@@ -471,6 +495,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   for (const k of ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'ANTHROPIC_API_KEY', 'FAL_API_KEY'])
     if (!process.env[k]) return res.status(500).json({ error: `${k} fehlt` });
   const { quelleId, schritt = 'entdecken', laufId } = (req.body || {}) as { quelleId?: string; schritt?: string; laufId?: string };
+  if (schritt === 'welten_sync') {
+    try { return res.status(200).json({ ok: true, welten: await weltenSync() }); }
+    catch (e: any) { return res.status(500).json({ error: String(e?.message || e) }); }
+  }
   if (!quelleId) return res.status(400).json({ error: 'quelleId nötig' });
   if (!['entdecken', 'lesen', 'veredeln', 'verknuepfen'].includes(schritt)) return res.status(400).json({ error: 'schritt unbekannt' });
   waitUntil(ablauf(quelleId, schritt, laufId, `https://${req.headers.host}/api/katalog`, start));
