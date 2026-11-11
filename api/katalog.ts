@@ -24,7 +24,8 @@ const ZEIT_MS = 120_000;   // danach kein neuer Block mehr → Staffelübergabe
 const RPM = Math.max(1, Number(process.env.SCRAPE_RPM) || (process.env.JINA_API_KEY ? 60 : 18));
 const PARALLEL = process.env.JINA_API_KEY ? 5 : 2;
 const ABSTAND_MS = Math.ceil(60_000 / RPM);
-const MAX_SEITEN = 600;
+// TESTPHASE: max. 20 Produktseiten pro Quelle. Später KATALOG_MAX_SEITEN=600 in Vercel setzen (oder Zeile ändern).
+const MAX_SEITEN = Number(process.env.KATALOG_MAX_SEITEN) || 20;
 
 const pause = (ms: number) => new Promise(z => setTimeout(z, ms));
 const jetzt = () => new Date().toISOString();
