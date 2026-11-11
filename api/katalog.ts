@@ -215,7 +215,7 @@ async function seiteLesen(sb: SupabaseClient, q: any, seite: any, muster?: RegEx
   if (roh) s.links = [...new Set([...s.links, ...roh.links])];
   const eigen = seitenKey(url);
   const verlinkt = new Map<string, string>();   // seitenKey → volle URL der verlinkten Produktseiten
-  for (const l of s.links) if (host(l) === host(url) && muster?.test(pfad(l)) && seitenKey(l) !== eigen) verlinkt.set(seitenKey(l), normUrl(l));
+  for (const l of s.links) if (host(l) === host(url) && muster?.test(pfad(normUrl(l))) && seitenKey(l) !== eigen) verlinkt.set(seitenKey(l), normUrl(l));
   const bilder = [...new Set([...[...s.markdown.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g)].map(m => m[1]), ...s.images])]
     .filter(b => /^https?:/.test(b) && !/logo|icon|sprite|flag|banner|badge|payment|1x1|pixel|placeholder|\.svg(\?|$)|\.gif(\?|$)/i.test(b)).slice(0, 30);
   const o = await haiku('Du extrahierst Produktdaten von Seiten kosmetischer Primärpackmittel-Hersteller. Nur Fakten, die auf der Seite stehen. Antworte nur mit JSON.',
