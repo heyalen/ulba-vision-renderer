@@ -181,7 +181,11 @@ async function entdecken(sb: SupabaseClient, q: any): Promise<number> {
     muster = String(o.regex || '');
   }
   let re: RegExp; try { re = new RegExp(muster, 'i'); } catch { throw new Error('Produkt-Muster ungültig'); }
-  const produkte = muster ? ohneSprachDubletten(kandidaten.filter(u => re.test(pfad(u)))).slice(0, MAX_SEITEN) : [];
+  const alleProdukte = muster ? ohneSprachDubletten(kandidaten.filter(u => re.test(pfad(u)))) : [];
+  // Bei Begrenzung gleichmässig über den ganzen Katalog verteilt auswählen (sonst nur die erste Kategorie)
+  const schritt = Math.max(1, alleProdukte.length / MAX_SEITEN);
+  const produkte = alleProdukte.length <= MAX_SEITEN ? alleProdukte
+    : Array.from({ length: MAX_SEITEN }, (_, i) => alleProdukte[Math.floor(i * schritt)]);
   if (!produkte.length) throw new Error(`Keine Produktseiten erkannt (${kandidaten.length} Seiten durchsucht).`);
 
   for (let i = 0; i < produkte.length; i += 200) {
@@ -190,7 +194,7 @@ async function entdecken(sb: SupabaseClient, q: any): Promise<number> {
   }
   // Bereits gelesene Seiten erneut prüfen (Delta-Lauf): auf zu_lesen zurücksetzen
   await sb.from('import_seiten').update({ status: 'zu_lesen' }).eq('quelle_id', q.id).in('status', ['gelesen', 'fehler']);
-  await quelleLog(sb, q.id, { url_muster: muster }, `Gefunden über ${fund}: ${kandidaten.length} Seiten, davon ${produkte.length} Produktseiten.`);
+  await quelleLog(sb, q.id, { url_muster: muster }, `Gefunden über ${fund}: ${kandidaten.length} Seiten, ${alleProdukte.length} Produktseiten${alleProdukte.length > produkte.length ? `, davon ${produkte.length} für den Test ausgewählt` : ''}.`);
   return produkte.length;
 }
 
@@ -338,7 +342,7 @@ async function taggen(sb: SupabaseClient, teil: any, jpg: Buffer<ArrayBufferLike
   const zonen = o.render_zonen && Array.isArray(o.render_zonen.zones) && o.render_zonen.zones.length ? o.render_zonen : {};
   await sb.from('teile').update({
     typ: TYPEN.includes(o.typ) ? o.typ : null,
-    material: teil.material || (o.material ? String(o.material).slice(0, 120) : null),
+    material: o.material ? String(o.material).slice(0, 120) : teil.material,  // einheitliche Schreibweise aus dem Tagging
     volumen_ml: teil.volumen_ml ?? (Number(o.volumen_ml) || null),
     hals: teil.hals || (o.hals ? String(o.hals).slice(0, 100) : null),
     deko_faehigkeiten: (Array.isArray(o.deko_faehigkeiten) ? o.deko_faehigkeiten : []).filter((d: string) => DEKO.includes(d)),
