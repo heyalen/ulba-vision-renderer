@@ -31,7 +31,7 @@ import { KONTO_AKTIV, kontoAusRequest, liesFrei, schreibeFrei, renderKontingent,
 // Ohne dies wartet ein haengender externer Call (fal.ai / Airtable) bis
 // Vercel die Funktion killt -> Client sieht nur "Failed to fetch". Mit
 // Timeout bricht der einzelne Call ab und der Fehler NENNT den Dienst.
-async function fetchT(
+export async function fetchT(
   url: string,
   init: RequestInit & { timeoutMs?: number; label?: string } = {}
 ): Promise<Response> {
@@ -510,7 +510,7 @@ export async function montiereKomposit(
 // v63: Einzelbild hintergrund-normalisiert auf reines Weiss (Maske aller
 // Objekt-Komponenten) — Cap_Bild/Body_Bild sehen damit auch im Stapel-
 // Fallback und im Anpassen-Overlay sauber aus, egal welchen Grund fal gab.
-async function aufWeiss(buf: Buffer): Promise<Buffer | null> {
+export async function aufWeiss(buf: Buffer): Promise<Buffer | null> {
   try {
     const p = await silhouettenProfil(buf);
     if (!p) return null;
@@ -614,7 +614,7 @@ type RenderFall = 'A' | 'B' | 'C' | 'D';
 
 // Ein fal-Edit-Aufruf → Bild-URL. aspect_ratio: Preset aus dem Eingabefoto
 // (aspectFromAttachment), 'auto' nur als letzter Fallback.
-async function falEdit(imageUrls: string[], prompt: string, aspectRatio: string = 'auto', endpoint: string = FAL_SEEDREAM_EDIT): Promise<string> {
+export async function falEdit(imageUrls: string[], prompt: string, aspectRatio: string = 'auto', endpoint: string = FAL_SEEDREAM_EDIT): Promise<string> {
   const r = await fetchT(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Key ${process.env.FAL_API_KEY}` },
@@ -655,7 +655,7 @@ function imgUrl(attachmentField: any): string | null {
 // I/O-Schema). 'auto' nur, wenn keine Masse vorliegen.
 // Volles dokumentiertes Preset-Set (Seedream v5 edit). v46 kannte nur 8
 // Presets — eine 1:2.3-Flasche landete auf 9:16 und wurde gestreckt.
-const FAL_RATIOS: Array<[string, number]> = [
+export const FAL_RATIOS: Array<[string, number]> = [
   ['21:9', 21 / 9], ['3:1', 3], ['2:1', 2], ['16:9', 16 / 9], ['3:2', 3 / 2],
   ['4:3', 4 / 3], ['5:4', 5 / 4], ['1:1', 1], ['4:5', 4 / 5], ['3:4', 3 / 4],
   ['2:3', 2 / 3], ['9:16', 9 / 16], ['1:2', 1 / 2], ['9:21', 9 / 21], ['1:3', 1 / 3],
@@ -1092,7 +1092,7 @@ function doNotZeile(doNot: string[]): string {
 // ── Prompt Assembly — 100 % deterministisch ─────────────────────────
 // Kein LLM: alle Werte kommen aus dem Design_Code-Record + den SF_-Feldern
 // des Teils. Halluzinationsflaeche fuer Form/Material: null.
-async function assemblePrompt(
+export async function assemblePrompt(
   brief: string,
   fall: RenderFall,
   split: boolean,
@@ -1101,12 +1101,15 @@ async function assemblePrompt(
   forceCodeId: string,
   // v48: ID des gewaehlten Caps — fuer die Closure-Warnung (Geschwister-
   // Varianten des Systems nachschlagen, den gewaehlten ausnehmen).
-  selectedCapId: string | null
+  selectedCapId: string | null,
+  // Neues ulba: Look direkt übergeben (Marken-Look oder Design-Welt aus Supabase)
+  // statt ihn aus der Airtable-Tabelle Design_Code zu laden.
+  codeOverride?: { id: string; fields: Record<string, any> }
 ): Promise<{
   fullPrompt: string; basePrompt: string; capPrompt: string | null;
   forbidden: string[]; concept: Concept;
 }> {
-  const designCodesAll = await airtableListAll(DESIGN_CODE_TABLE);
+  const designCodesAll = codeOverride ? [codeOverride] : await airtableListAll(DESIGN_CODE_TABLE);
 
   // ── Attribut-Ground-Truth — Constraints UND Geometrie-Namen ────────
   // v47: Die getaggten Attribut-NAMEN (System + Cap) werden zum teil-
