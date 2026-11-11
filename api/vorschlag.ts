@@ -59,6 +59,22 @@ async function lesen(url: string): Promise<Seite> {
   }
 }
 
+/* Firecrawl: kommt meist durch Bot-Sperren (Cloudflare) und liefert zusätzlich einen Screenshot */
+async function firecrawl(url: string): Promise<(Seite & { screenshot?: string }) | null> {
+  if (!process.env.FIRECRAWL_API_KEY) return null;
+  try {
+    const r = await fetch('https://api.firecrawl.dev/v1/scrape', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.FIRECRAWL_API_KEY}` },
+      body: JSON.stringify({ url, formats: ['markdown', 'links', 'screenshot'], waitFor: 2500, timeout: 45000 }) });
+    const j: any = await r.json();
+    if (!r.ok || !j?.data) return null;
+    const md = String(j.data.markdown || '');
+    return { text: md, links: (j.data.links || []).map(String), titel: String(j.data.metadata?.title || ''),
+      bilder: [...md.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g)].map(m => m[1]), screenshot: j.data.screenshot ? String(j.data.screenshot) : undefined };
+  } catch { return null; }
+}
+const gesperrt = (s: Seite) => /just a moment|attention required|access denied|captcha/i.test(s.titel) || s.bilder.length < 3;
+
 /* ══ MARKE: Website → Looks ═══════════════════════════════════════════ */
 const LOOK_SYSTEM = `Du bist Packaging-Designer. Du analysierst die Produktverpackungen EINER Kosmetikmarke anhand von Fotos aus ihrem Shop und beschreibst ihre Designsprache so, dass ein Renderer sie auf ANDERE Packmittel übertragen kann. Nur was die Fotos zeigen. Antworte nur mit JSON.`;
 function lookPrompt(marke: string, url: string, text: string) {
@@ -101,9 +117,14 @@ async function markeLesen(sb: SupabaseClient, vorschlagId: string) {
     if ((count || 0) > 0) { await sb.from('vorschlaege').update({ marke_id: vorhanden.id }).eq('id', vorschlagId); return; }
   }
   // Startseite + bis zu 2 Shop-/Produktseiten lesen und Produktfotos sammeln
-  const s0 = await lesen(start);
+  const lies = async (u: string): Promise<Seite & { screenshot?: string }> => {
+    const j = await lesen(u).catch(() => null);
+    if (j && !gesperrt(j)) return j;
+    return (await firecrawl(u)) || j || { text: '', links: [], bilder: [], titel: '' };
+  };
+  const s0 = await lies(start);
   const shop = [...new Set(s0.links.filter(l => host(l) === dom && /\/(products?|produkte?|shop|collections?|kollektion|sortiment|categor|kategorie)/i.test(l)))].slice(0, 2);
-  const seiten = [s0, ...(await Promise.all(shop.map(u => lesen(u).catch(() => null)))).filter(Boolean) as Seite[]];
+  const seiten = [s0, ...(await Promise.all(shop.map(u => lies(u).catch(() => null)))).filter(Boolean) as (Seite & { screenshot?: string })[]];
   // Kandidaten: alle Bilder ausser Icons/Logos/SVG/GIF — auch CDN-Links ohne Dateiendung
   const kandidaten = [...new Set(seiten.flatMap(s => s.bilder))]
     .filter(b => /^https?:\/\//.test(b) && !/\.(svg|gif)(\?|$)/i.test(b) && !/logo|icon|sprite|flag|payment|badge|avatar|1x1|pixel|favicon/i.test(b))
@@ -124,7 +145,13 @@ async function markeLesen(sb: SupabaseClient, vorschlagId: string) {
     }));
     erg.forEach(b => { if (b && bilder.length < 10) bilder.push(b); });
   }
-  if (bilder.length < 2) throw new Error('Auf der Website wurden zu wenige Produktfotos gefunden.');
+  // Reserve: Screenshots der Seiten (zeigen die Produkte im Shop-Raster)
+  if (bilder.length < 3) {
+    for (const sc of seiten.map(x => x.screenshot).filter(Boolean) as string[]) {
+      try { const r = await fetchT(sc, { timeoutMs: 15000, label: 'screenshot' }); bilder.push((await sharp(Buffer.from(await r.arrayBuffer())).resize({ width: 1400, withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer()).toString('base64')); } catch { /* weiter */ }
+    }
+  }
+  if (bilder.length < 2) throw new Error('Die Website der Marke liess sich nicht lesen (zu wenige Produktfotos, evtl. Bot-Sperre).');
   const markeName = (s0.titel.split(/[|–\-—:]/)[0] || dom).trim().slice(0, 80);
   const inhalt: any[] = bilder.map(data => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } }));
   inhalt.push({ type: 'text', text: lookPrompt(markeName, start, seiten.map(s => s.text).join('\n\n')) });
