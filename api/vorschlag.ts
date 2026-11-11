@@ -104,12 +104,29 @@ async function markeLesen(sb: SupabaseClient, vorschlagId: string) {
   const s0 = await lesen(start);
   const shop = [...new Set(s0.links.filter(l => host(l) === dom && /\/(products?|produkte?|shop|collections?|kollektion|sortiment|categor|kategorie)/i.test(l)))].slice(0, 2);
   const seiten = [s0, ...(await Promise.all(shop.map(u => lesen(u).catch(() => null)))).filter(Boolean) as Seite[]];
-  const bilder = [...new Set(seiten.flatMap(s => s.bilder))]
-    .filter(b => /^https?:\/\//.test(b) && /\.(jpe?g|png|webp)(\?|$)/i.test(b) && !/logo|icon|sprite|flag|payment|badge|banner|avatar|1x1|pixel/i.test(b))
-    .slice(0, 10);
+  // Kandidaten: alle Bilder ausser Icons/Logos/SVG/GIF — auch CDN-Links ohne Dateiendung
+  const kandidaten = [...new Set(seiten.flatMap(s => s.bilder))]
+    .filter(b => /^https?:\/\//.test(b) && !/\.(svg|gif)(\?|$)/i.test(b) && !/logo|icon|sprite|flag|payment|badge|avatar|1x1|pixel|favicon/i.test(b))
+    .slice(0, 30);
+  // Selbst laden, Mindestgrösse prüfen, als JPEG weitergeben (AVIF/WebP/ohne Endung egal)
+  const sharp = (await import('sharp')).default;
+  const bilder: string[] = [];
+  for (let i = 0; i < kandidaten.length && bilder.length < 10; i += 6) {
+    const erg = await Promise.all(kandidaten.slice(i, i + 6).map(async (u) => {
+      try {
+        const r = await fetchT(u, { headers: UA, timeoutMs: 12000, label: 'marke bild' });
+        if (!r.ok || !/^image\//.test(String(r.headers.get('content-type') || 'image/'))) return null;
+        const buf = Buffer.from(await r.arrayBuffer());
+        const m = await sharp(buf).metadata();
+        if ((m.width || 0) < 250 || (m.height || 0) < 250) return null;
+        return (await sharp(buf).resize({ width: 900, height: 900, fit: 'inside', withoutEnlargement: true }).flatten({ background: '#FFFFFF' }).jpeg({ quality: 82 }).toBuffer()).toString('base64');
+      } catch { return null; }
+    }));
+    erg.forEach(b => { if (b && bilder.length < 10) bilder.push(b); });
+  }
   if (bilder.length < 2) throw new Error('Auf der Website wurden zu wenige Produktfotos gefunden.');
   const markeName = (s0.titel.split(/[|–\-—:]/)[0] || dom).trim().slice(0, 80);
-  const inhalt: any[] = bilder.map(url => ({ type: 'image', source: { type: 'url', url } }));
+  const inhalt: any[] = bilder.map(data => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } }));
   inhalt.push({ type: 'text', text: lookPrompt(markeName, start, seiten.map(s => s.text).join('\n\n')) });
   let o: any;
   try { o = await claude('claude-sonnet-4-5', LOOK_SYSTEM, inhalt, 4000); }
