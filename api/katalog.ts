@@ -211,8 +211,8 @@ async function seiteLesen(sb: SupabaseClient, q: any, seite: any, muster?: RegEx
   const url = String(seite.url);
   const s = await lesen(url);
   const eigen = seitenKey(url);
-  const verlinkt = new Set<string>();
-  for (const l of s.links) if (host(l) === host(url) && muster?.test(pfad(l)) && seitenKey(l) !== eigen) verlinkt.add(seitenKey(l));
+  const verlinkt = new Map<string, string>();   // seitenKey → volle URL der verlinkten Produktseiten
+  for (const l of s.links) if (host(l) === host(url) && muster?.test(pfad(l)) && seitenKey(l) !== eigen) verlinkt.set(seitenKey(l), normUrl(l));
   const bilder = [...new Set([...[...s.markdown.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)\)/g)].map(m => m[1]), ...s.images])]
     .filter(b => /^https?:/.test(b) && !/logo|icon|sprite|flag|banner|badge|payment|1x1|pixel|placeholder|\.svg(\?|$)|\.gif(\?|$)/i.test(b)).slice(0, 30);
   const o = await haiku('Du extrahierst Produktdaten von Seiten kosmetischer Primärpackmittel-Hersteller. Nur Fakten, die auf der Seite stehen. Antworte nur mit JSON.',
@@ -260,7 +260,20 @@ async function seiteLesen(sb: SupabaseClient, q: any, seite: any, muster?: RegEx
       } catch { /* ohne Bild weiter → veredeln meldet es */ }
     }
   }
-  const passt = [...new Set([...(Array.isArray(o.passt_zu) ? o.passt_zu.map((u: any) => seitenKey(String(u?.url ?? u))) : []), ...verlinkt])].filter(Boolean).slice(0, 40);
+  // Vom Hersteller als passend verlinkte Teile («complete your product»): immer mit einlesen,
+  // auch über die Test-Begrenzung hinaus — sonst fehlen die Verschlüsse zu den Behältern.
+  for (const x of (Array.isArray(o.passt_zu) ? o.passt_zu : [])) {
+    const u = String(x?.url ?? x); const k = seitenKey(u);
+    if (/^https?:\/\//.test(u) && host(u) === host(url) && k && k !== eigen && !verlinkt.has(k)) verlinkt.set(k, normUrl(u));
+  }
+  const passt = [...verlinkt.keys()].slice(0, 40);
+  const nachladen = [...verlinkt.values()].filter(Boolean).slice(0, 40);
+  if (nachladen.length) {
+    const { count } = await sb.from('import_seiten').select('id', { count: 'exact', head: true }).eq('quelle_id', q.id);
+    const platz = MAX_SEITEN * 3 - (count || 0);   // Obergrenze inkl. nachgeladener Teile
+    if (platz > 0) await sb.from('import_seiten').upsert(nachladen.slice(0, platz).map(u => ({ quelle_id: q.id, firma_id: q.firma_id, url: u, status: 'zu_lesen' })),
+      { onConflict: 'quelle_id,url', ignoreDuplicates: true });
+  }
   await sb.from('import_seiten').update({ status: 'gelesen', teil_id: teilId, passt_zu: passt,
     fingerprint: hash([felder.name, artnr, felder.volumen_ml, felder.material, rolle, felder.hals].join('|')), log: null }).eq('id', seite.id);
   return neu ? 'neu' : 'bekannt';
