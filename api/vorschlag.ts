@@ -29,8 +29,13 @@ async function claude(model: string, system: string, content: any, max = 3000): 
     const j: any = await r.json();
     if (!r.ok) throw new Error(`Claude ${r.status}: ${String(j?.error?.message || '').slice(0, 200)}`);
     const m = String(j.content?.[0]?.text || '').match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('Claude ohne JSON');
-    return JSON.parse(m[0]);
+    if (!m) { if (v < 2) continue; throw new Error('Claude ohne JSON'); }
+    try { return JSON.parse(m[0]); }
+    catch (e) {
+      // häufige Fehler reparieren: Kommas vor Klammern, «null oder …»-Muster
+      try { return JSON.parse(m[0].replace(/,\s*([}\]])/g, '$1').replace(/:\s*null oder [^,}\]]+/g, ': null')); }
+      catch { if (v < 2) continue; throw e; }
+    }
   }
   throw new Error('Claude überlastet');
 }
@@ -87,16 +92,21 @@ JSON: {"richtungen": [ {
  "felder": ${lookPrompt('', '', '').split('"felder": ')[1].split(' } } ] }')[0]}
  } ] }`;
 }
+const SPIELARTEN = ['zurückhaltend: leise, reduziert, sicher marktfähig', 'ausgewogen: klar erkennbar, die typische Umsetzung der Idee', 'mutig: auffällig, überraschend, zeigt das Potenzial der Idee voll'];
 async function richtungErzeugen(text: string | null, bild: string | null) {
-  const anzahl = bild ? 1 : 3;
-  const inhalt: any[] = [];
-  if (bild) inhalt.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: bild } });
-  inhalt.push({ type: 'text', text: richtungSchema(anzahl, bild
-    ? `Das Bild ist eine Referenz (Moodboard, Wettbewerber oder Packaging). Übernimm seine Designsprache — Farben, Finish, Etikett, Stimmung — als übertragbare Richtung.${text ? ` Zusatz: ${text}` : ''}`
-    : `Design-Idee des Lieferanten: «${text}». Leite daraus eine glaubwürdige Verpackungs-Designsprache ab, wie sie am Markt für genau diese Zielgruppe funktioniert.`) });
-  const o = await claude('claude-sonnet-4-5', RICHTUNG_SYSTEM, inhalt, 5000);
-  const liste = (Array.isArray(o.richtungen) ? o.richtungen : []).slice(0, anzahl);
-  if (!liste.length) throw new Error('Keine Richtung erkannt.');
+  // je Spielart ein eigener, kleiner Aufruf → parallel, schneller, robuster
+  const auftraege = bild ? [null] : SPIELARTEN;
+  const erg = await Promise.all(auftraege.map(async (art) => {
+    const inhalt: any[] = [];
+    if (bild) inhalt.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: bild } });
+    inhalt.push({ type: 'text', text: richtungSchema(1, bild
+      ? `Das Bild ist eine Referenz (Moodboard, Wettbewerber oder Packaging). Übernimm seine Designsprache — Farben, Finish, Etikett, Stimmung — als übertragbare Richtung.${text ? ` Zusatz: ${text}` : ''}`
+      : `Design-Idee des Lieferanten: «${text}». Leite daraus eine glaubwürdige Verpackungs-Designsprache ab, wie sie am Markt für genau diese Zielgruppe funktioniert. Spielart: ${art}. Der Name soll die Spielart erkennen lassen.`) });
+    try { const o = await claude('claude-sonnet-4-5', RICHTUNG_SYSTEM, inhalt, 2500); return Array.isArray(o.richtungen) ? o.richtungen[0] : null; }
+    catch { return null; }
+  }));
+  const liste = erg.filter(Boolean);
+  if (!liste.length) throw new Error('Keine Richtung erkannt. Versuch es noch einmal oder beschreib die Idee etwas genauer.');
   return liste.map((r: any) => ({
     name: String(r.name || 'Neue Richtung').slice(0, 60), beschreibung: String(r.beschreibung || '').slice(0, 300),
     felder: { ...r.felder, Temp_Laut: Number(r.laut) || 5, Farbtemp: Number(r.farbtemp) || 5 },
