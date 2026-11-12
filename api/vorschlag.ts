@@ -75,6 +75,34 @@ async function firecrawl(url: string): Promise<(Seite & { screenshot?: string })
 }
 const gesperrt = (s: Seite) => /just a moment|attention required|access denied|captcha/i.test(s.titel) || s.bilder.length < 3;
 
+/* ══ RICHTUNG: Beschreibung oder Referenzbild → Design-Code ═══════════ */
+const RICHTUNG_SYSTEM = `Du bist Packaging-Designer für Kosmetik. Du übersetzt eine Design-Idee (Text oder Referenzbild) in einen präzisen Design-Code, mit dem ein Renderer ein BELIEBIGES Packmittel (Flasche, Tiegel, Airless, Pumpe) gestalten kann. Konkret, umsetzbar, kosmetik-tauglich. Antworte nur mit JSON.`;
+function richtungSchema(anzahl: number, hinweis: string) {
+  return `${hinweis}
+Erzeuge genau ${anzahl} ${anzahl > 1 ? 'klar unterscheidbare Spielarten derselben Idee: 1 «zurückhaltend», 2 «ausgewogen», 3 «mutig»' : 'Richtung'}.
+JSON: {"richtungen": [ {
+ "name": "kurzer, sprechender Name auf Deutsch (2-4 Wörter), z.B. «K-Beauty Pastell» oder «Männer Schiefer matt»",
+ "beschreibung": "1 Satz auf Deutsch: Farben, Material, Finish, Etikett",
+ "laut": Zahl 0-10 (0 ruhig, 10 laut), "farbtemp": Zahl 0-10 (0 klinisch-kühl, 10 warm-sinnlich),
+ "felder": ${lookPrompt('', '', '').split('"felder": ')[1].split(' } } ] }')[0]}
+ } ] }`;
+}
+async function richtungErzeugen(text: string | null, bild: string | null) {
+  const anzahl = bild ? 1 : 3;
+  const inhalt: any[] = [];
+  if (bild) inhalt.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: bild } });
+  inhalt.push({ type: 'text', text: richtungSchema(anzahl, bild
+    ? `Das Bild ist eine Referenz (Moodboard, Wettbewerber oder Packaging). Übernimm seine Designsprache — Farben, Finish, Etikett, Stimmung — als übertragbare Richtung.${text ? ` Zusatz: ${text}` : ''}`
+    : `Design-Idee des Lieferanten: «${text}». Leite daraus eine glaubwürdige Verpackungs-Designsprache ab, wie sie am Markt für genau diese Zielgruppe funktioniert.`) });
+  const o = await claude('claude-sonnet-4-5', RICHTUNG_SYSTEM, inhalt, 5000);
+  const liste = (Array.isArray(o.richtungen) ? o.richtungen : []).slice(0, anzahl);
+  if (!liste.length) throw new Error('Keine Richtung erkannt.');
+  return liste.map((r: any) => ({
+    name: String(r.name || 'Neue Richtung').slice(0, 60), beschreibung: String(r.beschreibung || '').slice(0, 300),
+    felder: { ...r.felder, Temp_Laut: Number(r.laut) || 5, Farbtemp: Number(r.farbtemp) || 5 },
+  }));
+}
+
 /* ══ MARKE: Website → Looks ═══════════════════════════════════════════ */
 const LOOK_SYSTEM = `Du bist Packaging-Designer. Du analysierst die Produktverpackungen EINER Kosmetikmarke anhand von Fotos aus ihrem Shop und beschreibst ihre Designsprache so, dass ein Renderer sie auf ANDERE Packmittel übertragen kann. Nur was die Fotos zeigen. Antworte nur mit JSON.`;
 function lookPrompt(marke: string, url: string, text: string) {
@@ -184,9 +212,15 @@ function seitenverhaeltnis(w: number, h: number): string {
 const liste = (x: any): string[] => Array.isArray(x) ? x.map(String) : x ? [String(x)] : [];
 
 /* Code eines Looks (Kundenmarke) oder einer Design-Welt im Renderer-Format. */
-async function codeLaden(sb: SupabaseClient, art: 'welt' | 'look', id: string, hex?: string | null) {
+async function codeLaden(sb: SupabaseClient, art: 'welt' | 'look' | 'richtung', id: string, hex?: string | null) {
   let code: { id: string; fields: Record<string, any> }, name: string;
-  if (art === 'welt') {
+  if (art === 'richtung') {
+    const { data: r } = await sb.from('richtungen').select('id, name, felder').eq('id', id).single();
+    if (!r) throw new Error('Richtung nicht gefunden');
+    const f = { ...(r.felder as any) };
+    if (f.Design_Komponenten && typeof f.Design_Komponenten !== 'string') f.Design_Komponenten = JSON.stringify(f.Design_Komponenten);
+    code = { id: `ri_${r.id}`, fields: { ...f, Name: r.name, Status: 'Aktiv' } }; name = r.name;
+  } else if (art === 'welt') {
     const { data: w } = await sb.from('design_welten').select('*').eq('id', id).single();
     if (!w) throw new Error('Design-Welt nicht gefunden');
     const f = { ...(w.felder as any) }; delete f.Referenz_Bild;
@@ -247,8 +281,8 @@ async function einRender(sb: SupabaseClient, vorschlag: any, pos: any, richtung:
 
 /* Studio: einzelne Renders (Einzelteil, Farbvarianten, vertikale Linie). */
 async function studioRendern(sb: SupabaseClient, ids: string[]) {
-  for (let i = 0; i < ids.length; i += 3) {
-    await Promise.all(ids.slice(i, i + 3).map(async id => {
+  for (let i = 0; i < ids.length; i += 4) {
+    await Promise.all(ids.slice(i, i + 4).map(async id => {
       const { data: r } = await sb.from('studio_renders').select('*').eq('id', id).single();
       if (!r || r.status === 'fertig') return;
       try {
@@ -298,6 +332,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!process.env.KATALOG_SECRET || req.headers['x-katalog-secret'] !== process.env.KATALOG_SECRET) return res.status(401).json({ error: 'nicht autorisiert' });
   const { aufgabe, vorschlagId, ids } = (req.body || {}) as { aufgabe?: string; vorschlagId?: string; ids?: string[] };
   const sb = db();
+  if (aufgabe === 'richtung') {
+    const { text, bild } = req.body as { text?: string; bild?: string };
+    if (!text && !bild) return res.status(400).json({ error: 'text oder bild nötig' });
+    try { return res.status(200).json({ ok: true, richtungen: await richtungErzeugen(text ? String(text).slice(0, 1500) : null, bild ? String(bild) : null) }); }
+    catch (e: any) { return res.status(500).json({ error: String(e?.message || e).slice(0, 300) }); }
+  }
   if (aufgabe === 'studio') {
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids nötig' });
     waitUntil(studioRendern(sb, ids.slice(0, 12).map(String)));
