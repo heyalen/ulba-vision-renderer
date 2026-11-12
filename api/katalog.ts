@@ -424,7 +424,8 @@ async function verknuepfen(sb: SupabaseClient, q: any): Promise<number> {
 async function weltenSync(): Promise<number> {
   const sb = db();
   const FELDER = ['Name', 'Status', 'Body_Behandlung', 'Farbort', 'Body_Hex', 'Cap_Hex', 'Cap_Finish', 'Finish_Body', 'Akzent_Cue', 'Akzent_Hex',
-    'Typo_Haltung', 'Anforderungen', 'Wirkung_Beschreibung', 'Design_Komponenten', 'Deko_Dichte', 'Label_Im_Render', 'Wirkung_Keywords', 'Register'];
+    'Typo_Haltung', 'Anforderungen', 'Wirkung_Beschreibung', 'Design_Komponenten', 'Deko_Dichte', 'Label_Im_Render', 'Wirkung_Keywords', 'Register',
+    'Temp_Laut', 'Farbtemp', 'Temp_Ton', 'Temp_Form', 'Brand', 'Referenz_Bild'];
   const rows: any[] = []; let offset = '';
   do {
     const p = new URLSearchParams({ pageSize: '100' });
@@ -436,11 +437,27 @@ async function weltenSync(): Promise<number> {
     for (const rec of j.records || []) {
       const f = rec.fields || {};
       if (!f.Name || !f.Design_Komponenten) continue;
-      rows.push({ id: rec.id, name: String(f.Name), felder: f, aktiv: f.Status === 'Aktiv' });
+      const bild = Array.isArray(f.Referenz_Bild) && f.Referenz_Bild[0] ? (f.Referenz_Bild[0].thumbnails?.large?.url || f.Referenz_Bild[0].url) : null;
+      const { Referenz_Bild, ...rest } = f;
+      rows.push({ id: rec.id, name: String(f.Name), felder: rest, aktiv: f.Status === 'Aktiv', _bild: bild });
     }
     offset = j.offset || '';
   } while (offset);
-  for (let i = 0; i < rows.length; i += 50) await sb.from('design_welten').upsert(rows.slice(i, i + 50), { onConflict: 'id' });
+  // Referenzbilder dauerhaft in den Bucket «welten» (Airtable-Links laufen ab)
+  const { data: vorh } = await sb.from('design_welten').select('id, bild_pfad');
+  const pfade = new Map((vorh || []).filter((w: any) => w.bild_pfad).map((w: any) => [w.id, w.bild_pfad]));
+  for (const r of rows) r.bild_pfad = pfade.get(r.id) || null;
+  const offen = rows.filter(r => r._bild && !r.bild_pfad);
+  for (let i = 0; i < offen.length; i += 6) await Promise.all(offen.slice(i, i + 6).map(async r => {
+    try {
+      const b = await fetch(r._bild); if (!b.ok) return;
+      const pfad = `${r.id}.jpg`;
+      const { error } = await sb.storage.from('welten').upload(pfad, Buffer.from(await b.arrayBuffer()), { contentType: b.headers.get('content-type') || 'image/jpeg', upsert: true });
+      if (!error) r.bild_pfad = pfad;
+    } catch { /* ohne Bild weiter */ }
+  }));
+  const sauber = rows.map(({ _bild, ...r }) => r);
+  for (let i = 0; i < sauber.length; i += 50) await sb.from('design_welten').upsert(sauber.slice(i, i + 50), { onConflict: 'id' });
   return rows.length;
 }
 
