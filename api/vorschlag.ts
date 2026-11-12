@@ -7,7 +7,7 @@
               bestehenden Prompt-Engine (assemblePrompt) und Seedream;
               Renders dauerhaft im Supabase-Speicher (Bucket renders)
    POST, Header x-katalog-secret: <KATALOG_SECRET>
-   Body: { aufgabe: 'marke'|'rendern', vorschlagId }
+   Body: { aufgabe: 'marke'|'rendern', vorschlagId } | { aufgabe: 'studio', ids }
    ══════════════════════════════════════════════════════════════════════ */
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { waitUntil } from '@vercel/functions';
@@ -183,16 +183,31 @@ function seitenverhaeltnis(w: number, h: number): string {
 }
 const liste = (x: any): string[] => Array.isArray(x) ? x.map(String) : x ? [String(x)] : [];
 
-async function einRender(sb: SupabaseClient, vorschlag: any, pos: any, richtung: any) {
-  const sharp = (await import('sharp')).default;
-  const { data: teil } = await sb.from('teile').select('*').eq('id', pos.teil_id).single();
-  const cap = pos.cap_id ? (await sb.from('teile').select('*').eq('id', pos.cap_id).single()).data : null;
-  const { data: look } = await sb.from('marken_looks').select('*').eq('id', richtung.marken_look_id).single();
-  if (!teil?.bild_pfad) throw new Error(`${teil?.name || 'Teil'} hat kein Studiofoto`);
-  const felder = { ...(look!.design_komponenten as any) };
-  if (felder.Design_Komponenten && typeof felder.Design_Komponenten !== 'string') felder.Design_Komponenten = JSON.stringify(felder.Design_Komponenten);
-  const code = { id: `look_${look!.id}`, fields: { ...felder, Name: felder.Name || look!.linie_name, Status: 'Aktiv' } };
+/* Code eines Looks (Kundenmarke) oder einer Design-Welt im Renderer-Format. */
+async function codeLaden(sb: SupabaseClient, art: 'welt' | 'look', id: string, hex?: string | null) {
+  let code: { id: string; fields: Record<string, any> }, name: string;
+  if (art === 'welt') {
+    const { data: w } = await sb.from('design_welten').select('*').eq('id', id).single();
+    if (!w) throw new Error('Design-Welt nicht gefunden');
+    const f = { ...(w.felder as any) }; delete f.Referenz_Bild;
+    code = { id: w.id, fields: { ...f, Status: 'Aktiv' } }; name = w.name;
+  } else {
+    const { data: look } = await sb.from('marken_looks').select('*').eq('id', id).single();
+    if (!look) throw new Error('Look nicht gefunden');
+    const f = { ...(look.design_komponenten as any) };
+    if (f.Design_Komponenten && typeof f.Design_Komponenten !== 'string') f.Design_Komponenten = JSON.stringify(f.Design_Komponenten);
+    code = { id: `look_${look.id}`, fields: { ...f, Name: f.Name || look.linie_name, Status: 'Aktiv' } }; name = look.linie_name;
+  }
+  // Farbvariante: gleiche Welt, anderer Körperton
+  if (hex) code.fields = { ...code.fields, Body_Hex: hex, Farbort: 'koerper', Body_Behandlung: code.fields.Body_Behandlung === 'transparent_klar' ? 'transparent_getoent' : (code.fields.Body_Behandlung || 'opak_recolor') };
+  return { code, name };
+}
 
+async function renderKern(sb: SupabaseClient, teilId: string, capId: string | null, code: { id: string; fields: Record<string, any> }, brief: string, basis: string) {
+  const sharp = (await import('sharp')).default;
+  const { data: teil } = await sb.from('teile').select('*').eq('id', teilId).single();
+  const cap = capId ? (await sb.from('teile').select('*').eq('id', capId).single()).data : null;
+  if (!teil?.bild_pfad) throw new Error(`${teil?.name || 'Teil'} hat kein Studiofoto`);
   const sysFields: Record<string, any> = {
     'Page Titel': teil.name, Material: liste(teil.material), Type: teil.typ || '', Closure: teil.verschluss_art || '',
     Deko_Faehigkeiten: teil.deko_faehigkeiten || [], Neck_Norm: liste(teil.hals), Form: [], Attribute: [],
@@ -200,9 +215,7 @@ async function einRender(sb: SupabaseClient, vorschlag: any, pos: any, richtung:
   };
   const capFields = cap ? { Cap_Name: cap.name, Closure_Type: cap.verschluss_art || '', Material: liste(cap.material), Einfaerbbar: cap.einfaerbbar === true } : null;
   const split = !!cap?.bild_pfad;
-  const fall = split ? 'C' : 'A';
-  const brief = [look!.linie_name, vorschlag.briefing_text].filter(Boolean).join(' — ');
-  const { fullPrompt, basePrompt, capPrompt } = await assemblePrompt(brief, fall, split, sysFields, capFields, code.id, cap?.id ?? null, code);
+  const { fullPrompt, basePrompt, capPrompt } = await assemblePrompt(brief, split ? 'C' : 'A', split, sysFields, capFields, code.id, cap?.id ?? null, code);
 
   const signiert = async (p: string) => (await sb.storage.from('teile').createSignedUrl(p, 900)).data?.signedUrl || '';
   const masse = async (p: string) => { const { data } = await sb.storage.from('teile').download(p); const b = Buffer.from(await data!.arrayBuffer()); const m = await sharp(b).metadata(); return seitenverhaeltnis(m.width || 0, m.height || 0); };
@@ -220,11 +233,33 @@ async function einRender(sb: SupabaseClient, vorschlag: any, pos: any, richtung:
     const u = await falEdit([bodyUrl], fullPrompt, bodyRatio);
     fertig = Buffer.from(await (await fetchT(u, { timeoutMs: 45000, label: 'render laden' })).arrayBuffer());
   }
-  const basis = `${vorschlag.firma_id}/${vorschlag.id}/${pos.id}_${richtung.id}`;
   const up = async (p: string, b: Buffer) => { const { error } = await sb.storage.from('renders').upload(p, b, { contentType: 'image/jpeg', upsert: true }); if (error) throw new Error(`Speicher: ${error.message}`); };
   await up(`${basis}.jpg`, fertig);
   if (capFertig) await up(`${basis}_cap.jpg`, capFertig);
   return { bild_pfad: `${basis}.jpg`, cap_pfad: capFertig ? `${basis}_cap.jpg` : null };
+}
+
+async function einRender(sb: SupabaseClient, vorschlag: any, pos: any, richtung: any) {
+  const { code, name } = richtung.design_welt_id ? await codeLaden(sb, 'welt', richtung.design_welt_id) : await codeLaden(sb, 'look', richtung.marken_look_id);
+  const brief = [name, vorschlag.briefing_text].filter(Boolean).join(' — ');
+  return renderKern(sb, pos.teil_id, pos.cap_id, code, brief, `${vorschlag.firma_id}/${vorschlag.id}/${pos.id}_${richtung.id}`);
+}
+
+/* Studio: einzelne Renders (Einzelteil, Farbvarianten, vertikale Linie). */
+async function studioRendern(sb: SupabaseClient, ids: string[]) {
+  for (let i = 0; i < ids.length; i += 3) {
+    await Promise.all(ids.slice(i, i + 3).map(async id => {
+      const { data: r } = await sb.from('studio_renders').select('*').eq('id', id).single();
+      if (!r || r.status === 'fertig') return;
+      try {
+        const { code, name } = await codeLaden(sb, r.welt_art, r.welt_id, r.hex);
+        const erg = await renderKern(sb, r.teil_id, r.cap_id, code, name, `${r.firma_id}/studio/${r.id}`);
+        await sb.from('studio_renders').update({ ...erg, status: 'fertig', log: null }).eq('id', id);
+      } catch (e: any) {
+        await sb.from('studio_renders').update({ status: 'fehler', log: String(e?.message || e).slice(0, 400) }).eq('id', id);
+      }
+    }));
+  }
 }
 
 async function rendern(sb: SupabaseClient, vorschlagId: string, selbst: string, start: number) {
@@ -261,9 +296,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const start = Date.now();
   if (req.method !== 'POST') return res.status(405).json({ error: 'nur POST' });
   if (!process.env.KATALOG_SECRET || req.headers['x-katalog-secret'] !== process.env.KATALOG_SECRET) return res.status(401).json({ error: 'nicht autorisiert' });
-  const { aufgabe, vorschlagId } = (req.body || {}) as { aufgabe?: string; vorschlagId?: string };
-  if (!vorschlagId) return res.status(400).json({ error: 'vorschlagId nötig' });
+  const { aufgabe, vorschlagId, ids } = (req.body || {}) as { aufgabe?: string; vorschlagId?: string; ids?: string[] };
   const sb = db();
+  if (aufgabe === 'studio') {
+    if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids nötig' });
+    waitUntil(studioRendern(sb, ids.slice(0, 12).map(String)));
+    return res.status(202).json({ ok: true });
+  }
+  if (!vorschlagId) return res.status(400).json({ error: 'vorschlagId nötig' });
   if (aufgabe === 'marke') {
     // Marke lesen dauert 20–60 s: synchron, damit das Studio direkt die Looks zeigen kann
     try { await markeLesen(sb, vorschlagId); return res.status(200).json({ ok: true }); }
