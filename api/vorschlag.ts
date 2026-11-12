@@ -12,7 +12,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { waitUntil } from '@vercel/functions';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { assemblePrompt, falEdit, montiereKomposit, aufWeiss, fetchT, FAL_RATIOS } from './render';
+import { assemblePrompt, falEdit, montiereKomposit, montageGeometrie, aufWeiss, fetchT, FAL_RATIOS } from './render';
 
 const ZEIT_MS = 200_000;
 const UA = { 'User-Agent': 'Mozilla/5.0 (compatible; ulba/1.0; +https://ulba.ai)' };
@@ -265,13 +265,14 @@ async function renderKern(sb: SupabaseClient, teilId: string, capId: string | nu
   const masse = async (p: string) => { const { data } = await sb.storage.from('teile').download(p); const b = Buffer.from(await data!.arrayBuffer()); const m = await sharp(b).metadata(); return seitenverhaeltnis(m.width || 0, m.height || 0); };
   const [bodyUrl, bodyRatio] = await Promise.all([signiert(teil.bild_pfad), masse(teil.bild_pfad)]);
 
-  let fertig: Buffer, capFertig: Buffer | null = null;
+  let fertig: Buffer, capFertig: Buffer | null = null, bodyRoh: Buffer | null = null;
+  const kal = split ? await kalibrierung(sb, teilId, capId!) : null;
   if (split) {
     const [capUrl, capRatio] = await Promise.all([signiert(cap!.bild_pfad), masse(cap!.bild_pfad)]);
     const [bUrl, cUrl] = await Promise.all([falEdit([bodyUrl], basePrompt, bodyRatio), falEdit([capUrl], capPrompt!, capRatio).catch(() => capUrl)]);
     const [bBuf, cBuf] = await Promise.all([bUrl, cUrl].map(async u => Buffer.from(await (await fetchT(u, { timeoutMs: 45000, label: 'render laden' })).arrayBuffer())));
-    capFertig = (await aufWeiss(cBuf)) || cBuf;
-    const mont = await montiereKomposit(bBuf, cBuf, `${cap!.verschluss_art || ''} ${cap!.name}`, { skala: null, versatzY: null, crop: null, cropBasiert: false }).catch(() => null);
+    capFertig = cBuf; bodyRoh = bBuf;
+    const mont = await montiereKomposit(bBuf, cBuf, `${cap!.verschluss_art || ''} ${cap!.name}`, kal || { skala: null, versatzY: null, crop: null, cropBasiert: false }).catch(() => null);
     fertig = mont?.jpeg || (await aufWeiss(bBuf)) || bBuf;
   } else {
     const u = await falEdit([bodyUrl], fullPrompt, bodyRatio);
@@ -280,13 +281,56 @@ async function renderKern(sb: SupabaseClient, teilId: string, capId: string | nu
   const up = async (p: string, b: Buffer) => { const { error } = await sb.storage.from('renders').upload(p, b, { contentType: 'image/jpeg', upsert: true }); if (error) throw new Error(`Speicher: ${error.message}`); };
   await up(`${basis}.jpg`, fertig);
   if (capFertig) await up(`${basis}_cap.jpg`, capFertig);
-  return { bild_pfad: `${basis}.jpg`, cap_pfad: capFertig ? `${basis}_cap.jpg` : null };
+  if (bodyRoh) await up(`${basis}_body.jpg`, bodyRoh);
+  return { bild_pfad: `${basis}.jpg`, cap_pfad: capFertig ? `${basis}_cap.jpg` : null, body_pfad: bodyRoh ? `${basis}_body.jpg` : null };
+}
+
+/* Gespeicherte Montage (Sitz des Verschlusses auf diesem Teil), crop-basiert wie im ersten ulba. */
+async function kalibrierung(sb: SupabaseClient, teilId: string, capId: string) {
+  const { data } = await sb.from('teil_verschluesse').select('montage_skala, montage_versatz_y').eq('teil_id', teilId).eq('verschluss_id', capId).maybeSingle();
+  return data?.montage_skala ? { skala: Number(data.montage_skala), versatzY: data.montage_versatz_y == null ? null : Number(data.montage_versatz_y), crop: null, cropBasiert: true } : null;
+}
+
+/* Geometrie für den Anpassen-Regler: Cap-Silhouette, Hals des Körpers, Auto- und gespeicherte Werte. */
+async function geometrie(sb: SupabaseClient, teilId: string, capId: string) {
+  const [{ data: t }, { data: c }] = await Promise.all([sb.from('teile').select('bild_pfad').eq('id', teilId).single(), sb.from('teile').select('name, verschluss_art, bild_pfad').eq('id', capId).single()]);
+  if (!t?.bild_pfad || !c?.bild_pfad) throw new Error('Körper- oder Verschlussbild fehlt.');
+  const laden = async (p: string) => Buffer.from(await (await sb.storage.from('teile').download(p)).data!.arrayBuffer());
+  const [b, k] = await Promise.all([laden(t.bild_pfad), laden(c.bild_pfad)]);
+  const g = await montageGeometrie(b, k, `${c.verschluss_art || ''} ${c.name}`);
+  if (!g) throw new Error('Silhouette nicht messbar.');
+  const kal = await kalibrierung(sb, teilId, capId);
+  return { cap: { w: g.cap.w, h: g.cap.h, cropBox: g.cap.cropBox, cropRatio: g.cap.cropRatio }, body: g.body, auto: g.auto,
+    gespeichert: kal ? { skala: kal.skala, versatzY: kal.versatzY, basis: 'crop' } : null };
+}
+
+/* Nach dem Speichern: fertige Designs dieses Paars neu montieren — ohne neuen KI-Render. */
+async function neuMontieren(sb: SupabaseClient, teilId: string, capId: string) {
+  const kal = await kalibrierung(sb, teilId, capId);
+  const { data: c } = await sb.from('teile').select('name, verschluss_art').eq('id', capId).single();
+  const { data: rs } = await sb.from('studio_renders').select('id, firma_id, bild_pfad, body_pfad, cap_pfad').eq('teil_id', teilId).eq('cap_id', capId).eq('status', 'fertig').not('body_pfad', 'is', null).not('cap_pfad', 'is', null).limit(40);
+  let n = 0;
+  for (const r of (rs || []) as any[]) {
+    try {
+      const laden = async (p: string) => Buffer.from(await (await sb.storage.from('renders').download(p)).data!.arrayBuffer());
+      const [b, k] = await Promise.all([laden(r.body_pfad), laden(r.cap_pfad)]);
+      const mont = await montiereKomposit(b, k, `${c?.verschluss_art || ''} ${c?.name || ''}`, kal || { skala: null, versatzY: null, crop: null, cropBasiert: false });
+      if (!mont) continue;
+      const neu = `${r.firma_id}/studio/${r.id}_m${Date.now().toString(36)}.jpg`;
+      const { error } = await sb.storage.from('renders').upload(neu, mont.jpeg, { contentType: 'image/jpeg', upsert: true });
+      if (error) continue;
+      await sb.from('studio_renders').update({ bild_pfad: neu }).eq('id', r.id);
+      n++;
+    } catch { /* nächstes */ }
+  }
+  return n;
 }
 
 async function einRender(sb: SupabaseClient, vorschlag: any, pos: any, richtung: any) {
   const { code, name } = richtung.design_welt_id ? await codeLaden(sb, 'welt', richtung.design_welt_id) : await codeLaden(sb, 'look', richtung.marken_look_id);
   const brief = [name, vorschlag.briefing_text].filter(Boolean).join(' — ');
-  return renderKern(sb, pos.teil_id, pos.cap_id, code, brief, `${vorschlag.firma_id}/${vorschlag.id}/${pos.id}_${richtung.id}`);
+  const { body_pfad, ...erg } = await renderKern(sb, pos.teil_id, pos.cap_id, code, brief, `${vorschlag.firma_id}/${vorschlag.id}/${pos.id}_${richtung.id}`);
+  return erg;
 }
 
 /* Studio: einzelne Renders (Einzelteil, Farbvarianten, vertikale Linie). */
@@ -342,6 +386,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!process.env.KATALOG_SECRET || req.headers['x-katalog-secret'] !== process.env.KATALOG_SECRET) return res.status(401).json({ error: 'nicht autorisiert' });
   const { aufgabe, vorschlagId, ids } = (req.body || {}) as { aufgabe?: string; vorschlagId?: string; ids?: string[] };
   const sb = db();
+  if (aufgabe === 'geometrie' || aufgabe === 'montieren') {
+    const { teilId, capId } = req.body as { teilId?: string; capId?: string };
+    if (!teilId || !capId) return res.status(400).json({ error: 'teilId und capId nötig' });
+    try {
+      if (aufgabe === 'geometrie') return res.status(200).json({ ok: true, ...(await geometrie(sb, teilId, capId)) });
+      return res.status(200).json({ ok: true, neu: await neuMontieren(sb, teilId, capId) });
+    } catch (e: any) { return res.status(500).json({ error: String(e?.message || e).slice(0, 300) }); }
+  }
   if (aufgabe === 'richtung') {
     const { text, bild } = req.body as { text?: string; bild?: string };
     if (!text && !bild) return res.status(400).json({ error: 'text oder bild nötig' });
