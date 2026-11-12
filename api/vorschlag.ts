@@ -86,13 +86,13 @@ function richtungSchema(anzahl: number, hinweis: string) {
   return `${hinweis}
 Erzeuge genau ${anzahl} ${anzahl > 1 ? 'klar unterscheidbare Spielarten derselben Idee: 1 «zurückhaltend», 2 «ausgewogen», 3 «mutig»' : 'Richtung'}.
 JSON: {"richtungen": [ {
- "name": "kurzer, sprechender Name auf Deutsch (2-4 Wörter), z.B. «K-Beauty Pastell» oder «Männer Schiefer matt»",
+ "name": "eigener, sprechender Name auf Deutsch (2-4 Wörter), der genau diese Spielart trifft",
  "beschreibung": "1 Satz auf Deutsch: Farben, Material, Finish, Etikett",
  "laut": Zahl 0-10 (0 ruhig, 10 laut), "farbtemp": Zahl 0-10 (0 klinisch-kühl, 10 warm-sinnlich),
  "felder": ${lookPrompt('', '', '').split('"felder": ')[1].split(' } } ] }')[0]}
  } ] }`;
 }
-const SPIELARTEN = ['zurückhaltend: leise, reduziert, sicher marktfähig', 'ausgewogen: klar erkennbar, die typische Umsetzung der Idee', 'mutig: auffällig, überraschend, zeigt das Potenzial der Idee voll'];
+const SPIELARTEN = ['ZURÜCKHALTEND — leise, reduziert, helle oder gedeckte Töne, kaum Deko, sicher marktfähig (laut 1-3)', 'AUSGEWOGEN — die typische, klar erkennbare Umsetzung der Idee mit eigenem Farbakzent (laut 4-6)', 'MUTIG — auffällig und überraschend: ungewöhnliche Farbe oder Veredelung, starkes Etikett, zeigt das volle Potenzial (laut 7-9)'];
 async function richtungErzeugen(text: string | null, bild: string | null) {
   // je Spielart ein eigener, kleiner Aufruf → parallel, schneller, robuster
   const auftraege = bild ? [null] : SPIELARTEN;
