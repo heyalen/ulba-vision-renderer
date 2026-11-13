@@ -272,7 +272,9 @@ async function renderKern(sb: SupabaseClient, teilId: string, capId: string | nu
     const [bUrl, cUrl] = await Promise.all([falEdit([bodyUrl], basePrompt, bodyRatio), falEdit([capUrl], capPrompt!, capRatio).catch(() => capUrl)]);
     const [bBuf, cBuf] = await Promise.all([bUrl, cUrl].map(async u => Buffer.from(await (await fetchT(u, { timeoutMs: 45000, label: 'render laden' })).arrayBuffer())));
     capFertig = cBuf; bodyRoh = bBuf;
-    const mont = await montiereKomposit(bBuf, cBuf, `${cap!.verschluss_art || ''} ${cap!.name}`, kal || { skala: null, versatzY: null, crop: null, cropBasiert: false }).catch(() => null);
+    const closure = `${cap!.verschluss_art || ''} ${cap!.name}`;
+    const studio = async () => Buffer.from(await (await sb.storage.from('teile').download(teil.bild_pfad)).data!.arrayBuffer());
+    const mont = await montiereKomposit(bBuf, cBuf, closure, await kalFuerMontage(kal, bBuf, cBuf, closure, studio)).catch(() => null);
     fertig = mont?.jpeg || (await aufWeiss(bBuf)) || bBuf;
   } else {
     const u = await falEdit([bodyUrl], fullPrompt, bodyRatio);
@@ -285,36 +287,83 @@ async function renderKern(sb: SupabaseClient, teilId: string, capId: string | nu
   return { bild_pfad: `${basis}.jpg`, cap_pfad: capFertig ? `${basis}_cap.jpg` : null, body_pfad: bodyRoh ? `${basis}_body.jpg` : null };
 }
 
-/* Gespeicherte Montage (Sitz des Verschlusses auf diesem Teil), crop-basiert wie im ersten ulba. */
-async function kalibrierung(sb: SupabaseClient, teilId: string, capId: string) {
-  const { data } = await sb.from('teil_verschluesse').select('montage_skala, montage_versatz_y').eq('teil_id', teilId).eq('verschluss_id', capId).maybeSingle();
-  return data?.montage_skala ? { skala: Number(data.montage_skala), versatzY: data.montage_versatz_y == null ? null : Number(data.montage_versatz_y), crop: null, cropBasiert: true } : null;
+/* Gespeicherte Montage (Sitz des Verschlusses). Basis 'sil' = relativ zur Körper-Silhouette
+   (Breite = Anteil der Silhouettenbreite, Versatz = Abstand zur Hals-Oberkante in Silhouettenbreiten),
+   damit derselbe Sitz auf dem Studiofoto UND auf jedem gerenderten Körper (anderer Bildausschnitt) stimmt.
+   Ohne Basis = Altwerte relativ zum Bildrahmen. */
+type KalRoh = { skala: number; versatzY: number | null; basis: 'sil' | 'bild' };
+async function kalibrierung(sb: SupabaseClient, teilId: string, capId: string): Promise<KalRoh | null> {
+  const { data } = await sb.from('teil_verschluesse').select('montage_skala, montage_versatz_y, montage_basis').eq('teil_id', teilId).eq('verschluss_id', capId).maybeSingle();
+  return data?.montage_skala ? { skala: Number(data.montage_skala), versatzY: data.montage_versatz_y == null ? null : Number(data.montage_versatz_y), basis: data.montage_basis === 'sil' ? 'sil' : 'bild' } : null;
+}
+type GeoBody = { w: number; h: number; neckTopPct: number; silhouetteBox: { x: number; y: number; w: number; h: number } };
+/* Silhouetten-Werte → Rahmenwerte für genau diesen Körper */
+function kalImRahmen(k: KalRoh, body: GeoBody) {
+  if (k.basis !== 'sil') return { skala: k.skala, versatzY: k.versatzY };
+  const silW = body.silhouetteBox.w / 100, nt = body.neckTopPct / 100;
+  return {
+    skala: Math.round(k.skala * silW * 10000) / 10000,
+    versatzY: k.versatzY == null ? null : Math.round((nt + (k.versatzY / 100) * silW * body.w / Math.max(1, body.h)) * 10000) / 100,
+  };
+}
+/* Altwerte (Rahmen des Studiofotos) → Silhouetten-Werte */
+function kalAufSil(k: KalRoh, studio: GeoBody): KalRoh {
+  const silW = studio.silhouetteBox.w / 100, nt = studio.neckTopPct / 100;
+  return { basis: 'sil', skala: k.skala / Math.max(0.01, silW),
+    versatzY: k.versatzY == null ? null : (k.versatzY / 100 - nt) * studio.h / Math.max(1, silW * studio.w) * 100 };
+}
+async function kalFuerMontage(kRoh: KalRoh | null, bodyBuf: Buffer, capBuf: Buffer, closure: string, studioBuf?: () => Promise<Buffer>) {
+  if (!kRoh) return { skala: null, versatzY: null, crop: null, cropBasiert: false };
+  let k = kRoh;
+  if (k.basis !== 'sil' && studioBuf) {
+    const gS = await montageGeometrie(await studioBuf(), capBuf, closure).catch(() => null);
+    if (gS) k = kalAufSil(k, gS.body as GeoBody);
+  }
+  if (k.basis !== 'sil') return { skala: k.skala, versatzY: k.versatzY, crop: null, cropBasiert: true };
+  const g = await montageGeometrie(bodyBuf, capBuf, closure);
+  if (!g) return { skala: null, versatzY: null, crop: null, cropBasiert: false };
+  return { ...kalImRahmen(k, g.body as GeoBody), crop: null, cropBasiert: true };
 }
 
-/* Geometrie für den Anpassen-Regler: Cap-Silhouette, Hals des Körpers, Auto- und gespeicherte Werte. */
-async function geometrie(sb: SupabaseClient, teilId: string, capId: string) {
+/* Geometrie für den Anpassen-Regler: Cap-Silhouette, Hals des Körpers, Auto- und gespeicherte Werte.
+   Mit renderId wird auf dem gerenderten Körper/Verschluss gemessen (Anpassen im fertigen Design). */
+async function geometrie(sb: SupabaseClient, teilId: string, capId: string, renderId?: string) {
   const [{ data: t }, { data: c }] = await Promise.all([sb.from('teile').select('bild_pfad').eq('id', teilId).single(), sb.from('teile').select('name, verschluss_art, bild_pfad').eq('id', capId).single()]);
   if (!t?.bild_pfad || !c?.bild_pfad) throw new Error('Körper- oder Verschlussbild fehlt.');
-  const laden = async (p: string) => Buffer.from(await (await sb.storage.from('teile').download(p)).data!.arrayBuffer());
-  const [b, k] = await Promise.all([laden(t.bild_pfad), laden(c.bild_pfad)]);
+  const laden = async (p: string, bucket = 'teile') => Buffer.from(await (await sb.storage.from(bucket).download(p)).data!.arrayBuffer());
+  let quelle: [Promise<Buffer>, Promise<Buffer>] = [laden(t.bild_pfad), laden(c.bild_pfad)];
+  if (renderId) {
+    const { data: r } = await sb.from('studio_renders').select('body_pfad, cap_pfad').eq('id', renderId).eq('teil_id', teilId).eq('cap_id', capId).maybeSingle();
+    if (r?.body_pfad && r?.cap_pfad) quelle = [laden(r.body_pfad, 'renders'), laden(r.cap_pfad, 'renders')];
+  }
+  const [b, k] = await Promise.all(quelle);
+  const studioB = renderId ? () => laden(t.bild_pfad) : undefined;
   const g = await montageGeometrie(b, k, `${c.verschluss_art || ''} ${c.name}`);
   if (!g) throw new Error('Silhouette nicht messbar.');
   const kal = await kalibrierung(sb, teilId, capId);
   return { cap: { w: g.cap.w, h: g.cap.h, cropBox: g.cap.cropBox, cropRatio: g.cap.cropRatio }, body: g.body, auto: g.auto,
-    gespeichert: kal ? { skala: kal.skala, versatzY: kal.versatzY, basis: 'crop' } : null };
+    gespeichert: kal ? await (async () => {
+      let k2 = kal;
+      if (k2.basis !== 'sil' && studioB) { const gS = await montageGeometrie(await studioB(), k, `${c.verschluss_art || ''} ${c.name}`).catch(() => null); if (gS) k2 = kalAufSil(k2, gS.body as GeoBody); }
+      return { ...kalImRahmen(k2, g.body as GeoBody), basis: k2.basis };
+    })() : null };
 }
 
 /* Nach dem Speichern: fertige Designs dieses Paars neu montieren — ohne neuen KI-Render. */
 async function neuMontieren(sb: SupabaseClient, teilId: string, capId: string) {
   const kal = await kalibrierung(sb, teilId, capId);
   const { data: c } = await sb.from('teile').select('name, verschluss_art').eq('id', capId).single();
+  const { data: tb } = await sb.from('teile').select('bild_pfad').eq('id', teilId).single();
+  let studioCache: Buffer | null = null;
+  const studio = tb?.bild_pfad ? async () => studioCache ??= Buffer.from(await (await sb.storage.from('teile').download(tb.bild_pfad)).data!.arrayBuffer()) : undefined;
   const { data: rs } = await sb.from('studio_renders').select('id, firma_id, bild_pfad, body_pfad, cap_pfad').eq('teil_id', teilId).eq('cap_id', capId).eq('status', 'fertig').not('body_pfad', 'is', null).not('cap_pfad', 'is', null).limit(40);
   let n = 0;
   for (const r of (rs || []) as any[]) {
     try {
       const laden = async (p: string) => Buffer.from(await (await sb.storage.from('renders').download(p)).data!.arrayBuffer());
       const [b, k] = await Promise.all([laden(r.body_pfad), laden(r.cap_pfad)]);
-      const mont = await montiereKomposit(b, k, `${c?.verschluss_art || ''} ${c?.name || ''}`, kal || { skala: null, versatzY: null, crop: null, cropBasiert: false });
+      const closure = `${c?.verschluss_art || ''} ${c?.name || ''}`;
+      const mont = await montiereKomposit(b, k, closure, await kalFuerMontage(kal, b, k, closure, studio));
       if (!mont) continue;
       const neu = `${r.firma_id}/studio/${r.id}_m${Date.now().toString(36)}.jpg`;
       const { error } = await sb.storage.from('renders').upload(neu, mont.jpeg, { contentType: 'image/jpeg', upsert: true });
@@ -387,10 +436,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { aufgabe, vorschlagId, ids } = (req.body || {}) as { aufgabe?: string; vorschlagId?: string; ids?: string[] };
   const sb = db();
   if (aufgabe === 'geometrie' || aufgabe === 'montieren') {
-    const { teilId, capId } = req.body as { teilId?: string; capId?: string };
+    const { teilId, capId, renderId } = req.body as { teilId?: string; capId?: string; renderId?: string };
     if (!teilId || !capId) return res.status(400).json({ error: 'teilId und capId nötig' });
     try {
-      if (aufgabe === 'geometrie') return res.status(200).json({ ok: true, ...(await geometrie(sb, teilId, capId)) });
+      if (aufgabe === 'geometrie') return res.status(200).json({ ok: true, ...(await geometrie(sb, teilId, capId, typeof renderId === 'string' && /^[0-9a-f-]{36}$/.test(renderId) ? renderId : undefined)) });
       return res.status(200).json({ ok: true, neu: await neuMontieren(sb, teilId, capId) });
     } catch (e: any) { return res.status(500).json({ error: String(e?.message || e).slice(0, 300) }); }
   }
