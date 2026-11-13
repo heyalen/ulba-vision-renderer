@@ -13,6 +13,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import { waitUntil } from '@vercel/functions';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { assemblePrompt, falEdit, montiereKomposit, montageGeometrie, aufWeiss, fetchT, FAL_RATIOS } from './render';
+import sharp from 'sharp';
 
 const ZEIT_MS = 200_000;
 const UA = { 'User-Agent': 'Mozilla/5.0 (compatible; ulba/1.0; +https://ulba.ai)' };
@@ -275,7 +276,7 @@ async function renderKern(sb: SupabaseClient, teilId: string, capId: string | nu
     const closure = `${cap!.verschluss_art || ''} ${cap!.name}`;
     const studio = async () => Buffer.from(await (await sb.storage.from('teile').download(teil.bild_pfad)).data!.arrayBuffer());
     const mont = await montiereKomposit(bBuf, cBuf, closure, await kalFuerMontage(kal, bBuf, cBuf, closure, studio)).catch(() => null);
-    fertig = mont?.jpeg || (await aufWeiss(bBuf)) || bBuf;
+    fertig = await rahmen(mont?.jpeg || (await aufWeiss(bBuf)) || bBuf);
   } else {
     const u = await falEdit([bodyUrl], fullPrompt, bodyRatio);
     fertig = Buffer.from(await (await fetchT(u, { timeoutMs: 45000, label: 'render laden' })).arrayBuffer());
@@ -285,6 +286,31 @@ async function renderKern(sb: SupabaseClient, teilId: string, capId: string | nu
   if (capFertig) await up(`${basis}_cap.jpg`, capFertig);
   if (bodyRoh) await up(`${basis}_body.jpg`, bodyRoh);
   return { bild_pfad: `${basis}.jpg`, cap_pfad: capFertig ? `${basis}_cap.jpg` : null, body_pfad: bodyRoh ? `${basis}_body.jpg` : null };
+}
+
+/* Fertiges Komposit einheitlich rahmen: fast-weissen Hintergrund (Rest-Kasten des Körper-Renders)
+   auf reines Weiss, auf den Inhalt zuschneiden, dann mittig auf 4:5 mit gleichem Rand oben/unten/seitlich.
+   So wird nie mehr ein Verschluss oder Boden am Bildrand abgeschnitten. */
+export async function rahmen(buf: Buffer): Promise<Buffer> {
+  try {
+    const { data, info } = await sharp(buf).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    let minX = info.width, minY = info.height, maxX = -1, maxY = -1;
+    for (let y = 0, i = 0; y < info.height; y++) {
+      for (let x = 0; x < info.width; x++, i += 3) {
+        const m = Math.min(data[i], data[i + 1], data[i + 2]);
+        if (m >= 238) { data[i] = data[i + 1] = data[i + 2] = 255; continue; }
+        if (m < 228) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+      }
+    }
+    if (maxX < 0) return buf;
+    const w = maxX - minX + 1, h = maxY - minY + 1;
+    const H = Math.round(Math.max(h * 1.16, w * 1.16 * 1.25)), W = Math.round(H * 0.8);
+    const top = Math.round((H - h) / 2), left = Math.round((W - w) / 2);
+    return await sharp(data, { raw: { width: info.width, height: info.height, channels: 3 } })
+      .extract({ left: minX, top: minY, width: w, height: h })
+      .extend({ top, bottom: H - h - top, left, right: W - w - left, background: { r: 255, g: 255, b: 255 } })
+      .jpeg({ quality: 92 }).toBuffer();
+  } catch { return buf; }
 }
 
 /* Gespeicherte Montage (Sitz des Verschlusses). Basis 'sil' = relativ zur Körper-Silhouette
@@ -366,7 +392,7 @@ async function neuMontieren(sb: SupabaseClient, teilId: string, capId: string) {
       const mont = await montiereKomposit(b, k, closure, await kalFuerMontage(kal, b, k, closure, studio));
       if (!mont) continue;
       const neu = `${r.firma_id}/studio/${r.id}_m${Date.now().toString(36)}.jpg`;
-      const { error } = await sb.storage.from('renders').upload(neu, mont.jpeg, { contentType: 'image/jpeg', upsert: true });
+      const { error } = await sb.storage.from('renders').upload(neu, await rahmen(mont.jpeg), { contentType: 'image/jpeg', upsert: true });
       if (error) continue;
       await sb.from('studio_renders').update({ bild_pfad: neu }).eq('id', r.id);
       n++;
