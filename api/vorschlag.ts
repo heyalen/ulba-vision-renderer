@@ -251,7 +251,8 @@ async function codeLaden(sb: SupabaseClient, art: 'welt' | 'look' | 'richtung', 
 async function renderKern(sb: SupabaseClient, teilId: string, capId: string | null, code: { id: string; fields: Record<string, any> }, brief: string, basis: string) {
   const sharp = (await import('sharp')).default;
   const { data: teil } = await sb.from('teile').select('*').eq('id', teilId).single();
-  const cap = capId ? (await sb.from('teile').select('*').eq('id', capId).single()).data : null;
+  // System = Behälter mit bereits montiertem Verschluss auf dem Foto → nie einen zweiten Verschluss daraufsetzen
+  const cap = capId && teil?.rolle !== 'system' ? (await sb.from('teile').select('*').eq('id', capId).single()).data : null;
   if (!teil?.bild_pfad) throw new Error(`${teil?.name || 'Teil'} hat kein Studiofoto`);
   const sysFields: Record<string, any> = {
     'Page Titel': teil.name, Material: liste(teil.material), Type: teil.typ || '', Closure: teil.verschluss_art || '',
